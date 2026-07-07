@@ -60,48 +60,51 @@ class EventsService(BoardRequestService):
     def thread_id(self) -> int:
         return self._auto.thread_id
 
-    async def handle_post(self, post: BoardPost) -> None:
+    async def parse_request(self, post: BoardPost) -> dict | None:
         location_text = self._extract_location(post.content)
         if not location_text:
-            return
+            return None
+        return self.request_data(post, {"location": location_text})
 
-        request_id = await self.create_request(post, payload={"location": location_text})
-
-        rate = await self.contribution_rate(post.author_mc_id)
-        if rate is not None and rate < self._auto.min_contribution_rate:
-            await self.requests.set_status(
-                request_id, "skipped",
-                f"contribution {rate:g}% below {self._auto.min_contribution_rate:g}%",
-            )
-            await self.reply(
-                f"@{post.author_name}: event request not accepted — your alliance "
-                f"contribution ({rate:g}%) is below {self._auto.min_contribution_rate:g}%."
-            )
-            return
-
-        try:
-            resolved = await self._resolve(location_text)
-        except GeocodeError as exc:
-            await self.requests.set_status(request_id, "failed", f"geocoding failed: {exc}")
-            await self.reply(
-                f"@{post.author_name}: I couldn't locate \"{location_text}\" ({exc})."
-            )
-            return
-
-        payload = {
-            "location": location_text,
-            "latitude": resolved.latitude,
-            "longitude": resolved.longitude,
-            "address": resolved.address,
-        }
-        await self._attempt_start(request_id, post.author_name, payload)
-
-    async def retry_waiting(self, request: aiosqlite.Row) -> None:
+    async def execute_request(self, request: aiosqlite.Row, *, announce: bool) -> None:
         payload = json.loads(request["payload"] or "{}")
+        requester = request["requester_name"]
+
         if not payload.get("latitude"):
-            return
+            # First attempt: gate on contribution rate, then geocode.
+            rate = await self.contribution_rate(request["requester_mc_id"])
+            if rate is not None and rate < self._auto.min_contribution_rate:
+                await self.requests.set_status(
+                    request["id"], "skipped",
+                    f"contribution {rate:g}% below {self._auto.min_contribution_rate:g}%",
+                )
+                await self.reply(
+                    f"@{requester}: event request not accepted — your alliance "
+                    f"contribution ({rate:g}%) is below "
+                    f"{self._auto.min_contribution_rate:g}%."
+                )
+                return
+            try:
+                resolved = await self._resolve(payload["location"])
+            except GeocodeError as exc:
+                await self.requests.set_status(
+                    request["id"], "failed", f"geocoding failed: {exc}"
+                )
+                await self.reply(
+                    f"@{requester}: I couldn't locate "
+                    f"\"{payload['location']}\" ({exc})."
+                )
+                return
+            payload.update(
+                {
+                    "latitude": resolved.latitude,
+                    "longitude": resolved.longitude,
+                    "address": resolved.address,
+                }
+            )
+
         await self._attempt_start(
-            request["id"], request["requester_name"], payload, announce=False
+            request["id"], requester, payload, announce=announce
         )
 
     # ------------------------------------------------------------------
@@ -197,6 +200,7 @@ class EventsService(BoardRequestService):
             )
             return
 
+        free_before = form.last_free_at  # for post-start verification
         body = build_event_payload(
             form, kind=REQUEST_KIND, latitude=lat, longitude=lng, address=address
         )
@@ -228,12 +232,51 @@ class EventsService(BoardRequestService):
             )
             return
 
+        # HTTP < 400 is NOT proof MissionChief created the mission (it can
+        # re-render an error page with 200). Verify: a free start consumes
+        # the free-mission cooldown, so the "Last free mission" time should
+        # advance. If it didn't, treat it as unconfirmed rather than
+        # announcing a mission that may not exist.
+        verified = await self._verify_started(new_path, lat, lng, free_before)
+        if verified is False:
+            await self.requests.set_status(
+                request_id, "failed",
+                "start submitted but MissionChief shows no new mission — "
+                "please verify manually",
+                payload=json.dumps(payload),
+            )
+            await self.reply(
+                f"@{requester}: I submitted the event but couldn't confirm it "
+                "started. An admin will check."
+            )
+            return
+
+        note = "" if verified else " (could not verify)"
         await self.requests.set_status(
             request_id, "done",
-            f"large scale mission started at {lat:.5f},{lng:.5f}",
+            f"large scale mission started at {lat:.5f},{lng:.5f}{note}",
             payload=json.dumps(payload),
         )
         await self.reply(
             f"🚨 Large scale alliance mission started for {requester} at "
             f"{address or 'the requested location'}!"
         )
+
+    async def _verify_started(
+        self, new_path: str, lat: float, lng: float, free_before: str | None
+    ) -> bool | None:
+        """Did the mission actually start? Returns True (confirmed via an
+        advanced free-mission cooldown), False (cooldown unchanged — not
+        started), or None (couldn't determine)."""
+        try:
+            check = parse_event_form(
+                await self.client.fetch_page(f"{new_path}?tlat={lat}&tlng={lng}")
+            )
+        except MissionChiefError:
+            return None
+        free_after = check.last_free_at
+        if free_after is None:
+            return None
+        if free_before is None:
+            return True  # a cooldown now exists where we couldn't read one before
+        return free_after > free_before

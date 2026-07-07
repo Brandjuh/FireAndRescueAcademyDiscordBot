@@ -671,32 +671,6 @@ class BoardRepo:
             row = await cur.fetchone()
         return row["m"]
 
-    async def record_posts(self, thread_id: int, posts: list[dict[str, Any]]) -> list[int]:
-        """Store posts; returns the post_ids that were new."""
-        now = utcnow_iso()
-        new_ids: list[int] = []
-        async with self._db.transaction() as conn:
-            for post in posts:
-                cur = await conn.execute(
-                    """
-                    INSERT OR IGNORE INTO board_posts
-                        (thread_id, post_id, author_name, author_mc_id,
-                         raw_timestamp, content, first_seen_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        thread_id,
-                        post["post_id"],
-                        post.get("author_name"),
-                        post.get("author_mc_id"),
-                        post.get("raw_timestamp"),
-                        post["content"],
-                        now,
-                    ),
-                )
-                if cur.rowcount > 0:
-                    new_ids.append(post["post_id"])
-        return new_ids
 
 
 class AutomationRepo:
@@ -724,6 +698,106 @@ class AutomationRepo:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (kind, thread_id, post_id, requester_name, requester_mc_id, payload, now, now),
+        )
+
+    async def record_post_and_request(
+        self,
+        thread_id: int,
+        post: dict[str, Any],
+        kind: str,
+        request: dict[str, Any] | None,
+    ) -> tuple[bool, int | None]:
+        """Atomically mark a board post seen AND, if it is a request,
+        create its automation_request in status 'pending'.
+
+        This is the fix for the stranding bug: the post's seen-state and
+        the request's existence commit together, so a crash can never
+        leave a post marked seen with its request lost. Returns
+        (post_was_new, request_id_or_None).
+        """
+        now = utcnow_iso()
+        async with self._db.transaction() as conn:
+            cur = await conn.execute(
+                """
+                INSERT OR IGNORE INTO board_posts
+                    (thread_id, post_id, author_name, author_mc_id,
+                     raw_timestamp, content, first_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    thread_id,
+                    post["post_id"],
+                    post.get("author_name"),
+                    post.get("author_mc_id"),
+                    post.get("raw_timestamp"),
+                    post["content"],
+                    now,
+                ),
+            )
+            if cur.rowcount == 0:
+                return (False, None)  # already recorded on a prior poll
+            if request is None:
+                return (True, None)
+            rcur = await conn.execute(
+                """
+                INSERT INTO automation_requests
+                    (kind, thread_id, post_id, requester_name, requester_mc_id,
+                     payload, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    kind,
+                    thread_id,
+                    post["post_id"],
+                    request.get("requester_name"),
+                    request.get("requester_mc_id"),
+                    request.get("payload"),
+                    now,
+                    now,
+                ),
+            )
+            return (True, rcur.lastrowid)
+
+    async def claimable(self, kind: str) -> list[aiosqlite.Row]:
+        """Requests ready to execute: fresh 'pending' ones plus 'waiting'
+        ones whose retry time is due."""
+        async with self._db.conn.execute(
+            """
+            SELECT * FROM automation_requests
+            WHERE kind = ? AND (
+                status = 'pending'
+                OR (status = 'waiting'
+                    AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+            )
+            ORDER BY id ASC
+            """,
+            (kind, utcnow_iso()),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def claim(self, request_id: int) -> bool:
+        """Move a request pending/waiting -> processing atomically.
+
+        Returns True only if this caller won the claim, so two concurrent
+        polls can never execute the same (non-idempotent) action twice.
+        """
+        n = await self._db.execute(
+            "UPDATE automation_requests SET status = 'processing', updated_at = ? "
+            "WHERE id = ? AND status IN ('pending', 'waiting')",
+            (utcnow_iso(), request_id),
+        )
+        return n == 1
+
+    async def sweep_processing(self) -> int:
+        """A request left 'processing' was interrupted mid-action by a
+        crash/restart. Re-running could repeat a non-idempotent
+        MissionChief action, so flag it for manual review instead of
+        silently losing it or blindly retrying. Call once at startup."""
+        return await self._db.execute(
+            "UPDATE automation_requests SET status = 'failed', "
+            "status_detail = 'interrupted mid-action — please verify on MissionChief', "
+            "posted_at = NULL, updated_at = ? WHERE status = 'processing'",
+            (utcnow_iso(),),
         )
 
     async def set_status(
@@ -755,19 +829,6 @@ class AutomationRepo:
             f"UPDATE automation_requests SET {', '.join(sets)} WHERE id = ?",
             tuple(params),
         )
-
-    async def waiting_requests(self, kind: str) -> list[aiosqlite.Row]:
-        """Waiting requests whose next attempt is due (or unset)."""
-        async with self._db.conn.execute(
-            """
-            SELECT * FROM automation_requests
-            WHERE kind = ? AND status = 'waiting'
-              AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-            ORDER BY id ASC
-            """,
-            (kind, utcnow_iso()),
-        ) as cur:
-            return list(await cur.fetchall())
 
     async def get(self, request_id: int) -> aiosqlite.Row | None:
         async with self._db.conn.execute(
@@ -802,7 +863,7 @@ class AutomationRepo:
     async def open_count(self) -> int:
         async with self._db.conn.execute(
             "SELECT COUNT(*) AS n FROM automation_requests "
-            "WHERE status IN ('pending', 'waiting')"
+            "WHERE status IN ('pending', 'waiting', 'processing')"
         ) as cur:
             row = await cur.fetchone()
         return row["n"]

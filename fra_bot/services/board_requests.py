@@ -1,20 +1,28 @@
 """Shared machinery for board-driven request automation.
 
 Each concrete service (trainings, buildings, events) polls one alliance
-board thread. This base class owns the safe parts:
+board thread. Processing is split into two phases so a crash can never
+strand a member's request:
 
-* baseline on first contact with a thread — history is stored but
-  never processed, so enabling automation can't replay old requests,
-* dedup through the ``board_posts`` table (survives restarts),
-* skipping our own posts and ``[FRA]``-marked bot posts,
-* retrying requests that are ``waiting`` (funds, cooldowns).
+1. **Detect** (``parse_request``, side-effect free): decide whether a
+   post is a request of our kind. The post's seen-state and the created
+   request row commit *together* in one transaction, so we can never
+   mark a post seen and then lose its request.
+2. **Execute** (``execute_request``): drive a request to a terminal (or
+   ``waiting``) state. Before executing, a request is atomically claimed
+   ``pending/waiting -> processing`` so two concurrent polls can't run
+   the same non-idempotent MissionChief action twice. A request left
+   ``processing`` (crash mid-action) is flagged for manual review at
+   startup rather than blindly retried.
+
+The base also handles: baseline on first contact (history recorded but
+not executed), dedup via ``board_posts``, and skipping our own posts.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 
 import aiosqlite
 
@@ -47,12 +55,21 @@ class BoardRequestService:
     def thread_id(self) -> int:
         raise NotImplementedError
 
-    async def handle_post(self, post: BoardPost) -> None:
-        """Process one new member post (create + execute a request)."""
+    async def parse_request(self, post: BoardPost) -> dict | None:
+        """Decide if *post* is a request of our kind. NO side effects.
+
+        Return a dict with keys ``payload`` (a dict), ``requester_name``
+        and ``requester_mc_id`` when it is a request, else ``None``.
+        """
         raise NotImplementedError
 
-    async def retry_waiting(self, request: aiosqlite.Row) -> None:
-        """Retry one 'waiting' request. Default: nothing."""
+    async def execute_request(self, request: aiosqlite.Row, *, announce: bool) -> None:
+        """Drive a claimed request to a terminal or 'waiting' state.
+
+        ``announce`` is True for the first attempt and False for retries,
+        so a still-waiting request isn't re-announced every poll.
+        """
+        raise NotImplementedError
 
     # -- shared plumbing -------------------------------------------------
 
@@ -68,80 +85,92 @@ class BoardRequestService:
             page, fresh_posts = await self.board.fetch_new_posts(
                 self.thread_id, last_seen
             )
-            new_ids = set(
-                await self.board_repo.record_posts(
-                    self.thread_id,
-                    [
-                        {
-                            "post_id": p.post_id,
-                            "author_name": p.author_name,
-                            "author_mc_id": p.author_mc_id,
-                            "raw_timestamp": p.raw_timestamp,
-                            "content": p.content,
-                        }
-                        for p in fresh_posts
-                    ],
-                )
-            )
 
-            handled = 0
+            detected = 0
+            for post in sorted(fresh_posts, key=lambda p: p.post_id):
+                is_own = (
+                    page.current_user_id is not None
+                    and post.author_mc_id == page.current_user_id
+                )
+                is_bot_reply = post.content.startswith(REPLY_MARKER)
+
+                request = None
+                if not baseline and not is_own and not is_bot_reply:
+                    request = await self.parse_request(post)
+
+                # Atomic: mark the post seen and (if it's a request)
+                # create its 'pending' row together.
+                _, request_id = await self.requests.record_post_and_request(
+                    self.thread_id,
+                    {
+                        "post_id": post.post_id,
+                        "author_name": post.author_name,
+                        "author_mc_id": post.author_mc_id,
+                        "raw_timestamp": post.raw_timestamp,
+                        "content": post.content,
+                    },
+                    self.kind,
+                    request,
+                )
+                if request_id is not None:
+                    detected += 1
+
             if baseline:
                 log.info(
                     "%s: thread %s baseline set (%d posts recorded, none processed)",
-                    self.kind, self.thread_id, len(new_ids),
+                    self.kind, self.thread_id, len(fresh_posts),
                 )
-            else:
-                for post in sorted(fresh_posts, key=lambda p: p.post_id):
-                    if post.post_id not in new_ids:
-                        continue  # already recorded/processed on an earlier poll
-                    if (
-                        page.current_user_id is not None
-                        and post.author_mc_id == page.current_user_id
-                    ):
-                        continue
-                    if post.content.startswith(REPLY_MARKER):
-                        continue
-                    handled += 1
-                    try:
-                        await self.handle_post(post)
-                    except MissionChiefError:
-                        raise
-                    except Exception:
-                        log.exception(
-                            "%s: unexpected error handling post %s",
-                            self.kind, post.post_id,
-                        )
 
-            for request in await self.requests.waiting_requests(self.kind):
-                try:
-                    await self.retry_waiting(request)
-                except MissionChiefError:
-                    raise
-                except Exception:
-                    log.exception(
-                        "%s: unexpected error retrying request %s",
-                        self.kind, request["id"],
-                    )
+            executed = await self._execute_ready()
 
             await self.runs.finish(
                 run_id, status="success", pages=1,
-                rows_parsed=len(fresh_posts), rows_new=handled,
+                rows_parsed=len(fresh_posts), rows_new=detected + executed,
             )
         except MissionChiefError as exc:
             await self.runs.finish(run_id, status="failed", message=str(exc))
             raise
 
-    async def create_request(
-        self, post: BoardPost, payload: dict[str, Any] | None = None
-    ) -> int:
-        return await self.requests.create(
-            kind=self.kind,
-            thread_id=self.thread_id,
-            post_id=post.post_id,
-            requester_name=post.author_name,
-            requester_mc_id=post.author_mc_id,
-            payload=json.dumps(payload) if payload else None,
-        )
+    async def _execute_ready(self) -> int:
+        """Execute all claimable (pending + due-waiting) requests."""
+        executed = 0
+        for request in await self.requests.claimable(self.kind):
+            if not await self.requests.claim(request["id"]):
+                continue  # another poll won the claim
+            first_attempt = request["status"] == "pending"
+            executed += 1
+            try:
+                await self.execute_request(request, announce=first_attempt)
+            except MissionChiefError as exc:
+                # The action may or may not have landed; put it back to
+                # 'waiting' so it retries next poll rather than sitting in
+                # 'processing' (which the startup sweep would fail).
+                await self.requests.set_status(
+                    request["id"], "waiting",
+                    f"MissionChief error ({exc}); will retry",
+                    bump_attempts=True, announce=False,
+                )
+            except Exception:
+                log.exception(
+                    "%s: unexpected error executing request %s",
+                    self.kind, request["id"],
+                )
+                await self.requests.set_status(
+                    request["id"], "failed", "internal error while processing",
+                )
+        return executed
+
+    # -- helpers for subclasses -----------------------------------------
+
+    @staticmethod
+    def request_data(
+        post: BoardPost, payload: dict
+    ) -> dict:
+        return {
+            "payload": json.dumps(payload),
+            "requester_name": post.author_name,
+            "requester_mc_id": post.author_mc_id,
+        }
 
     async def reply(self, content: str) -> None:
         """Post a board reply (skipped in dry-run / when disabled)."""

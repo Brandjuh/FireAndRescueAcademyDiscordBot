@@ -48,51 +48,62 @@ class TrainingsService(BoardRequestService):
     def thread_id(self) -> int:
         return self._auto.thread_id
 
-    async def handle_post(self, post: BoardPost) -> None:
+    async def parse_request(self, post: BoardPost) -> dict | None:
         matches, ambiguous = match_trainings(post.content)
         if not matches and not ambiguous:
-            return  # chatter, not a training request
-
-        request_id = await self.create_request(
+            return None  # chatter, not a training request
+        return self.request_data(
             post,
-            payload={
-                "trainings": [m.name for m in matches],
-                "ambiguous": [a.name for a in ambiguous],
+            {
+                "trainings": [
+                    {"discipline": m.discipline, "name": m.name, "duration": m.duration_days}
+                    for m in matches
+                ],
+                "ambiguous": [
+                    {"name": a.name, "disciplines": list(a.disciplines)} for a in ambiguous
+                ],
             },
         )
 
-        rate = await self.contribution_rate(post.author_mc_id)
-        if rate is not None and rate < self._auto.min_contribution_rate:
-            detail = (
-                f"contribution rate {rate:g}% is below the required "
-                f"{self._auto.min_contribution_rate:g}%"
-            )
-            await self.requests.set_status(request_id, "skipped", detail)
-            await self.reply(
-                f"@{post.author_name}: your training request was not processed — "
-                f"your alliance contribution is {rate:g}%, the minimum is "
-                f"{self._auto.min_contribution_rate:g}%."
-            )
-            return
-
-        await self._process(
-            request_id, post.author_name, matches, ambiguous, announce=True
-        )
-
-    async def retry_waiting(self, request) -> None:
+    async def execute_request(self, request, *, announce: bool) -> None:
         payload = json.loads(request["payload"] or "{}")
-        pending = payload.get("pending_trainings") or []
-        if not pending:
-            await self.requests.set_status(
-                request["id"], "failed", "nothing left to retry"
-            )
-            return
-        matches = [
-            TrainingMatch(discipline=t["discipline"], name=t["name"], duration_days=0)
-            for t in pending
-        ]
+
+        if "pending_trainings" in payload:
+            # Retry: only the trainings still marked busy.
+            matches = [
+                TrainingMatch(discipline=t["discipline"], name=t["name"], duration_days=0)
+                for t in payload["pending_trainings"]
+            ]
+            ambiguous: list[AmbiguousMatch] = []
+        else:
+            matches = [
+                TrainingMatch(
+                    discipline=t["discipline"], name=t["name"],
+                    duration_days=t.get("duration", 0),
+                )
+                for t in payload.get("trainings", [])
+            ]
+            ambiguous = [
+                AmbiguousMatch(name=a["name"], disciplines=tuple(a["disciplines"]))
+                for a in payload.get("ambiguous", [])
+            ]
+            # Gate on contribution rate on the first attempt only.
+            rate = await self.contribution_rate(request["requester_mc_id"])
+            if rate is not None and rate < self._auto.min_contribution_rate:
+                await self.requests.set_status(
+                    request["id"], "skipped",
+                    f"contribution rate {rate:g}% is below the required "
+                    f"{self._auto.min_contribution_rate:g}%",
+                )
+                await self.reply(
+                    f"@{request['requester_name']}: your training request was not "
+                    f"processed — your alliance contribution is {rate:g}%, the "
+                    f"minimum is {self._auto.min_contribution_rate:g}%."
+                )
+                return
+
         await self._process(
-            request["id"], request["requester_name"], matches, [], announce=False
+            request["id"], request["requester_name"], matches, ambiguous, announce=announce
         )
 
     async def _process(

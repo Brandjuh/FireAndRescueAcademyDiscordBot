@@ -84,66 +84,64 @@ class BuildingsService(BoardRequestService):
             )
         return cookies
 
-    async def handle_post(self, post: BoardPost) -> None:
+    async def parse_request(self, post: BoardPost) -> dict | None:
         links = find_maps_links(post.content)
         if not links:
-            return  # no location shared
+            return None  # no location shared
+        return self.request_data(post, {"link": links[0]})
 
-        request_id = await self.create_request(post, payload={"link": links[0]})
-
-        try:
-            location = await self._geocoder.resolve_maps_link(links[0])
-        except GeocodeError as exc:
-            await self.requests.set_status(request_id, "failed", f"geocoding failed: {exc}")
-            await self.reply(
-                f"@{post.author_name}: could not resolve your location link "
-                f"({exc}). Please share a Google Maps pin."
-            )
-            return
-
-        building_type = detect_building_type(location.address, None)
-        payload = {
-            "link": links[0],
-            "latitude": location.latitude,
-            "longitude": location.longitude,
-            "address": location.address,
-            "building_type": building_type,
-        }
-
-        if building_type is None:
-            await self.requests.set_status(
-                request_id, "failed",
-                "could not tell hospital from prison at this location",
-                payload=json.dumps(payload),
-            )
-            await self.reply(
-                f"@{post.author_name}: I resolved the location "
-                f"({location.address or 'unknown address'}) but couldn't tell whether "
-                "it's a hospital or a prison. Please mention which one."
-            )
-            return
-
-        await self._attempt_build(request_id, post.author_name, building_type, location, payload)
-
-    async def retry_waiting(self, request: aiosqlite.Row) -> None:
-        payload = json.loads(request["payload"] or "{}")
-        if not payload.get("latitude"):
-            return
+    async def execute_request(self, request: aiosqlite.Row, *, announce: bool) -> None:
         from ..geo.geocoder import GeocodeResult
 
-        location = GeocodeResult(
-            latitude=payload["latitude"],
-            longitude=payload["longitude"],
-            address=payload.get("address"),
-            source="cache",
-        )
+        payload = json.loads(request["payload"] or "{}")
+        requester = request["requester_name"]
+
+        if payload.get("latitude"):
+            # Coordinates resolved on a prior attempt — reuse them.
+            location = GeocodeResult(
+                latitude=payload["latitude"],
+                longitude=payload["longitude"],
+                address=payload.get("address"),
+                source="cache",
+            )
+            building_type = payload["building_type"]
+        else:
+            try:
+                location = await self._geocoder.resolve_maps_link(payload.get("link"))
+            except GeocodeError as exc:
+                await self.requests.set_status(
+                    request["id"], "failed", f"geocoding failed: {exc}"
+                )
+                await self.reply(
+                    f"@{requester}: could not resolve your location link "
+                    f"({exc}). Please share a Google Maps pin."
+                )
+                return
+
+            building_type = detect_building_type(location.address, None)
+            payload.update(
+                {
+                    "latitude": location.latitude,
+                    "longitude": location.longitude,
+                    "address": location.address,
+                    "building_type": building_type,
+                }
+            )
+            if building_type is None:
+                await self.requests.set_status(
+                    request["id"], "failed",
+                    "could not tell hospital from prison at this location",
+                    payload=json.dumps(payload),
+                )
+                await self.reply(
+                    f"@{requester}: I resolved the location "
+                    f"({location.address or 'unknown address'}) but couldn't tell "
+                    "whether it's a hospital or a prison. Please mention which one."
+                )
+                return
+
         await self._attempt_build(
-            request["id"],
-            request["requester_name"],
-            payload["building_type"],
-            location,
-            payload,
-            announce=False,  # retries are silent until state changes
+            request["id"], requester, building_type, location, payload, announce=announce
         )
 
     # ------------------------------------------------------------------
