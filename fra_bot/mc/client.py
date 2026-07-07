@@ -276,6 +276,72 @@ class MissionChiefClient:
 
         raise FetchError(target, message=f"Gave up on {target} after {_MAX_ATTEMPTS} attempts")
 
+    async def post_form(
+        self,
+        path: str,
+        data: dict[str, str] | list[tuple[str, str]],
+        *,
+        referer: str | None = None,
+        ajax: bool = False,
+        csrf_token: str | None = None,
+        allow_redirects: bool = True,
+    ) -> tuple[int, str, str]:
+        """POST a Rails form. Returns (status, html, final_url).
+
+        The CSRF ``authenticity_token`` must already be in ``data`` (it
+        comes from the page's form); ``ajax=True`` adds the XHR headers
+        MissionChief expects for its JS endpoints, with the token also
+        in the ``X-CSRF-Token`` header.
+
+        One attempt only, no transparent re-login: POSTs are actions,
+        and blindly repeating an action that may have landed is worse
+        than failing loudly. Callers decide whether to retry.
+        """
+        await self.start()
+        target = self.url(path)
+        await self._pacer.wait_turn()
+
+        headers: dict[str, str] = {}
+        if referer:
+            headers["Referer"] = referer
+        if ajax:
+            headers.update(
+                {
+                    "Accept": (
+                        "text/javascript, application/javascript, "
+                        "application/ecmascript, */*; q=0.01"
+                    ),
+                    "Origin": self._cfg.base_url,
+                    "X-Requested-With": "XMLHttpRequest",
+                }
+            )
+            if csrf_token:
+                headers["X-CSRF-Token"] = csrf_token
+
+        try:
+            async with self.session.post(
+                target, data=data, headers=headers, allow_redirects=allow_redirects
+            ) as resp:
+                status = resp.status
+                final_url = str(resp.url)
+                location = resp.headers.get("Location", "")
+                html = await resp.text()
+        except aiohttp.ClientError as exc:
+            self._pacer.record_failure()
+            raise FetchError(target, message=f"POST to {target} failed: {exc}") from exc
+
+        # Session expiry shows up either as a followed redirect ending on
+        # the sign-in page, or (with allow_redirects=False) as a 3xx whose
+        # Location points there. Both must be caught so a Devise
+        # re-render is never scored as a successful action.
+        if SIGN_IN_PATH in final_url or SIGN_IN_PATH in location:
+            raise SessionExpiredError(f"POST to {target} redirected to sign-in")
+        if status >= 400:
+            self._pacer.record_failure()
+        else:
+            self._pacer.record_success()
+        return status, html, final_url
+
     async def verify_session(self) -> bool:
         """Cheap health check: are we still logged in?"""
         try:

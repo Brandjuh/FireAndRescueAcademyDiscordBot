@@ -49,6 +49,37 @@ discord:
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
 
+automation:
+  # SAFETY FIRST: with dry_run on, the bot detects and reports board
+  # requests but performs NO actions on MissionChief (no trainings
+  # started, no buildings built, no events created). Set to false once
+  # you've watched a few dry runs and trust the detection.
+  dry_run: true
+  # Post confirmation replies in the board threads ([FRA] marker).
+  reply_to_board: true
+  training:
+    enabled: false            # master switch for training auto-start
+    thread_id: 5935           # /alliance_threads/<id> with training requests
+    interval: 5               # poll interval in minutes
+    min_contribution_rate: 5.0
+    # Preferred academy building ids per discipline (checked first).
+    preferred_academies:
+      fire: 4951748
+      police: 4951746
+  building:
+    enabled: false            # master switch for hospital/prison builds
+    thread_id: 6165
+    interval: 5
+    # Never build when alliance funds are below this (live check).
+    min_alliance_funds: 2000000
+    # Alliance tax to set on newly built buildings (0/10/20/30/40/50).
+    set_tax_percent: 20
+  events:
+    enabled: false            # master switch for event/mission starts
+    thread_id: 15293
+    interval: 5
+    min_contribution_rate: 5.0
+
 reports:
   # Reports are generated after the MissionChief daily reset (midnight
   # America/New_York). Delay a few minutes to let the site settle.

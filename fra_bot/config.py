@@ -69,6 +69,41 @@ class DiscordConfig:
 
 
 @dataclass(frozen=True)
+class TrainingAutomationConfig:
+    enabled: bool
+    thread_id: int
+    interval: int
+    min_contribution_rate: float
+    preferred_academies: dict[str, int]
+
+
+@dataclass(frozen=True)
+class BuildingAutomationConfig:
+    enabled: bool
+    thread_id: int
+    interval: int
+    min_alliance_funds: int
+    set_tax_percent: int
+
+
+@dataclass(frozen=True)
+class EventsAutomationConfig:
+    enabled: bool
+    thread_id: int
+    interval: int
+    min_contribution_rate: float
+
+
+@dataclass(frozen=True)
+class AutomationConfig:
+    dry_run: bool
+    reply_to_board: bool
+    training: TrainingAutomationConfig
+    building: BuildingAutomationConfig
+    events: EventsAutomationConfig
+
+
+@dataclass(frozen=True)
 class ReportsConfig:
     daily_delay_minutes: int
     timezone: str
@@ -88,6 +123,7 @@ class Config:
     missionchief: MissionChiefConfig
     sync: SyncConfig
     discord: DiscordConfig
+    automation: AutomationConfig
     reports: ReportsConfig
     logging: LoggingConfig
 
@@ -179,6 +215,44 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])
+            ),
+        ),
+        automation=AutomationConfig(
+            dry_run=bool(_get(raw, "automation", "dry_run", default=True)),
+            reply_to_board=bool(_get(raw, "automation", "reply_to_board", default=True)),
+            training=TrainingAutomationConfig(
+                enabled=bool(_get(raw, "automation", "training", "enabled", default=False)),
+                thread_id=int(_get(raw, "automation", "training", "thread_id", default=5935)),
+                interval=int(_get(raw, "automation", "training", "interval", default=5)),
+                min_contribution_rate=float(
+                    _get(raw, "automation", "training", "min_contribution_rate", default=5.0)
+                ),
+                preferred_academies={
+                    str(k): int(v)
+                    for k, v in (
+                        _get(raw, "automation", "training", "preferred_academies", default={})
+                        or {}
+                    ).items()
+                },
+            ),
+            building=BuildingAutomationConfig(
+                enabled=bool(_get(raw, "automation", "building", "enabled", default=False)),
+                thread_id=int(_get(raw, "automation", "building", "thread_id", default=6165)),
+                interval=int(_get(raw, "automation", "building", "interval", default=5)),
+                min_alliance_funds=int(
+                    _get(raw, "automation", "building", "min_alliance_funds", default=2_000_000)
+                ),
+                set_tax_percent=int(
+                    _get(raw, "automation", "building", "set_tax_percent", default=20)
+                ),
+            ),
+            events=EventsAutomationConfig(
+                enabled=bool(_get(raw, "automation", "events", "enabled", default=False)),
+                thread_id=int(_get(raw, "automation", "events", "thread_id", default=15293)),
+                interval=int(_get(raw, "automation", "events", "interval", default=5)),
+                min_contribution_rate=float(
+                    _get(raw, "automation", "events", "min_contribution_rate", default=5.0)
+                ),
             ),
         ),
         reports=ReportsConfig(

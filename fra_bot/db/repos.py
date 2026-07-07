@@ -28,16 +28,14 @@ class StateRepo:
         return row["value"] if row else default
 
     async def set(self, key: str, value: str) -> None:
-        await self._db.conn.execute(
+        await self._db.execute(
             "INSERT INTO scraper_state (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
-        await self._db.conn.commit()
 
     async def delete(self, key: str) -> None:
-        await self._db.conn.execute("DELETE FROM scraper_state WHERE key = ?", (key,))
-        await self._db.conn.commit()
+        await self._db.execute("DELETE FROM scraper_state WHERE key = ?", (key,))
 
 
 class RunsRepo:
@@ -47,12 +45,10 @@ class RunsRepo:
         self._db = db
 
     async def start(self, scraper: str) -> int:
-        cur = await self._db.conn.execute(
+        return await self._db.execute_returning_id(
             "INSERT INTO scrape_runs (scraper, started_at) VALUES (?, ?)",
             (scraper, utcnow_iso()),
         )
-        await self._db.conn.commit()
-        return cur.lastrowid
 
     async def finish(
         self,
@@ -64,12 +60,11 @@ class RunsRepo:
         rows_new: int = 0,
         message: str | None = None,
     ) -> None:
-        await self._db.conn.execute(
+        await self._db.execute(
             "UPDATE scrape_runs SET finished_at = ?, status = ?, pages = ?, "
             "rows_parsed = ?, rows_new = ?, message = ? WHERE id = ?",
             (utcnow_iso(), status, pages, rows_parsed, rows_new, message, run_id),
         )
-        await self._db.conn.commit()
 
     async def last_success(self, scraper: str) -> aiosqlite.Row | None:
         async with self._db.conn.execute(
@@ -117,9 +112,7 @@ class MembersRepo:
         previous = await self.active_members()
         seen_ids: set[int] = set()
 
-        conn = self._db.conn
-        try:
-            await conn.execute("BEGIN")
+        async with self._db.transaction() as conn:
             for entry in roster:
                 mc_id = entry["mc_user_id"]
                 seen_ids.add(mc_id)
@@ -252,10 +245,6 @@ class MembersRepo:
                         now,
                     ),
                 )
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
         return events
 
     async def pending_events(self, limit: int = 25) -> list[aiosqlite.Row]:
@@ -266,11 +255,10 @@ class MembersRepo:
             return list(await cur.fetchall())
 
     async def mark_event_posted(self, event_id: int) -> None:
-        await self._db.conn.execute(
+        await self._db.execute(
             "UPDATE member_events SET posted_at = ? WHERE id = ?",
             (utcnow_iso(), event_id),
         )
-        await self._db.conn.commit()
 
     async def credit_deltas(self, since_iso: str, until_iso: str) -> list[aiosqlite.Row]:
         """Earned-credit gains per member between two instants."""
@@ -300,9 +288,7 @@ class ApplicationsRepo:
         """
         now = utcnow_iso()
         new_ids: list[int] = []
-        conn = self._db.conn
-        try:
-            await conn.execute("BEGIN")
+        async with self._db.transaction() as conn:
             listed_ids = [app["application_id"] for app in applications]
             for app in applications:
                 cur = await conn.execute(
@@ -346,10 +332,6 @@ class ApplicationsRepo:
                     "UPDATE applications SET resolved_at = ? WHERE resolved_at IS NULL",
                     (now,),
                 )
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
         return new_ids
 
     async def pending_announcements(self) -> list[aiosqlite.Row]:
@@ -359,11 +341,10 @@ class ApplicationsRepo:
             return list(await cur.fetchall())
 
     async def mark_posted(self, application_id: int) -> None:
-        await self._db.conn.execute(
+        await self._db.execute(
             "UPDATE applications SET posted_at = ? WHERE application_id = ?",
             (utcnow_iso(), application_id),
         )
-        await self._db.conn.commit()
 
     async def open_count(self) -> int:
         async with self._db.conn.execute(
@@ -405,8 +386,7 @@ class LogsRepo:
                     counts[row["signature"]] = row["n"]
 
         batch_seen: dict[str, int] = {}
-        try:
-            await conn.execute("BEGIN")
+        async with self._db.transaction() as conn:
             for row in rows:
                 sig = row["signature"]
                 batch_seen[sig] = batch_seen.get(sig, 0) + 1
@@ -439,10 +419,6 @@ class LogsRepo:
                     ),
                 )
                 inserted += cur.rowcount if cur.rowcount > 0 else 0
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
         return inserted
 
     async def known_signatures(self, signatures: list[str]) -> set[str]:
@@ -469,20 +445,17 @@ class LogsRepo:
             return list(await cur.fetchall())
 
     async def mark_posted(self, log_id: int) -> None:
-        await self._db.conn.execute(
+        await self._db.execute(
             "UPDATE alliance_logs SET posted_at = ? WHERE id = ?",
             (utcnow_iso(), log_id),
         )
-        await self._db.conn.commit()
 
     async def mark_all_posted(self) -> int:
         """Used on first sync so history isn't spammed into Discord."""
-        cur = await self._db.conn.execute(
+        return await self._db.execute(
             "UPDATE alliance_logs SET posted_at = ? WHERE posted_at IS NULL",
             (utcnow_iso(),),
         )
-        await self._db.conn.commit()
-        return cur.rowcount
 
     async def count(self) -> int:
         async with self._db.conn.execute(
@@ -499,11 +472,10 @@ class TreasuryRepo:
     # -- balance -------------------------------------------------------
 
     async def record_balance(self, total_funds: int) -> None:
-        await self._db.conn.execute(
+        await self._db.execute(
             "INSERT INTO treasury_balance (total_funds, scraped_at) VALUES (?, ?)",
             (total_funds, utcnow_iso()),
         )
-        await self._db.conn.commit()
 
     async def latest_balance(self) -> aiosqlite.Row | None:
         async with self._db.conn.execute(
@@ -522,9 +494,7 @@ class TreasuryRepo:
         merge, even when stored within the same second.
         """
         now = dt.datetime.now(dt.timezone.utc).isoformat()
-        conn = self._db.conn
-        try:
-            await conn.execute("BEGIN")
+        async with self._db.transaction() as conn:
             for rank, entry in enumerate(entries, start=1):
                 await conn.execute(
                     """
@@ -542,10 +512,6 @@ class TreasuryRepo:
                         entry["amount"],
                     ),
                 )
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
 
     async def latest_snapshot(
         self, period: str, period_key: str
@@ -573,9 +539,7 @@ class TreasuryRepo:
         if not rows:
             return 0
         now = utcnow_iso()
-        conn = self._db.conn
-        try:
-            await conn.execute("BEGIN")
+        async with self._db.transaction() as conn:
             await conn.executemany(
                 """
                 INSERT INTO expenses
@@ -595,10 +559,6 @@ class TreasuryRepo:
                     for row in rows
                 ],
             )
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
         return len(rows)
 
     async def newest_signatures(self, limit: int = 60) -> list[str]:
@@ -621,26 +581,25 @@ class TreasuryRepo:
     async def staging_append(self, rows: list[dict[str, Any]]) -> int:
         if not rows:
             return 0
-        conn = self._db.conn
-        await conn.executemany(
-            """
-            INSERT INTO expenses_backfill_staging
-                (signature, raw_date, event_at, username, amount, description)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    row["signature"],
-                    row["raw_date"],
-                    row.get("event_at"),
-                    row["username"],
-                    row["amount"],
-                    row.get("description"),
-                )
-                for row in rows
-            ],
-        )
-        await conn.commit()
+        async with self._db.transaction() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO expenses_backfill_staging
+                    (signature, raw_date, event_at, username, amount, description)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["signature"],
+                        row["raw_date"],
+                        row.get("event_at"),
+                        row["username"],
+                        row["amount"],
+                        row.get("description"),
+                    )
+                    for row in rows
+                ],
+            )
         return len(rows)
 
     async def staging_tail_signatures(self, limit: int = 60) -> list[str]:
@@ -664,9 +623,7 @@ class TreasuryRepo:
         """Copy staging into expenses in chronological order, then clear.
         One transaction: either the whole ledger lands, or nothing."""
         now = utcnow_iso()
-        conn = self._db.conn
-        try:
-            await conn.execute("BEGIN")
+        async with self._db.transaction() as conn:
             cur = await conn.execute(
                 """
                 INSERT INTO expenses
@@ -678,11 +635,158 @@ class TreasuryRepo:
             )
             copied = cur.rowcount
             await conn.execute("DELETE FROM expenses_backfill_staging")
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
         return copied
+
+
+class BoardRepo:
+    """Seen board posts per thread; the source of poll dedup state."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def last_seen_post_id(self, thread_id: int) -> int | None:
+        async with self._db.conn.execute(
+            "SELECT MAX(post_id) AS m FROM board_posts WHERE thread_id = ?",
+            (thread_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return row["m"]
+
+    async def record_posts(self, thread_id: int, posts: list[dict[str, Any]]) -> list[int]:
+        """Store posts; returns the post_ids that were new."""
+        now = utcnow_iso()
+        new_ids: list[int] = []
+        async with self._db.transaction() as conn:
+            for post in posts:
+                cur = await conn.execute(
+                    """
+                    INSERT OR IGNORE INTO board_posts
+                        (thread_id, post_id, author_name, author_mc_id,
+                         raw_timestamp, content, first_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        thread_id,
+                        post["post_id"],
+                        post.get("author_name"),
+                        post.get("author_mc_id"),
+                        post.get("raw_timestamp"),
+                        post["content"],
+                        now,
+                    ),
+                )
+                if cur.rowcount > 0:
+                    new_ids.append(post["post_id"])
+        return new_ids
+
+
+class AutomationRepo:
+    """Member requests extracted from board posts + their outcomes."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def create(
+        self,
+        *,
+        kind: str,
+        thread_id: int,
+        post_id: int,
+        requester_name: str | None,
+        requester_mc_id: int | None,
+        payload: str | None = None,
+    ) -> int:
+        now = utcnow_iso()
+        return await self._db.execute_returning_id(
+            """
+            INSERT INTO automation_requests
+                (kind, thread_id, post_id, requester_name, requester_mc_id,
+                 payload, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (kind, thread_id, post_id, requester_name, requester_mc_id, payload, now, now),
+        )
+
+    async def set_status(
+        self,
+        request_id: int,
+        status: str,
+        detail: str | None = None,
+        *,
+        payload: str | None = None,
+        next_attempt_at: str | None = None,
+        bump_attempts: bool = False,
+        announce: bool = True,
+    ) -> None:
+        """Update a request. ``announce=True`` re-arms the Discord
+        notification; pass False for retries that don't change state."""
+        sets = ["status = ?", "status_detail = ?", "updated_at = ?"]
+        params: list[Any] = [status, detail, utcnow_iso()]
+        if announce:
+            sets.append("posted_at = NULL")
+        if payload is not None:
+            sets.append("payload = ?")
+            params.append(payload)
+        sets.append("next_attempt_at = ?")
+        params.append(next_attempt_at)
+        if bump_attempts:
+            sets.append("attempts = attempts + 1")
+        params.append(request_id)
+        await self._db.execute(
+            f"UPDATE automation_requests SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+
+    async def waiting_requests(self, kind: str) -> list[aiosqlite.Row]:
+        """Waiting requests whose next attempt is due (or unset)."""
+        async with self._db.conn.execute(
+            """
+            SELECT * FROM automation_requests
+            WHERE kind = ? AND status = 'waiting'
+              AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+            ORDER BY id ASC
+            """,
+            (kind, utcnow_iso()),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def get(self, request_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM automation_requests WHERE id = ?", (request_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def recent(self, limit: int = 15) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM automation_requests ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def pending_announcements(self, limit: int = 20) -> list[aiosqlite.Row]:
+        """Terminal-state requests not yet announced in Discord."""
+        async with self._db.conn.execute(
+            """
+            SELECT * FROM automation_requests
+            WHERE posted_at IS NULL AND status IN ('done', 'failed', 'skipped', 'waiting')
+            ORDER BY id ASC LIMIT ?
+            """,
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def mark_posted(self, request_id: int) -> None:
+        await self._db.execute(
+            "UPDATE automation_requests SET posted_at = ? WHERE id = ?",
+            (utcnow_iso(), request_id),
+        )
+
+    async def open_count(self) -> int:
+        async with self._db.conn.execute(
+            "SELECT COUNT(*) AS n FROM automation_requests "
+            "WHERE status IN ('pending', 'waiting')"
+        ) as cur:
+            row = await cur.fetchone()
+        return row["n"]
 
 
 def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:

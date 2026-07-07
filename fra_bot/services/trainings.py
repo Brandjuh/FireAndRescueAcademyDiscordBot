@@ -1,0 +1,317 @@
+"""Training auto-start from board requests (thread 5935).
+
+Flow per new post: match training names → check the requester's
+contribution rate against the roster → find an academy of the right
+discipline with a free classroom → POST the education form → VERIFY the
+class actually opened (the old bot's blind status<400 check produced
+false confirmations) → reply on the board.
+
+Board classes are always opened free (cost 0) with a 1-hour alliance
+signup window, mirroring the alliance's existing policy.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+
+from ..config import Config
+from ..db.database import Database
+from ..mc.client import MissionChiefClient
+from ..mc.errors import MissionChiefError
+from ..mc.parsers.academy import (
+    AcademyListing,
+    find_next_page_path,
+    parse_academy_page,
+    parse_alliance_buildings_page,
+)
+from ..mc.parsers.board import BoardPost
+from ..mc.trainings_catalog import AmbiguousMatch, TrainingMatch, match_trainings
+from .board_requests import BoardRequestService
+
+log = logging.getLogger(__name__)
+
+ALLIANCE_BUILDINGS_PATH = "/verband/gebauede"
+MAX_ACADEMY_LIST_PAGES = 10
+ALLIANCE_SIGNUP_SECONDS = 3600  # class stays open to the alliance for 1h
+BOARD_FEE = 0                   # board classes are free
+
+
+class TrainingsService(BoardRequestService):
+    kind = "training"
+
+    def __init__(self, cfg: Config, client: MissionChiefClient, db: Database) -> None:
+        super().__init__(cfg, client, db)
+        self._auto = cfg.automation.training
+
+    @property
+    def thread_id(self) -> int:
+        return self._auto.thread_id
+
+    async def handle_post(self, post: BoardPost) -> None:
+        matches, ambiguous = match_trainings(post.content)
+        if not matches and not ambiguous:
+            return  # chatter, not a training request
+
+        request_id = await self.create_request(
+            post,
+            payload={
+                "trainings": [m.name for m in matches],
+                "ambiguous": [a.name for a in ambiguous],
+            },
+        )
+
+        rate = await self.contribution_rate(post.author_mc_id)
+        if rate is not None and rate < self._auto.min_contribution_rate:
+            detail = (
+                f"contribution rate {rate:g}% is below the required "
+                f"{self._auto.min_contribution_rate:g}%"
+            )
+            await self.requests.set_status(request_id, "skipped", detail)
+            await self.reply(
+                f"@{post.author_name}: your training request was not processed — "
+                f"your alliance contribution is {rate:g}%, the minimum is "
+                f"{self._auto.min_contribution_rate:g}%."
+            )
+            return
+
+        await self._process(
+            request_id, post.author_name, matches, ambiguous, announce=True
+        )
+
+    async def retry_waiting(self, request) -> None:
+        payload = json.loads(request["payload"] or "{}")
+        pending = payload.get("pending_trainings") or []
+        if not pending:
+            await self.requests.set_status(
+                request["id"], "failed", "nothing left to retry"
+            )
+            return
+        matches = [
+            TrainingMatch(discipline=t["discipline"], name=t["name"], duration_days=0)
+            for t in pending
+        ]
+        await self._process(
+            request["id"], request["requester_name"], matches, [], announce=False
+        )
+
+    async def _process(
+        self,
+        request_id: int,
+        requester: str | None,
+        matches: list[TrainingMatch],
+        ambiguous: list[AmbiguousMatch],
+        *,
+        announce: bool,
+    ) -> None:
+        lines: list[str] = []
+        results: list[dict] = []
+        opened_any = False
+        pending: list[dict] = []  # transient failures worth retrying
+
+        for ambiguity in ambiguous:
+            lines.append(self._ambiguity_help(ambiguity))
+
+        for match in matches:
+            outcome = await self._open_training(match)
+            results.append({"training": match.name, "outcome": outcome["status"]})
+            if outcome["status"] == "opened":
+                opened_any = True
+                lines.append(
+                    f"✅ {match.name}: class opened in academy "
+                    f"{outcome['building_id']} — "
+                    f"https://www.missionchief.com/buildings/{outcome['building_id']} "
+                    f"(free, join within 1 hour)"
+                )
+            elif outcome["status"] == "uncertain":
+                opened_any = True
+                lines.append(
+                    f"⚠️ {match.name}: submitted to academy "
+                    f"{outcome['building_id']} but I couldn't confirm it opened — "
+                    "please double-check."
+                )
+            elif outcome["status"] == "busy":
+                pending.append(
+                    {"discipline": match.discipline, "name": match.name}
+                )
+                lines.append(f"⏳ {match.name}: {outcome['reason']} (will retry)")
+            else:  # failed
+                lines.append(f"❌ {match.name}: {outcome['reason']}")
+
+        if pending:
+            status = "waiting"
+            detail = "retrying: " + ", ".join(p["name"] for p in pending)
+        elif opened_any:
+            status = "done"
+            detail = "; ".join(f"{r['training']}: {r['outcome']}" for r in results)
+        elif matches:
+            status = "failed"
+            detail = "; ".join(f"{r['training']}: {r['outcome']}" for r in results)
+        else:
+            status = "skipped"
+            detail = "only ambiguous names found"
+
+        await self.requests.set_status(
+            request_id,
+            status,
+            detail,
+            payload=json.dumps(
+                {"results": results, "pending_trainings": pending}
+            ),
+            announce=announce or status in ("done", "failed"),
+        )
+
+        if lines and (announce or opened_any):
+            await self.reply(
+                f"Training request from {requester}:\n" + "\n".join(lines)
+            )
+
+    # ------------------------------------------------------------------
+
+    def _ambiguity_help(self, ambiguity: AmbiguousMatch) -> str:
+        options = ", ".join(sorted(ambiguity.disciplines))
+        return (
+            f"⚠️ \"{ambiguity.name}\" exists in multiple academy types "
+            f"({options}). Please repost with a prefix, e.g. "
+            f"\"Fire - {ambiguity.name}\" or \"Water Rescue - {ambiguity.name}\"."
+        )
+
+    async def _open_training(self, match: TrainingMatch) -> dict:
+        """Try to open one class.
+
+        Returns a dict with ``status`` one of:
+          * ``opened``    — class confirmed open (building_id set)
+          * ``uncertain`` — POST accepted but couldn't verify (building_id set)
+          * ``busy``      — transient (no free classroom / list failed); retry
+          * ``failed``    — permanent (course not offered here)
+        """
+        try:
+            academies = await self._find_academies(match.discipline)
+        except MissionChiefError as exc:
+            return {"status": "busy", "reason": f"could not list academies ({exc})"}
+        if not academies:
+            return {
+                "status": "busy",
+                "reason": f"no available {match.discipline} academy (classrooms busy?)",
+            }
+
+        last_reason = "no suitable academy"
+        busy = False
+        for academy in academies:
+            path = f"/buildings/{academy.building_id}"
+            try:
+                page = parse_academy_page(await self.client.fetch_page(path))
+            except MissionChiefError as exc:
+                last_reason = f"could not load academy {academy.building_id} ({exc})"
+                busy = True
+                continue
+
+            if page.action is None or page.authenticity_token is None:
+                last_reason = f"academy {academy.building_id} has no education form"
+                continue
+            course_value = page.find_course_value(match.name)
+            if course_value is None:
+                last_reason = (
+                    f"course '{match.name}' not offered by academy {academy.building_id}"
+                )
+                continue
+            if page.costs and BOARD_FEE not in page.costs:
+                last_reason = f"academy {academy.building_id} does not allow a free class"
+                continue
+            if page.available_rooms < 1:
+                last_reason = f"academy {academy.building_id} has no free classroom"
+                busy = True
+                continue
+
+            if self.dry_run:
+                log.info(
+                    "DRY-RUN: would open '%s' in academy %s (form %s)",
+                    match.name, academy.building_id, page.action,
+                )
+                return {
+                    "status": "opened",
+                    "building_id": academy.building_id,
+                    "dry_run": True,
+                }
+
+            rooms_before = page.available_rooms
+            try:
+                status, _, _ = await self.client.post_form(
+                    page.action,
+                    {
+                        "utf8": "✓",
+                        "authenticity_token": page.authenticity_token,
+                        "building_rooms_use": "1",
+                        "education_select": course_value,
+                        "alliance[duration]": str(ALLIANCE_SIGNUP_SECONDS),
+                        "alliance[cost]": str(BOARD_FEE),
+                        "commit": "Educate",
+                    },
+                    referer=self.client.url(path),
+                )
+            except MissionChiefError as exc:
+                # A submit error may or may not have landed — do NOT try
+                # another academy (that risks a double open). Report
+                # uncertain so an admin verifies.
+                log.warning("Training POST to %s errored: %s", academy.building_id, exc)
+                return {
+                    "status": "uncertain",
+                    "building_id": academy.building_id,
+                    "reason": str(exc),
+                }
+            if status >= 400:
+                last_reason = f"MissionChief rejected the request (HTTP {status})"
+                continue
+
+            # The POST returned <400, so it likely landed. Verify by
+            # re-reading the classroom count; but never POST elsewhere
+            # after this point — that would double-open on a false
+            # negative. Verification only downgrades to 'uncertain'.
+            try:
+                after = parse_academy_page(await self.client.fetch_page(path))
+                if after.available_rooms >= rooms_before and after.action is not None:
+                    return {
+                        "status": "uncertain",
+                        "building_id": academy.building_id,
+                        "reason": "classroom count did not drop",
+                    }
+            except MissionChiefError:
+                return {
+                    "status": "uncertain",
+                    "building_id": academy.building_id,
+                    "reason": "could not verify",
+                }
+            return {"status": "opened", "building_id": academy.building_id}
+
+        return {"status": "busy" if busy else "failed", "reason": last_reason}
+
+    async def _find_academies(self, discipline: str) -> list[AcademyListing]:
+        """Alliance academies for a discipline, preferred building first."""
+        listings: list[AcademyListing] = []
+        path = ALLIANCE_BUILDINGS_PATH
+        for _ in range(MAX_ACADEMY_LIST_PAGES):
+            html = await self.client.fetch_page(path)
+            listings.extend(parse_alliance_buildings_page(html))
+            next_path = find_next_page_path(html)
+            if not next_path:
+                break
+            path = next_path
+
+        candidates = [
+            listing
+            for listing in listings
+            if listing.discipline == discipline and listing.has_start_button
+        ]
+        preferred_id = self._auto.preferred_academies.get(discipline)
+        candidates.sort(key=lambda a: 0 if a.building_id == preferred_id else 1)
+        if not candidates and preferred_id:
+            # List scrape failed us; still try the known building.
+            candidates = [
+                AcademyListing(
+                    building_id=preferred_id,
+                    name=f"Preferred {discipline} academy",
+                    discipline=discipline,
+                    has_start_button=True,
+                )
+            ]
+        return candidates
