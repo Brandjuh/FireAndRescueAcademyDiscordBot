@@ -7,6 +7,8 @@ cog warns when the two drift apart (a real bug in the previous bot).
 
 from __future__ import annotations
 
+import re
+
 import discord
 
 _GREEN = discord.Colour.green()
@@ -88,3 +90,30 @@ def affected_url(affected_type: str | None, affected_mc_id: int | None) -> str |
         return None
     path = _AFFECTED_URL_PATHS.get(affected_type or "user", "profile")
     return f"https://www.missionchief.com/{path}/{affected_mc_id}"
+
+
+_COURSE_ACTIONS = {"created_course", "course_completed"}
+_COURSE_PAREN_RE = re.compile(r"\(([^)]+)\)\s*$")
+_COURSE_PREFIX_RE = re.compile(
+    r"^\s*(created\s+an?\s+course|created\s+course|course\s+completed|"
+    r"completed\s+an?\s+course)\b[\s:.\-]*",
+    re.IGNORECASE,
+)
+
+
+def format_log_description(action_key: str, description: str) -> str:
+    """Tidy a log line's description for display.
+
+    Course logs read "Created a course (Technical Rescue Training)" — but
+    the embed title already says "Course created", so we show just the
+    course name ("Technical Rescue Training"). Falls back to the original
+    text when no course name can be isolated.
+    """
+    if action_key in _COURSE_ACTIONS and description:
+        match = _COURSE_PAREN_RE.search(description)
+        if match:
+            return match.group(1).strip()
+        stripped = _COURSE_PREFIX_RE.sub("", description).strip()
+        if stripped:
+            return stripped
+    return description

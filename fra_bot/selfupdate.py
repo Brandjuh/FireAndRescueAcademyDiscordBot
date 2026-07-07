@@ -35,7 +35,12 @@ def _marker_path(db_path: Path) -> Path:
 
 
 def write_restart_marker(
-    db_path: Path, *, channel_id: int, old_rev: str, new_rev: str
+    db_path: Path,
+    *,
+    channel_id: int,
+    old_rev: str,
+    new_rev: str,
+    reason: str = "update",
 ) -> None:
     path = _marker_path(db_path)
     try:
@@ -46,6 +51,7 @@ def write_restart_marker(
                     "channel_id": int(channel_id),
                     "old_rev": old_rev,
                     "new_rev": new_rev,
+                    "reason": reason,
                     "written_at": time.time(),
                 }
             ),
@@ -53,6 +59,11 @@ def write_restart_marker(
         )
     except OSError as exc:
         log.warning("Could not write restart marker: %s", exc)
+
+
+async def current_rev() -> str:
+    """Short HEAD revision of the running checkout (or 'unknown')."""
+    return await _git_rev(REPO_ROOT)
 
 
 def read_and_clear_restart_marker(db_path: Path) -> dict | None:

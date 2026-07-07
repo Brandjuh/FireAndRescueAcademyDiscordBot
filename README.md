@@ -200,6 +200,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra automation` | Board automation switches, dry-run state, recent requests |
 | `!fra sync <trainings\|buildings\|events>` | Poll a board thread now |
 | `!fra update` | Pull the latest code, install deps and restart the bot |
+| `!fra restart` | Restart the bot to reload `config.yaml` / `.env` (no code update) |
 
 ### Updating from Discord
 
