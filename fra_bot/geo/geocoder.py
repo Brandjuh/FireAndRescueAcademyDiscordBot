@@ -48,18 +48,42 @@ class GeocodeResult:
 
 
 class Geocoder:
-    """Shared geocoder with its own polite pacing and DB-backed cache."""
+    """Shared geocoder with its own polite pacing and DB-backed cache.
 
-    def __init__(self, state: StateRepo) -> None:
+    Talks to any Nominatim-compatible endpoint. With no ``api_key`` it uses
+    free OSM Nominatim; set ``base_url`` + ``api_key`` (e.g. maps.co,
+    LocationIQ) to use your own quota. Google Maps links never need a key —
+    coordinates are read straight from the expanded URL.
+    """
+
+    def __init__(
+        self,
+        state: StateRepo,
+        *,
+        base_url: str = NOMINATIM_BASE,
+        api_key: str = "",
+        api_key_param: str = "api_key",
+        contact_email: str = "",
+        min_interval: float = _MIN_INTERVAL,
+    ) -> None:
         self._state = state
         self._lock = asyncio.Lock()
         self._last_request = 0.0
         self._session: aiohttp.ClientSession | None = None
+        self._base_url = (base_url or NOMINATIM_BASE).rstrip("/")
+        self._api_key = api_key or ""
+        self._api_key_param = api_key_param or "api_key"
+        self._min_interval = min_interval
+        self._user_agent = (
+            f"FireAndRescueAcademyBot/1.0 ({contact_email})"
+            if contact_email
+            else _USER_AGENT
+        )
 
     async def start(self) -> None:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
-                headers={"User-Agent": _USER_AGENT},
+                headers={"User-Agent": self._user_agent},
                 timeout=aiohttp.ClientTimeout(total=30),
             )
 
@@ -145,14 +169,21 @@ class Geocoder:
         )
         return address
 
+    def _geocode_url(self, path: str, params: dict[str, str]) -> str:
+        """Build the request URL, injecting the API key when configured."""
+        query = dict(params)
+        if self._api_key:
+            query[self._api_key_param] = self._api_key
+        return f"{self._base_url}{path}?{urllib.parse.urlencode(query)}"
+
     async def _nominatim(self, path: str, params: dict[str, str]):
         assert self._session is not None
         async with self._lock:
-            wait = self._last_request + _MIN_INTERVAL - time.monotonic()
+            wait = self._last_request + self._min_interval - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last_request = time.monotonic()
-        url = f"{NOMINATIM_BASE}{path}?{urllib.parse.urlencode(params)}"
+        url = self._geocode_url(path, params)
         try:
             async with self._session.get(url) as resp:
                 if resp.status != 200:

@@ -161,6 +161,24 @@ journalctl -u fra-bot -f
    `member_events`, `alliance_logs`, `reports`). Set a channel to `0` to
    disable that output.
 
+### Geocoding (optional API key)
+
+Address/place lookups default to free OSM Nominatim — no key needed, and
+Google Maps links never need one (coordinates are read from the URL). To
+use your own quota, point `geocoding.base_url` at a Nominatim-compatible
+provider and put the key in `.env` as `GEOCODER_API_KEY`:
+
+```yaml
+# config.yaml
+geocoding:
+  base_url: https://geocode.maps.co     # maps.co
+  api_key_param: api_key                # 'key' for LocationIQ
+```
+```bash
+# .env
+GEOCODER_API_KEY=your-key
+```
+
 ### First start behaviour
 
 * The first members sync stores the roster silently (no 47 pages of

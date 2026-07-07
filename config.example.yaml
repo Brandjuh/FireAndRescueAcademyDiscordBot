@@ -93,6 +93,22 @@ automation:
     # Board requests are self-serve; skip members below this contribution.
     min_contribution_rate: 5.0
 
+geocoding:
+  # Address/place -> coordinates. Defaults to free OSM Nominatim (no key).
+  # Google Maps links never need a key (coords are read from the URL); this
+  # only affects looking up a plain address/place name.
+  #
+  # To use your own quota, point base_url at a Nominatim-compatible provider
+  # and put the KEY in .env as GEOCODER_API_KEY (never here). Examples:
+  #   maps.co:    base_url: https://geocode.maps.co   api_key_param: api_key
+  #   LocationIQ: base_url: https://us1.locationiq.com/v1   api_key_param: key
+  base_url: https://nominatim.openstreetmap.org
+  api_key_param: api_key
+  # A real contact email is polite (and Nominatim's usage policy asks for it).
+  contact_email: ""
+  # Minimum seconds between geocode requests (free tiers are ~1 req/s).
+  min_interval_seconds: 1.1
+
 reports:
   # Reports are generated after the MissionChief daily reset (midnight
   # America/New_York). Delay a few minutes to let the site settle.

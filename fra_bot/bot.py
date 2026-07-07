@@ -46,7 +46,14 @@ class FRABot(commands.Bot):
         )
         self.mc = MissionChiefClient(cfg.missionchief, self.pacer)
         self.scheduler = Scheduler()
-        self.geocoder = Geocoder(StateRepo(self.db))
+        self.geocoder = Geocoder(
+            StateRepo(self.db),
+            base_url=cfg.geocoding.base_url,
+            api_key=cfg.geocoding.api_key,
+            api_key_param=cfg.geocoding.api_key_param,
+            contact_email=cfg.geocoding.contact_email,
+            min_interval=cfg.geocoding.min_interval,
+        )
         self.presence = PresenceManager(self)
 
         from .reporting import ReportRegistry
