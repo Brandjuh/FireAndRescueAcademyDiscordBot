@@ -79,6 +79,19 @@ automation:
     thread_id: 15293
     interval: 5
     min_contribution_rate: 5.0
+  mission:
+    # Custom "Own mission": members supply ALL parameters (type, size,
+    # amount, location) via the Discord panel / /mission slash command, or
+    # a structured board post. Queued and started at the next FREE mission
+    # slot. Starts still honour the global dry_run switch above.
+    enabled: false            # master switch: runs the queue scheduler
+    board_enabled: false      # also parse structured mission posts from the board
+    thread_id: 15293          # board thread scanned when board_enabled
+    interval: 5               # poll interval in minutes
+    # Channel where `!fra missionpanel` posts the request panel.
+    panel_channel_id: 1425234755842080890
+    # Board requests are self-serve; skip members below this contribution.
+    min_contribution_rate: 5.0
 
 reports:
   # Reports are generated after the MissionChief daily reset (midnight

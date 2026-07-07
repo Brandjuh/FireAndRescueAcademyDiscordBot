@@ -95,12 +95,31 @@ class EventsAutomationConfig:
 
 
 @dataclass(frozen=True)
+class MissionAutomationConfig:
+    """Custom "Own mission" scheduling.
+
+    ``enabled`` gates the queue scheduler (starting missions); the Discord
+    panel/slash command can still enqueue requests when it is off, they
+    simply wait. ``board_enabled`` gates parsing structured mission posts
+    from the board thread. Both are off by default, and starts still honour
+    the global ``dry_run`` switch.
+    """
+    enabled: bool
+    board_enabled: bool
+    thread_id: int
+    interval: int
+    panel_channel_id: int
+    min_contribution_rate: float
+
+
+@dataclass(frozen=True)
 class AutomationConfig:
     dry_run: bool
     reply_to_board: bool
     training: TrainingAutomationConfig
     building: BuildingAutomationConfig
     events: EventsAutomationConfig
+    mission: MissionAutomationConfig
 
 
 @dataclass(frozen=True)
@@ -263,6 +282,20 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 interval=int(_get(raw, "automation", "events", "interval", default=5)),
                 min_contribution_rate=float(
                     _get(raw, "automation", "events", "min_contribution_rate", default=5.0)
+                ),
+            ),
+            mission=MissionAutomationConfig(
+                enabled=bool(_get(raw, "automation", "mission", "enabled", default=False)),
+                board_enabled=bool(
+                    _get(raw, "automation", "mission", "board_enabled", default=False)
+                ),
+                thread_id=int(_get(raw, "automation", "mission", "thread_id", default=15293)),
+                interval=int(_get(raw, "automation", "mission", "interval", default=5)),
+                panel_channel_id=int(
+                    _get(raw, "automation", "mission", "panel_channel_id", default=0)
+                ),
+                min_contribution_rate=float(
+                    _get(raw, "automation", "mission", "min_contribution_rate", default=5.0)
                 ),
             ),
         ),

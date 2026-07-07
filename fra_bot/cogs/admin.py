@@ -13,6 +13,7 @@ from ..db.repos import (
     AutomationRepo,
     LogsRepo,
     MembersRepo,
+    MissionsRepo,
     RunsRepo,
     StateRepo,
     TreasuryRepo,
@@ -50,6 +51,7 @@ class AdminCog(commands.Cog):
         self._runs = RunsRepo(bot.db)
         self._state = StateRepo(bot.db)
         self._automation = AutomationRepo(bot.db)
+        self._missions = MissionsRepo(bot.db)
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Gate EVERY command in this cog.
@@ -330,3 +332,65 @@ class AdminCog(commands.Cog):
             return
         name = self._REPORT_ALIASES.get(name.lower(), name)
         await reporting.cmd_report(ctx, name, period)
+
+    # -- custom "Own mission" scheduling --------------------------------
+
+    @fra.command(name="missionpanel")
+    async def mission_panel(self, ctx: commands.Context) -> None:
+        """Post the mission-request panel to the configured channel."""
+        missions = self.bot.get_cog("MissionsCog")
+        if missions is None:
+            await ctx.send("Missions cog not loaded.")
+            return
+        channel_id = self.bot.cfg.automation.mission.panel_channel_id
+        channel = self.bot.get_channel(channel_id) if channel_id else ctx.channel
+        if channel is None:
+            await ctx.send(
+                f"Configured panel channel `{channel_id}` not found; "
+                "post from the target channel or fix `automation.mission.panel_channel_id`."
+            )
+            return
+        await missions.post_panel(channel)
+        if channel.id != ctx.channel.id:
+            await ctx.send(f"✅ Mission panel posted in <#{channel.id}>.")
+
+    @fra.command(name="missions")
+    async def missions_list(self, ctx: commands.Context, limit: int = 10) -> None:
+        """Show the most recent scheduled missions and their status."""
+        rows = await self._missions.recent(limit=max(1, min(limit, 25)))
+        if not rows:
+            await ctx.send("No scheduled missions yet.")
+            return
+        auto = self.bot.cfg.automation.mission
+        lines = []
+        for r in rows:
+            where = r["address"] or r["location_text"] or "?"
+            lines.append(
+                f"`#{r['id']:>3}` **{r['status']}** — {r['source']} — {where[:60]}"
+                + (f" — {r['status_detail']}" if r["status_detail"] else "")
+            )
+        embed = discord.Embed(
+            title="🚨 Scheduled missions",
+            colour=discord.Colour.blurple(),
+            description="\n".join(lines)[:4096],
+        )
+        embed.set_footer(
+            text=(
+                f"scheduler: {'on' if auto.enabled else 'off'} · "
+                f"board: {'on' if auto.board_enabled else 'off'} · "
+                f"dry_run: {self.bot.cfg.automation.dry_run} · "
+                f"open: {await self._missions.open_count()}"
+            )
+        )
+        await ctx.send(embed=embed)
+
+    @fra.command(name="cancelmission")
+    async def mission_cancel(self, ctx: commands.Context, mission_id: int) -> None:
+        """Cancel a not-yet-started scheduled mission."""
+        if await self._missions.cancel(mission_id):
+            await ctx.send(f"🚫 Mission #{mission_id} cancelled.")
+        else:
+            await ctx.send(
+                f"Mission #{mission_id} could not be cancelled "
+                "(not found, or already started/finished)."
+            )
