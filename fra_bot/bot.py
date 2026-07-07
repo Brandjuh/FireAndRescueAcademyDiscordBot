@@ -71,6 +71,14 @@ class FRABot(commands.Bot):
         orphans = await RunsRepo(self.db).close_orphans()
         if orphans:
             log.info("Marked %d interrupted scrape run(s) as failed", orphans)
+        from .db.repos import AutomationRepo
+
+        stranded = await AutomationRepo(self.db).sweep_processing()
+        if stranded:
+            log.warning(
+                "Flagged %d board request(s) interrupted mid-action for review",
+                stranded,
+            )
         await self.mc.start()
         await self.geocoder.start()
 
