@@ -45,8 +45,23 @@ USER_AGENT = (
 
 SIGN_IN_PATH = "/users/sign_in"
 CHECK_PATH = "/buildings"
-# Markers proving we are looking at a logged-in page.
-_LOGGED_IN_MARKERS = ("/users/sign_out", "logout", "sign out")
+# A response counts as logged-in when it is NOT the sign-in page and it
+# either landed on a known authenticated URL or shows a logout/profile
+# marker. MissionChief renders the logout link inside a dropdown that
+# isn't always present in the initial HTML, so the URL is the primary
+# signal (mirrors the reference cog's url_or_markers logic). Requiring a
+# marker string alone falsely rejected a valid login that redirected to
+# /buildings.
+_AUTHENTICATED_URL_FRAGMENTS = (
+    "/buildings",
+    "/dashboard",
+    "/missions",
+    "/verband",
+    "/alliance_threads",
+    "/alliance_logfiles",
+    "/profile",
+)
+_LOGGED_IN_MARKERS = ("/users/sign_out", "logout", "sign out", "my profile")
 
 _MAX_ATTEMPTS = 3
 
@@ -142,6 +157,8 @@ class MissionChiefClient:
     def _looks_logged_in(final_url: str, html: str) -> bool:
         if SIGN_IN_PATH in final_url:
             return False
+        if any(fragment in final_url for fragment in _AUTHENTICATED_URL_FRAGMENTS):
+            return True
         lowered = html.lower()
         return any(marker in lowered for marker in _LOGGED_IN_MARKERS)
 
