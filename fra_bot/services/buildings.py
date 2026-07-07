@@ -165,11 +165,13 @@ class BuildingsService(BoardRequestService):
             )
             return
         if funds < self._auto.min_alliance_funds:
+            # A legitimate condition-wait: don't bump attempts (funds may
+            # take a long time to recover — it must not hit the cap).
             await self.requests.set_status(
                 request_id, "waiting",
                 f"alliance funds {funds:,} below floor "
                 f"{self._auto.min_alliance_funds:,}; waiting",
-                payload=json.dumps(payload), bump_attempts=True, announce=announce,
+                payload=json.dumps(payload), announce=announce,
             )
             if announce:
                 await self.reply(

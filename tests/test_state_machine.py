@@ -96,6 +96,45 @@ async def test_sweep_flags_interrupted_processing(db):
     assert row["posted_at"] is None  # will be announced
 
 
+class _CapService:
+    """Just enough BoardRequestService to exercise _execute_ready's cap."""
+
+    kind = "event"
+
+    def __init__(self, db):
+        from fra_bot.services.board_requests import BoardRequestService
+        self._svc = BoardRequestService.__new__(BoardRequestService)
+        self._svc.kind = "event"
+        self._svc.requests = AutomationRepo(db)
+        self.executed = 0
+
+        async def execute(request, *, announce):
+            self.executed += 1
+        self._svc.execute_request = execute
+
+    async def run(self):
+        return await self._svc._execute_ready()
+
+
+async def test_max_attempts_cap_gives_up(db):
+    from fra_bot.services.board_requests import MAX_ATTEMPTS
+
+    repo = AutomationRepo(db)
+    rid = await repo.create(kind="event", thread_id=1, post_id=1,
+                            requester_name="A", requester_mc_id=9, payload="{}")
+    # Simulate a request that has already failed MAX_ATTEMPTS times.
+    await db.execute(
+        "UPDATE automation_requests SET status='waiting', attempts=? WHERE id=?",
+        (MAX_ATTEMPTS, rid),
+    )
+    cap = _CapService(db)
+    await cap.run()
+    assert cap.executed == 0  # never executed — capped
+    row = await repo.get(rid)
+    assert row["status"] == "failed"
+    assert "gave up" in row["status_detail"]
+
+
 async def test_claimable_includes_pending_and_due_waiting(db):
     repo = AutomationRepo(db)
     p = await repo.create(kind="event", thread_id=1, post_id=1,

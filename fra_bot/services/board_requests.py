@@ -36,6 +36,11 @@ from ..mc.parsers.board import BoardPost
 
 log = logging.getLogger(__name__)
 
+# Give up on a request after this many transient-error retries. Condition
+# waits (funds/cooldown) don't bump ``attempts``, so they wait as long as
+# needed and are not affected by this cap.
+MAX_ATTEMPTS = 12
+
 
 class BoardRequestService:
     kind: str = ""
@@ -88,32 +93,40 @@ class BoardRequestService:
 
             detected = 0
             for post in sorted(fresh_posts, key=lambda p: p.post_id):
-                is_own = (
-                    page.current_user_id is not None
-                    and post.author_mc_id == page.current_user_id
-                )
-                is_bot_reply = post.content.startswith(REPLY_MARKER)
+                try:
+                    # One bad post must not abort the whole poll (which
+                    # would skip execution and leave the run unfinished).
+                    is_own = (
+                        page.current_user_id is not None
+                        and post.author_mc_id == page.current_user_id
+                    )
+                    is_bot_reply = post.content.startswith(REPLY_MARKER)
 
-                request = None
-                if not baseline and not is_own and not is_bot_reply:
-                    request = await self.parse_request(post)
+                    request = None
+                    if not baseline and not is_own and not is_bot_reply:
+                        request = await self.parse_request(post)
 
-                # Atomic: mark the post seen and (if it's a request)
-                # create its 'pending' row together.
-                _, request_id = await self.requests.record_post_and_request(
-                    self.thread_id,
-                    {
-                        "post_id": post.post_id,
-                        "author_name": post.author_name,
-                        "author_mc_id": post.author_mc_id,
-                        "raw_timestamp": post.raw_timestamp,
-                        "content": post.content,
-                    },
-                    self.kind,
-                    request,
-                )
-                if request_id is not None:
-                    detected += 1
+                    # Atomic: mark the post seen and (if it's a request)
+                    # create its 'pending' row together.
+                    _, request_id = await self.requests.record_post_and_request(
+                        self.thread_id,
+                        {
+                            "post_id": post.post_id,
+                            "author_name": post.author_name,
+                            "author_mc_id": post.author_mc_id,
+                            "raw_timestamp": post.raw_timestamp,
+                            "content": post.content,
+                        },
+                        self.kind,
+                        request,
+                    )
+                    if request_id is not None:
+                        detected += 1
+                except Exception:
+                    log.exception(
+                        "%s: error detecting post %s (left unrecorded, will retry)",
+                        self.kind, post.post_id,
+                    )
 
             if baseline:
                 log.info(
@@ -135,6 +148,17 @@ class BoardRequestService:
         """Execute all claimable (pending + due-waiting) requests."""
         executed = 0
         for request in await self.requests.claimable(self.kind):
+            # Give up on a request that keeps hitting transient errors, so
+            # it can't be re-claimed forever. Legitimate condition-waits
+            # (funds/cooldown) don't bump ``attempts``, so this only ends
+            # persistently-erroring requests.
+            if request["attempts"] >= MAX_ATTEMPTS:
+                if await self.requests.claim(request["id"]):
+                    await self.requests.set_status(
+                        request["id"], "failed",
+                        f"gave up after {request['attempts']} failed attempts",
+                    )
+                continue
             if not await self.requests.claim(request["id"]):
                 continue  # another poll won the claim
             first_attempt = request["status"] == "pending"
@@ -155,9 +179,13 @@ class BoardRequestService:
                     "%s: unexpected error executing request %s",
                     self.kind, request["id"],
                 )
-                await self.requests.set_status(
-                    request["id"], "failed", "internal error while processing",
-                )
+                # Only fail it if execute_request didn't already reach a
+                # terminal state — never clobber a committed 'done'.
+                current = await self.requests.get(request["id"])
+                if current is not None and current["status"] == "processing":
+                    await self.requests.set_status(
+                        request["id"], "failed", "internal error while processing",
+                    )
         return executed
 
     # -- helpers for subclasses -----------------------------------------
