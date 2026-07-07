@@ -92,11 +92,22 @@ def affected_url(affected_type: str | None, affected_mc_id: int | None) -> str |
     return f"https://www.missionchief.com/{path}/{affected_mc_id}"
 
 
+# Trailing "(detail)" — the building type / course name in parentheses.
+_PAREN_RE = re.compile(r"\(([^)]+)\)\s*$")
+
 _COURSE_ACTIONS = {"created_course", "course_completed"}
-_COURSE_PAREN_RE = re.compile(r"\(([^)]+)\)\s*$")
 _COURSE_PREFIX_RE = re.compile(
     r"^\s*(created\s+an?\s+course|created\s+course|course\s+completed|"
     r"completed\s+an?\s+course)\b[\s:.\-]*",
+    re.IGNORECASE,
+)
+
+# Building expansions repeat the action in the description
+# ("Expansion finished (Additional cell)") — the title already says it, so
+# we keep only the detail ("Additional cell").
+_EXPANSION_ACTIONS = {"expansion_finished", "extension_started"}
+_EXPANSION_PREFIX_RE = re.compile(
+    r"^\s*(expansion\s+finished|extension\s+started)\b[\s:.\-]*",
     re.IGNORECASE,
 )
 
@@ -104,16 +115,27 @@ _COURSE_PREFIX_RE = re.compile(
 def format_log_description(action_key: str, description: str) -> str:
     """Tidy a log line's description for display.
 
-    Course logs read "Created a course (Technical Rescue Training)" — but
-    the embed title already says "Course created", so we show just the
-    course name ("Technical Rescue Training"). Falls back to the original
-    text when no course name can be isolated.
+    Course and expansion logs repeat what the title already says, e.g.
+    "Created a course (Technical Rescue Training)" or "Expansion finished
+    (Additional cell)". Since the embed title carries the action, we show
+    only the detail in parentheses ("Technical Rescue Training",
+    "Additional cell").
+
+    Courses fall back to the original text when no name can be isolated;
+    expansions fall back to an empty string (the caller drops the line, so
+    a bare "Expansion finished" isn't repeated under its own title).
     """
     if action_key in _COURSE_ACTIONS and description:
-        match = _COURSE_PAREN_RE.search(description)
+        match = _PAREN_RE.search(description)
         if match:
             return match.group(1).strip()
         stripped = _COURSE_PREFIX_RE.sub("", description).strip()
         if stripped:
             return stripped
+        return description
+    if action_key in _EXPANSION_ACTIONS and description:
+        match = _PAREN_RE.search(description)
+        if match:
+            return match.group(1).strip()
+        return _EXPANSION_PREFIX_RE.sub("", description).strip()
     return description

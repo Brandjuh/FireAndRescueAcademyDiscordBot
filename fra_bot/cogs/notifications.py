@@ -186,7 +186,9 @@ class NotificationsCog(commands.Cog):
                     f"**Affected:** [{affected}]({url})" if url else f"**Affected:** {affected}"
                 )
             if row["description"]:
-                lines.append(format_log_description(row["action_key"], row["description"]))
+                desc = format_log_description(row["action_key"], row["description"])
+                if desc:  # expansion logs can reduce to nothing (title says it all)
+                    lines.append(desc)
             if row["contribution_amount"]:
                 lines.append(f"**Contribution:** {row['contribution_amount']:+,} credits")
             unix = _event_unix(row["event_at"])
