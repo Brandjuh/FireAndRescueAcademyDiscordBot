@@ -937,6 +937,200 @@ class AutomationRepo:
             return list(await cur.fetchall())
 
 
+class MissionsRepo:
+    """Custom "Own mission" queue: member-parameterised large scale
+    alliance missions, started one at a time at the next free slot.
+
+    Mirrors :class:`AutomationRepo`'s claim/sweep semantics so a crash can
+    never double-start a (non-idempotent) mission.
+    """
+
+    _COLUMNS = (
+        "source", "mission_type_id", "poi_type", "size", "shape", "amount",
+        "coins", "location_text", "latitude", "longitude", "address",
+        "requester_name", "requester_mc_id", "discord_user_id", "channel_id",
+        "board_thread_id", "board_post_id",
+    )
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def create(self, **fields: Any) -> int:
+        cols = [c for c in self._COLUMNS if c in fields]
+        now = utcnow_iso()
+        placeholders = ", ".join(["?"] * (len(cols) + 2))
+        params = [fields[c] for c in cols] + [now, now]
+        return await self._db.execute_returning_id(
+            f"INSERT INTO scheduled_missions ({', '.join(cols)}, created_at, updated_at) "
+            f"VALUES ({placeholders})",
+            tuple(params),
+        )
+
+    async def create_from_board(
+        self, thread_id: int, post_id: int, spec_fields: dict[str, Any],
+        *, requester_name: str | None, requester_mc_id: int | None,
+    ) -> int | None:
+        """Insert a board-sourced mission, deduped on (thread, post).
+
+        Returns the new id, or None if this post already enqueued a
+        mission (idempotent re-scan)."""
+        now = utcnow_iso()
+        async with self._db.transaction() as conn:
+            cur = await conn.execute(
+                """
+                INSERT OR IGNORE INTO scheduled_missions
+                    (source, mission_type_id, poi_type, size, shape, amount,
+                     location_text, requester_name, requester_mc_id,
+                     board_thread_id, board_post_id, created_at, updated_at)
+                VALUES ('board', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    spec_fields.get("mission_type_id"),
+                    spec_fields.get("poi_type", 0),
+                    spec_fields.get("size", 1),
+                    spec_fields.get("shape", "circle"),
+                    spec_fields.get("amount", 1),
+                    spec_fields.get("location_text"),
+                    requester_name,
+                    requester_mc_id,
+                    thread_id,
+                    post_id,
+                    now,
+                    now,
+                ),
+            )
+            return cur.lastrowid if cur.rowcount else None
+
+    async def claimable(self) -> list[aiosqlite.Row]:
+        """Missions ready to run: 'pending' plus due 'waiting' ones."""
+        async with self._db.conn.execute(
+            """
+            SELECT * FROM scheduled_missions
+            WHERE status = 'pending'
+               OR (status = 'waiting'
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+            ORDER BY id ASC
+            """,
+            (utcnow_iso(),),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def claim(self, mission_id: int) -> bool:
+        """Move pending/waiting -> processing atomically (single-winner)."""
+        n = await self._db.execute(
+            "UPDATE scheduled_missions SET status = 'processing', updated_at = ? "
+            "WHERE id = ? AND status IN ('pending', 'waiting')",
+            (utcnow_iso(), mission_id),
+        )
+        return n == 1
+
+    async def sweep_processing(self) -> int:
+        """Flag missions interrupted mid-start for manual review (startup)."""
+        return await self._db.execute(
+            "UPDATE scheduled_missions SET status = 'failed', "
+            "status_detail = 'interrupted mid-start — please verify on MissionChief', "
+            "posted_at = NULL, updated_at = ? WHERE status = 'processing'",
+            (utcnow_iso(),),
+        )
+
+    async def set_status(
+        self,
+        mission_id: int,
+        status: str,
+        detail: str | None = None,
+        *,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        address: str | None = None,
+        next_attempt_at: str | None = None,
+        bump_attempts: bool = False,
+        announce: bool = True,
+    ) -> None:
+        sets = ["status = ?", "status_detail = ?", "updated_at = ?"]
+        params: list[Any] = [status, detail, utcnow_iso()]
+        if announce:
+            sets.append("posted_at = NULL")
+        if latitude is not None:
+            sets.append("latitude = ?")
+            params.append(latitude)
+        if longitude is not None:
+            sets.append("longitude = ?")
+            params.append(longitude)
+        if address is not None:
+            sets.append("address = ?")
+            params.append(address)
+        sets.append("next_attempt_at = ?")
+        params.append(next_attempt_at)
+        if bump_attempts:
+            sets.append("attempts = attempts + 1")
+        params.append(mission_id)
+        await self._db.execute(
+            f"UPDATE scheduled_missions SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+
+    async def cancel(self, mission_id: int) -> bool:
+        """Cancel a not-yet-started mission. Returns True if it was open."""
+        n = await self._db.execute(
+            "UPDATE scheduled_missions SET status = 'cancelled', "
+            "status_detail = 'cancelled by admin', posted_at = NULL, updated_at = ? "
+            "WHERE id = ? AND status IN ('pending', 'waiting')",
+            (utcnow_iso(), mission_id),
+        )
+        return n == 1
+
+    async def get(self, mission_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM scheduled_missions WHERE id = ?", (mission_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def recent(self, limit: int = 15) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM scheduled_missions ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def open_count(self) -> int:
+        async with self._db.conn.execute(
+            "SELECT COUNT(*) AS n FROM scheduled_missions "
+            "WHERE status IN ('pending', 'waiting', 'processing')"
+        ) as cur:
+            row = await cur.fetchone()
+        return row["n"]
+
+    async def status_counts(
+        self, start_iso: str | None, end_iso: str
+    ) -> dict[str, int]:
+        """Mission counts by status within a period (created_at)."""
+        query = "SELECT status, COUNT(*) AS n FROM scheduled_missions WHERE created_at <= ?"
+        params: list[Any] = [end_iso]
+        if start_iso:
+            query += " AND created_at >= ?"
+            params.append(start_iso)
+        query += " GROUP BY status ORDER BY n DESC"
+        async with self._db.conn.execute(query, params) as cur:
+            return {row["status"]: row["n"] for row in await cur.fetchall()}
+
+    async def pending_announcements(self, limit: int = 20) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            """
+            SELECT * FROM scheduled_missions
+            WHERE posted_at IS NULL
+              AND status IN ('done', 'failed', 'skipped', 'waiting', 'cancelled')
+            ORDER BY id ASC LIMIT ?
+            """,
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def mark_posted(self, mission_id: int) -> None:
+        await self._db.execute(
+            "UPDATE scheduled_missions SET posted_at = ? WHERE id = ?",
+            (utcnow_iso(), mission_id),
+        )
+
+
 def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
     """(daily, monthly) period keys for the current New York game day."""
     from zoneinfo import ZoneInfo

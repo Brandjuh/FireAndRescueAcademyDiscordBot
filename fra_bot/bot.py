@@ -22,6 +22,7 @@ from .services.buildings import BuildingsService
 from .services.events import EventsService
 from .services.logs_sync import LogsSyncService
 from .services.members_sync import MembersSyncService
+from .services.missions import MissionScheduler
 from .services.trainings import TrainingsService
 from .services.treasury_sync import TreasurySyncService
 
@@ -66,7 +67,17 @@ class FRABot(commands.Bot):
         # Phase 2 board automation.
         self.trainings = TrainingsService(cfg, self.mc, self.db)
         self.buildings = BuildingsService(cfg, self.mc, self.db, self.geocoder)
-        self.events = EventsService(cfg, self.mc, self.db, self.geocoder)
+        # Events and custom missions both start large alliance missions on the
+        # same alliance-wide free cooldown; a shared lock serializes their
+        # check-then-start so one free window is never double-spent.
+        self._large_mission_lock = asyncio.Lock()
+        self.events = EventsService(
+            cfg, self.mc, self.db, self.geocoder, start_lock=self._large_mission_lock
+        )
+        # Custom "Own mission" scheduling (Discord panel/slash + board).
+        self.missions_service = MissionScheduler(
+            cfg, self.mc, self.db, self.geocoder, start_lock=self._large_mission_lock
+        )
 
         self._jobs_started = False
 
@@ -77,7 +88,7 @@ class FRABot(commands.Bot):
         orphans = await RunsRepo(self.db).close_orphans()
         if orphans:
             log.info("Marked %d interrupted scrape run(s) as failed", orphans)
-        from .db.repos import AutomationRepo
+        from .db.repos import AutomationRepo, MissionsRepo
 
         stranded = await AutomationRepo(self.db).sweep_processing()
         if stranded:
@@ -85,11 +96,18 @@ class FRABot(commands.Bot):
                 "Flagged %d board request(s) interrupted mid-action for review",
                 stranded,
             )
+        stranded_missions = await MissionsRepo(self.db).sweep_processing()
+        if stranded_missions:
+            log.warning(
+                "Flagged %d scheduled mission(s) interrupted mid-start for review",
+                stranded_missions,
+            )
         await self.mc.start()
         await self.geocoder.start()
 
         from .cogs.admin import AdminCog
         from .cogs.automation import AutomationCog
+        from .cogs.missions import MissionPanelView, MissionsCog
         from .cogs.notifications import NotificationsCog
         from .cogs.reporting import ReportingCog
         from .cogs.reports import ReportsCog
@@ -99,6 +117,22 @@ class FRABot(commands.Bot):
         await self.add_cog(ReportsCog(self))
         await self.add_cog(AutomationCog(self))
         await self.add_cog(ReportingCog(self))
+        await self.add_cog(MissionsCog(self))
+
+        # Persistent mission panel survives restarts; register its view.
+        missions_cog = self.get_cog("MissionsCog")
+        if missions_cog is not None:
+            self.add_view(MissionPanelView(missions_cog))
+
+        # Register the /mission slash command with the guild for fast
+        # propagation (global sync can take up to an hour).
+        if self.cfg.discord.guild_id:
+            guild = discord.Object(id=self.cfg.discord.guild_id)
+            self.tree.copy_global_to(guild=guild)
+            try:
+                await self.tree.sync(guild=guild)
+            except discord.HTTPException as exc:
+                log.warning("Slash-command sync failed: %s", exc)
 
     async def on_command_error(self, ctx, error) -> None:
         from discord.ext import commands as _commands
@@ -232,11 +266,19 @@ class FRABot(commands.Bot):
                 name="board-events",
                 initial_delay_seconds=270.0,
             )
+        if automation.mission.enabled:
+            sched.add_interval_job(
+                self._guarded(self.missions_service.poll, "missions"),
+                minutes=automation.mission.interval,
+                name="missions",
+                initial_delay_seconds=330.0,
+            )
         log.info(
             "Background jobs scheduled (automation: dry_run=%s, training=%s, "
-            "building=%s, events=%s)",
+            "building=%s, events=%s, mission=%s)",
             automation.dry_run, automation.training.enabled,
             automation.building.enabled, automation.events.enabled,
+            automation.mission.enabled,
         )
 
     def _guarded(self, func, name: str):

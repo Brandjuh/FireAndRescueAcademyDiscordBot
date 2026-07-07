@@ -200,8 +200,36 @@ Requires Discord administrator permission or a role listed in
 | `!fra report <name> [period]` | Render any report (`period`: today/yesterday/week/month/prev-month/all; `daily`/`monthly` alias the income top-10) |
 | `!fra automation` | Board automation switches, dry-run state, recent requests |
 | `!fra sync <trainings\|buildings\|events>` | Poll a board thread now |
+| `!fra missionpanel` | Post the "Request a mission" panel to the configured channel |
+| `!fra missions [limit]` | List recent scheduled missions and their status |
+| `!fra cancelmission <id>` | Cancel a not-yet-started scheduled mission |
 | `!fra update` | Pull the latest code, install deps and restart the bot |
 | `!fra restart` | Restart the bot to reload `config.yaml` / `.env` (no code update) |
+
+Members request missions with the **/mission** slash command or the panel
+button (see below).
+
+### Custom missions ("Own mission")
+
+Members request a **large scale alliance mission** and supply the full
+parameter set themselves — mission type, footprint (size/amount) and
+location. Requests arrive two ways:
+
+* the **/mission** slash command, or the button on the panel posted by
+  `!fra missionpanel` (channel set by `automation.mission.panel_channel_id`);
+* a structured board post on `automation.mission.thread_id`, e.g.
+  `own mission: 350 5th Ave, New York` / `type: 42` / `size: 3` /
+  `amount: 4` (only when `automation.mission.board_enabled`).
+
+Requests queue in `scheduled_missions` and are started **one at a time at
+the next free mission slot** (cooldown-aware), reusing the large-mission
+form path with a hard free-only guard — the bot never spends coins. The
+scheduler only runs when `automation.mission.enabled`, and a real start
+only happens when `automation.dry_run` is off; in dry-run each request is
+recorded as *skipped* with what would have been started. Outcomes are
+announced back in Discord (never on MissionChief while in dry-run). The
+`missions` report (`!fra report missions`) summarises requests and
+outcomes.
 
 ### Updating from Discord
 

@@ -157,6 +157,41 @@ def build_event_payload(
     return [(key, value) for key, value in merged.items() if value != "" or key.endswith("]")]
 
 
+def build_custom_mission_payload(
+    form: EventForm,
+    *,
+    latitude: float,
+    longitude: float,
+    address: str,
+    mission_type_id: int | None,
+    poi_type: int,
+    size: int,
+    shape: str,
+    amount: int,
+) -> list[tuple[str, str]]:
+    """Large scale alliance mission body with member-supplied parameters.
+
+    Starts from the large-mission form defaults, then overrides the
+    position footprint with the caller's values. ``coins`` is always 0 —
+    the scheduler only ever starts free missions.
+    """
+    merged = dict(form.fields)
+    for key, value in _LARGE_DEFAULTS.items():
+        merged.setdefault(key, value)
+    merged["mission_position[latitude]"] = f"{latitude:.6f}"
+    merged["mission_position[longitude]"] = f"{longitude:.6f}"
+    merged["mission_position[address]"] = address
+    merged["mission_position[poi_type]"] = str(poi_type)
+    merged["mission_position[size]"] = str(size)
+    merged["mission_position[shape]"] = shape
+    merged["mission_position[amount]"] = str(amount)
+    merged["mission_position[coins]"] = "0"
+    if mission_type_id is not None:
+        merged["mission_position[mission_type_id]"] = str(mission_type_id)
+
+    return [(key, value) for key, value in merged.items() if value != "" or key.endswith("]")]
+
+
 def is_free_submit(form: EventForm) -> bool:
     """True when submitting won't spend coins."""
     if (form.fields.get("mission_position[coins]") or "0") not in ("", "0"):

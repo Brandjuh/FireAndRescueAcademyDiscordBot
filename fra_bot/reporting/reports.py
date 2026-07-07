@@ -14,6 +14,7 @@ from ..db.repos import (
     AutomationRepo,
     LogsRepo,
     MembersRepo,
+    MissionsRepo,
     TreasuryRepo,
     ny_period_keys,
 )
@@ -45,6 +46,7 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
     logs = LogsRepo(db)
     treasury = TreasuryRepo(db)
     automation = AutomationRepo(db)
+    missions = MissionsRepo(db)
 
     async def members_report(period: Period) -> ReportResult:
         result = ReportResult(title=f"👥 Members — {period.label}")
@@ -120,6 +122,18 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
         result.add("Currently open", str(await automation.open_count()), inline=True)
         return result
 
+    async def missions_report(period: Period) -> ReportResult:
+        result = ReportResult(title=f"🚨 Custom missions — {period.label}")
+        counts = await missions.status_counts(period.start_iso, period.end_iso)
+        if not counts:
+            result.description = "No custom missions requested in this period."
+            result.add("Currently open", str(await missions.open_count()), inline=True)
+            return result
+        lines = [f"• {status}: {n}" for status, n in counts.items()]
+        result.add("By status", "\n".join(lines), inline=False)
+        result.add("Currently open", str(await missions.open_count()), inline=True)
+        return result
+
     async def income_daily(period: Period) -> ReportResult:
         day_key, _ = ny_period_keys()
         rows = await treasury.latest_snapshot("daily", day_key)
@@ -164,5 +178,9 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
     ))
     registry.register(Report(
         "automation", "Board request activity and outcomes", automation_report,
+        periods=("today", "week", "month", "all"),
+    ))
+    registry.register(Report(
+        "missions", "Custom scheduled-mission requests and outcomes", missions_report,
         periods=("today", "week", "month", "all"),
     ))
