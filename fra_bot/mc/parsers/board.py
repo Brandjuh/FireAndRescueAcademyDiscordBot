@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
 
 from bs4 import BeautifulSoup
 
@@ -112,30 +111,3 @@ def parse_board_thread_page(html: str) -> BoardThreadPage:
             page.reply_token = token.get("value")
 
     return page
-
-
-def extract_form_fields(html: str, *, action_contains: str) -> dict[str, Any] | None:
-    """Generic helper: find the first form whose action contains a
-    substring and return {'action', 'fields': {name: value}} including
-    hidden inputs (authenticity_token) and select options metadata."""
-    soup = BeautifulSoup(html, "lxml")
-    for form in soup.find_all("form"):
-        action = form.get("action") or ""
-        if action_contains not in action:
-            continue
-        fields: dict[str, str] = {}
-        for inp in form.find_all("input"):
-            name = inp.get("name")
-            if name:
-                fields[name] = inp.get("value", "")
-        selects: dict[str, list[tuple[str, str]]] = {}
-        for select in form.find_all("select"):
-            name = select.get("name")
-            if not name:
-                continue
-            selects[name] = [
-                (opt.get("value", ""), opt.get_text(strip=True))
-                for opt in select.find_all("option")
-            ]
-        return {"action": action, "fields": fields, "selects": selects}
-    return None

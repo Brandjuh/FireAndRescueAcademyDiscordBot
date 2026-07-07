@@ -19,6 +19,10 @@ from ..db.repos import AutomationRepo
 
 log = logging.getLogger(__name__)
 
+_TITLE_LIMIT = 256
+_DESC_LIMIT = 4096
+_FIELD_LIMIT = 1024
+
 _KIND_LABEL = {"training": "🎓 Training", "building": "🏗️ Building", "event": "🚨 Event"}
 _STATUS_COLOUR = {
     "done": discord.Colour.green(),
@@ -59,27 +63,36 @@ class AutomationCog(commands.Cog):
             label = _KIND_LABEL.get(row["kind"], row["kind"])
             icon = _STATUS_ICON.get(row["status"], "•")
             embed = discord.Embed(
-                title=f"{label} request — {icon} {row['status']}",
+                title=f"{label} request — {icon} {row['status']}"[:_TITLE_LIMIT],
                 colour=_STATUS_COLOUR.get(row["status"], discord.Colour.blurple()),
-                description=row["status_detail"] or "",
+                description=(row["status_detail"] or "")[:_DESC_LIMIT],
                 timestamp=dt.datetime.now(dt.timezone.utc),
             )
             if row["requester_name"]:
-                embed.add_field(name="Requester", value=row["requester_name"])
+                embed.add_field(name="Requester", value=row["requester_name"][:_FIELD_LIMIT])
             embed.add_field(
                 name="Board post",
                 value=(
                     f"[#{row['post_id']}]"
                     f"(https://www.missionchief.com/alliance_threads/"
                     f"{row['thread_id']})"
-                ),
+                )[:_FIELD_LIMIT],
             )
             details = self._payload_summary(row["payload"])
             if details:
-                embed.add_field(name="Details", value=details, inline=False)
+                embed.add_field(name="Details", value=details[:_FIELD_LIMIT], inline=False)
             if self.bot.cfg.automation.dry_run:
                 embed.set_footer(text="DRY-RUN — no MissionChief action was taken")
-            await channel.send(embed=embed)
+            try:
+                await channel.send(embed=embed)
+            except discord.HTTPException as exc:
+                status = getattr(exc, "status", None)
+                if status is not None and 400 <= status < 500:
+                    log.error("Dropping unpostable automation embed (HTTP %s): %s", status, exc)
+                    await self._requests.mark_posted(row["id"])
+                    continue
+                log.warning("Transient failure posting automation embed (HTTP %s)", status)
+                return  # retry the rest next tick, preserving order
             await self._requests.mark_posted(row["id"])
             await asyncio.sleep(1.0)
 

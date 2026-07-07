@@ -80,6 +80,18 @@ class RunsRepo:
         ) as cur:
             return list(await cur.fetchall())
 
+    async def close_orphans(self) -> int:
+        """Mark runs still 'running' as failed — they were interrupted by
+        a crash, restart, or an unhandled circuit-breaker pause. Call once
+        at startup so stale rows don't linger in `!fra status`."""
+        cur = await self._db.execute(
+            "UPDATE scrape_runs SET status = 'failed', finished_at = ?, "
+            "message = COALESCE(message, 'interrupted') "
+            "WHERE status = 'running'",
+            (utcnow_iso(),),
+        )
+        return cur
+
 
 class MembersRepo:
     def __init__(self, db: Database) -> None:
@@ -619,9 +631,10 @@ class TreasuryRepo:
             row = await cur.fetchone()
         return row["n"]
 
-    async def staging_finalize(self) -> int:
-        """Copy staging into expenses in chronological order, then clear.
-        One transaction: either the whole ledger lands, or nothing."""
+    async def staging_finalize(self, done_key: str, next_page_key: str) -> int:
+        """Copy staging into expenses (chronological), clear staging, and
+        flip the backfill-done state — all in ONE transaction, so the
+        ledger and the 'done' flag can never disagree after a crash."""
         now = utcnow_iso()
         async with self._db.transaction() as conn:
             cur = await conn.execute(
@@ -635,6 +648,12 @@ class TreasuryRepo:
             )
             copied = cur.rowcount
             await conn.execute("DELETE FROM expenses_backfill_staging")
+            await conn.execute(
+                "INSERT INTO scraper_state (key, value) VALUES (?, '1') "
+                "ON CONFLICT(key) DO UPDATE SET value = '1'",
+                (done_key,),
+            )
+            await conn.execute("DELETE FROM scraper_state WHERE key = ?", (next_page_key,))
         return copied
 
 

@@ -12,12 +12,12 @@
 -- Bookkeeping
 -- ----------------------------------------------------------------------
 
-CREATE TABLE scraper_state (
+CREATE TABLE IF NOT EXISTS scraper_state (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
 
-CREATE TABLE scrape_runs (
+CREATE TABLE IF NOT EXISTS scrape_runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     scraper     TEXT NOT NULL,
     started_at  TEXT NOT NULL,
@@ -28,14 +28,14 @@ CREATE TABLE scrape_runs (
     rows_new    INTEGER NOT NULL DEFAULT 0,
     message     TEXT
 );
-CREATE INDEX idx_scrape_runs_scraper ON scrape_runs (scraper, started_at);
+CREATE INDEX IF NOT EXISTS idx_scrape_runs_scraper ON scrape_runs (scraper, started_at);
 
 -- ----------------------------------------------------------------------
 -- Members
 -- ----------------------------------------------------------------------
 
 -- Current roster: one row per MissionChief user we have ever seen.
-CREATE TABLE members (
+CREATE TABLE IF NOT EXISTS members (
     mc_user_id        INTEGER PRIMARY KEY,
     name              TEXT NOT NULL,
     role              TEXT,
@@ -47,11 +47,11 @@ CREATE TABLE members (
     last_seen_at      TEXT NOT NULL,
     left_at           TEXT
 );
-CREATE INDEX idx_members_active ON members (is_active);
-CREATE INDEX idx_members_name ON members (name);
+CREATE INDEX IF NOT EXISTS idx_members_active ON members (is_active);
+CREATE INDEX IF NOT EXISTS idx_members_name ON members (name);
 
 -- Hourly history, used for earned-credit deltas and reports.
-CREATE TABLE member_snapshots (
+CREATE TABLE IF NOT EXISTS member_snapshots (
     run_id            INTEGER NOT NULL REFERENCES scrape_runs (id),
     mc_user_id        INTEGER NOT NULL,
     name              TEXT NOT NULL,
@@ -61,10 +61,10 @@ CREATE TABLE member_snapshots (
     taken_at          TEXT NOT NULL,
     PRIMARY KEY (mc_user_id, run_id)
 );
-CREATE INDEX idx_member_snapshots_taken ON member_snapshots (taken_at);
+CREATE INDEX IF NOT EXISTS idx_member_snapshots_taken ON member_snapshots (taken_at);
 
 -- Detected changes, each announced to Discord at most once.
-CREATE TABLE member_events (
+CREATE TABLE IF NOT EXISTS member_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     mc_user_id  INTEGER,
     name        TEXT NOT NULL,
@@ -74,13 +74,13 @@ CREATE TABLE member_events (
     occurred_at TEXT NOT NULL,
     posted_at   TEXT
 );
-CREATE INDEX idx_member_events_pending ON member_events (posted_at) WHERE posted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_member_events_pending ON member_events (posted_at) WHERE posted_at IS NULL;
 
 -- ----------------------------------------------------------------------
 -- Applications
 -- ----------------------------------------------------------------------
 
-CREATE TABLE applications (
+CREATE TABLE IF NOT EXISTS applications (
     application_id INTEGER PRIMARY KEY,   -- id from /verband/bewerbungen/annehmen/<id>
     applicant_name TEXT NOT NULL,
     mc_user_id     INTEGER,               -- from /profile/<id> link, when present
@@ -89,13 +89,13 @@ CREATE TABLE applications (
     resolved_at    TEXT,                  -- application no longer listed
     posted_at      TEXT
 );
-CREATE INDEX idx_applications_open ON applications (resolved_at) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_applications_open ON applications (resolved_at) WHERE resolved_at IS NULL;
 
 -- ----------------------------------------------------------------------
 -- Alliance logs
 -- ----------------------------------------------------------------------
 
-CREATE TABLE alliance_logs (
+CREATE TABLE IF NOT EXISTS alliance_logs (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     signature           TEXT NOT NULL,    -- sha256 over the row's visible content
     occurrence_index    INTEGER NOT NULL DEFAULT 1,  -- disambiguates identical rows
@@ -113,26 +113,26 @@ CREATE TABLE alliance_logs (
     posted_at           TEXT,
     UNIQUE (signature, occurrence_index)
 );
-CREATE INDEX idx_alliance_logs_pending ON alliance_logs (posted_at) WHERE posted_at IS NULL;
-CREATE INDEX idx_alliance_logs_action ON alliance_logs (action_key);
-CREATE INDEX idx_alliance_logs_event_at ON alliance_logs (event_at);
+CREATE INDEX IF NOT EXISTS idx_alliance_logs_pending ON alliance_logs (posted_at) WHERE posted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_alliance_logs_action ON alliance_logs (action_key);
+CREATE INDEX IF NOT EXISTS idx_alliance_logs_event_at ON alliance_logs (event_at);
 
 -- ----------------------------------------------------------------------
 -- Treasury
 -- ----------------------------------------------------------------------
 
 -- Time series of the alliance's total funds.
-CREATE TABLE treasury_balance (
+CREATE TABLE IF NOT EXISTS treasury_balance (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     total_funds INTEGER NOT NULL,
     scraped_at  TEXT NOT NULL
 );
-CREATE INDEX idx_treasury_balance_time ON treasury_balance (scraped_at);
+CREATE INDEX IF NOT EXISTS idx_treasury_balance_time ON treasury_balance (scraped_at);
 
 -- Income top lists. MissionChief resets these at midnight America/New_York,
 -- so snapshots are keyed by the NY-local period they belong to:
 -- period_key = '2026-07-06' for daily, '2026-07' for monthly.
-CREATE TABLE income_snapshots (
+CREATE TABLE IF NOT EXISTS income_snapshots (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     period     TEXT NOT NULL,             -- daily | monthly
     period_key TEXT NOT NULL,
@@ -142,14 +142,14 @@ CREATE TABLE income_snapshots (
     mc_user_id INTEGER,
     amount     INTEGER NOT NULL
 );
-CREATE INDEX idx_income_snapshots_lookup ON income_snapshots (period, period_key, taken_at);
+CREATE INDEX IF NOT EXISTS idx_income_snapshots_lookup ON income_snapshots (period, period_key, taken_at);
 
 -- Expense ledger. MissionChief shows this newest-first with visually
 -- identical rows that are REAL distinct events, so there is deliberately
 -- no unique constraint: correctness comes from the sequence-anchored
 -- sync in treasury_sync.py, which always inserts oldest-first. That
 -- makes ascending id == chronological order.
-CREATE TABLE expenses (
+CREATE TABLE IF NOT EXISTS expenses (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     signature   TEXT NOT NULL,            -- sha256(raw_date|username|amount|description)
     raw_date    TEXT NOT NULL,
@@ -159,16 +159,16 @@ CREATE TABLE expenses (
     description TEXT,
     scraped_at  TEXT NOT NULL
 );
-CREATE INDEX idx_expenses_signature ON expenses (signature);
-CREATE INDEX idx_expenses_event_at ON expenses (event_at);
-CREATE INDEX idx_expenses_username ON expenses (username);
+CREATE INDEX IF NOT EXISTS idx_expenses_signature ON expenses (signature);
+CREATE INDEX IF NOT EXISTS idx_expenses_event_at ON expenses (event_at);
+CREATE INDEX IF NOT EXISTS idx_expenses_username ON expenses (username);
 
 -- Staging area for the initial expenses backfill (3150+ pages). Pages
 -- are walked 1..last (newest to oldest) in resumable chunks and rows
 -- appended here in DISPLAY order (newest first). When the walk reaches
 -- the last page, everything is copied into expenses reversed (oldest
 -- first) and this table is emptied. Progress lives in scraper_state.
-CREATE TABLE expenses_backfill_staging (
+CREATE TABLE IF NOT EXISTS expenses_backfill_staging (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     signature   TEXT NOT NULL,
     raw_date    TEXT NOT NULL,

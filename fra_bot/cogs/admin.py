@@ -24,14 +24,19 @@ from ..services.treasury_sync import STATE_BACKFILL_DONE, STATE_BACKFILL_NEXT_PA
 log = logging.getLogger(__name__)
 
 
+def is_fra_admin_ctx(ctx: commands.Context) -> bool:
+    """True when the invoker may run admin commands."""
+    if ctx.guild is None:
+        return False
+    if ctx.author.guild_permissions.administrator:
+        return True
+    allowed = set(ctx.bot.cfg.discord.admin_role_ids)
+    return any(role.id in allowed for role in ctx.author.roles)
+
+
 def is_fra_admin():
     async def predicate(ctx: commands.Context) -> bool:
-        if ctx.guild is None:
-            return False
-        if ctx.author.guild_permissions.administrator:
-            return True
-        allowed = set(ctx.bot.cfg.discord.admin_role_ids)
-        return any(role.id in allowed for role in ctx.author.roles)
+        return is_fra_admin_ctx(ctx)
 
     return commands.check(predicate)
 
@@ -46,6 +51,17 @@ class AdminCog(commands.Cog):
         self._runs = RunsRepo(bot.db)
         self._state = StateRepo(bot.db)
         self._automation = AutomationRepo(bot.db)
+
+    async def cog_check(self, ctx: commands.Context) -> bool:
+        """Gate EVERY command in this cog.
+
+        A group-level check on ``fra`` does NOT propagate to its
+        subcommands when ``invoke_without_command=True`` (discord.py
+        skips the group's prepare/checks and dispatches straight to the
+        subcommand), so authorization must live at the cog level where
+        it always runs. Without this, any member could run !fra update.
+        """
+        return is_fra_admin_ctx(ctx)
 
     @commands.group(name="fra", invoke_without_command=True)
     @is_fra_admin()
@@ -149,28 +165,38 @@ class AdminCog(commands.Cog):
     async def sync(self, ctx: commands.Context, scraper: str) -> None:
         """Run a sync/poll: members, applications, logs, treasury, expenses,
         backfill, trainings, buildings, events."""
+        # (func, canonical job name shared with the scheduler's lock).
         jobs = {
-            "members": self.bot.members_sync.run,
-            "applications": self.bot.applications_sync.run,
-            "logs": self.bot.logs_sync.run,
-            "treasury": self.bot.treasury_sync.sync_balance_and_income,
-            "expenses": self.bot.treasury_sync.sync_expenses_incremental,
-            "backfill": self.bot.treasury_sync.backfill_step,
-            "trainings": self.bot.trainings.poll,
-            "buildings": self.bot.buildings.poll,
-            "events": self.bot.events.poll,
+            "members": (self.bot.members_sync.run, "members"),
+            "applications": (self.bot.applications_sync.run, "applications"),
+            "logs": (self.bot.logs_sync.run, "logs"),
+            "treasury": (self.bot.treasury_sync.sync_balance_and_income, "treasury"),
+            "expenses": (self.bot.treasury_sync.sync_expenses_incremental, "expenses"),
+            "backfill": (self.bot.treasury_sync.backfill_step, "expenses-backfill"),
+            "trainings": (self.bot.trainings.poll, "board-trainings"),
+            "buildings": (self.bot.buildings.poll, "board-buildings"),
+            "events": (self.bot.events.poll, "board-events"),
         }
-        job = jobs.get(scraper.lower())
-        if job is None:
+        entry = jobs.get(scraper.lower())
+        if entry is None:
             await ctx.send(f"Unknown scraper. Options: {', '.join(sorted(jobs))}")
             return
-        message = await ctx.send(f"⏳ Running `{scraper}` sync…")
-        try:
-            await job()
-        except Exception as exc:  # surfaced to the invoking admin
-            log.exception("Manual %s sync failed", scraper)
-            await message.edit(content=f"❌ `{scraper}` sync failed: {exc}")
+        job, job_name = entry
+        lock = self.bot.job_lock(job_name)
+        if lock.locked():
+            await ctx.send(f"⏳ `{scraper}` is already running — skipped.")
             return
+        message = await ctx.send(f"⏳ Running `{scraper}` sync…")
+        async with lock:
+            self.bot.presence.mark_running(job_name)
+            try:
+                await job()
+            except Exception as exc:  # surfaced to the invoking admin
+                log.exception("Manual %s sync failed", scraper)
+                await message.edit(content=f"❌ `{scraper}` sync failed: {exc}")
+                return
+            finally:
+                self.bot.presence.mark_done(job_name)
         await message.edit(content=f"✅ `{scraper}` sync finished.")
 
     @fra.command(name="balance")

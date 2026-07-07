@@ -174,11 +174,13 @@ async def test_expenses_staging_finalize_order(db):
     assert await treasury.staging_count() == 3
     assert await treasury.staging_tail_signatures(2) == ["n2", "n1"]
 
-    copied = await treasury.staging_finalize()
+    copied = await treasury.staging_finalize("bf_done", "bf_next")
     assert copied == 3
     assert await treasury.staging_count() == 0
     # Chronological in expenses: oldest (n1) first.
     assert await treasury.newest_signatures(10) == ["n1", "n2", "n3"]
+    # Done flag flipped atomically with the ledger commit.
+    assert await StateRepo(db).get("bf_done") == "1"
 
     # Incremental append keeps chronological order.
     await treasury.insert_expenses_chronological([_expense("n4"), _expense("n5")])

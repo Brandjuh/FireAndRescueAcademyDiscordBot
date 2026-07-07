@@ -31,6 +31,11 @@ log = logging.getLogger(__name__)
 _POST_PAUSE_SECONDS = 1.2
 _BATCH_LIMIT = 20
 
+# Discord embed limits (a value over the limit is a permanent 400).
+_TITLE_LIMIT = 256
+_DESC_LIMIT = 4096
+_FIELD_LIMIT = 1024
+
 
 def _event_unix(iso_ts: str | None) -> int | None:
     if not iso_ts:
@@ -64,18 +69,46 @@ class NotificationsCog(commands.Cog):
     @tasks.loop(minutes=2)
     async def publish_loop(self) -> None:
         async with self._lock:
-            try:
-                await self._publish_applications()
-                await self._publish_member_events()
-                await self._publish_alliance_logs()
-            except Exception:
-                log.exception("Publisher iteration failed")
+            # Each publisher is isolated: a failure in one channel must
+            # not suppress the others.
+            for publisher in (
+                self._publish_applications,
+                self._publish_member_events,
+                self._publish_alliance_logs,
+            ):
+                try:
+                    await publisher()
+                except Exception:
+                    log.exception("Publisher %s failed", publisher.__name__)
 
     @publish_loop.before_loop
     async def _wait_ready(self) -> None:
         await self.bot.wait_until_ready()
 
     # ------------------------------------------------------------------
+
+    async def _send_or_skip(self, channel, embed, mark_posted, *, label: str) -> str:
+        """Send one embed and mark the row posted.
+
+        Returns 'ok', 'skip' (permanent 4xx — dropped so it can't block
+        the queue forever) or 'retry' (transient — leave unmarked, stop
+        the batch and try again next tick, preserving order).
+        """
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as exc:
+            status = getattr(exc, "status", None)
+            if status is not None and 400 <= status < 500:
+                log.error("Dropping unpostable %s (HTTP %s): %s", label, status, exc)
+                await mark_posted()
+                return "skip"
+            log.warning(
+                "Transient failure posting %s (HTTP %s); retrying next tick",
+                label, status,
+            )
+            return "retry"
+        await mark_posted()
+        return "ok"
 
     async def _publish_applications(self) -> None:
         channel = self.bot.channel_for("applications")
@@ -89,14 +122,19 @@ class NotificationsCog(commands.Cog):
                     f"**{row['applicant_name']}** wants to join the alliance.\n"
                     "Review it on the [applications page]"
                     "(https://www.missionchief.com/verband/bewerbungen)."
-                ),
+                )[:_DESC_LIMIT],
                 timestamp=dt.datetime.now(dt.timezone.utc),
             )
             url = profile_url(row["mc_user_id"])
             if url:
-                embed.add_field(name="Profile", value=url, inline=False)
-            await channel.send(embed=embed)
-            await self._apps.mark_posted(row["application_id"])
+                embed.add_field(name="Profile", value=url[:_FIELD_LIMIT], inline=False)
+            outcome = await self._send_or_skip(
+                channel, embed,
+                lambda r=row: self._apps.mark_posted(r["application_id"]),
+                label="application",
+            )
+            if outcome == "retry":
+                return
             await asyncio.sleep(_POST_PAUSE_SECONDS)
 
     async def _publish_member_events(self) -> None:
@@ -116,13 +154,18 @@ class NotificationsCog(commands.Cog):
             if url:
                 lines.append(f"[MissionChief profile]({url})")
             embed = discord.Embed(
-                title=f"{emoji} {title}",
+                title=f"{emoji} {title}"[:_TITLE_LIMIT],
                 colour=colour,
-                description="\n".join(lines),
+                description="\n".join(lines)[:_DESC_LIMIT],
                 timestamp=dt.datetime.now(dt.timezone.utc),
             )
-            await channel.send(embed=embed)
-            await self._members.mark_event_posted(row["id"])
+            outcome = await self._send_or_skip(
+                channel, embed,
+                lambda r=row: self._members.mark_event_posted(r["id"]),
+                label="member event",
+            )
+            if outcome == "retry":
+                return
             await asyncio.sleep(_POST_PAUSE_SECONDS)
 
     async def _publish_alliance_logs(self) -> None:
@@ -152,10 +195,15 @@ class NotificationsCog(commands.Cog):
             else:
                 lines.append(f"`{row['raw_timestamp']}`")
             embed = discord.Embed(
-                title=f"{emoji} {title}",
+                title=f"{emoji} {title}"[:_TITLE_LIMIT],
                 colour=colour,
-                description="\n".join(lines) or "—",
+                description=("\n".join(lines) or "—")[:_DESC_LIMIT],
             )
-            await channel.send(embed=embed)
-            await self._logs.mark_posted(row["id"])
+            outcome = await self._send_or_skip(
+                channel, embed,
+                lambda r=row: self._logs.mark_posted(r["id"]),
+                label="alliance log",
+            )
+            if outcome == "retry":
+                return
             await asyncio.sleep(_POST_PAUSE_SECONDS)
