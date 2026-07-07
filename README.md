@@ -48,19 +48,40 @@ will build on this data foundation.
 
 ### Quick install (recommended)
 
-One command — it installs system packages, sets up the virtualenv, asks
-for your Discord token / MissionChief login / channel ids, installs the
-systemd service and starts the bot:
+One command **over SSH on the Pi** — it installs system packages, sets
+up the virtualenv, asks for your Discord token / MissionChief login /
+channel ids, installs the systemd service and starts the bot:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/main/install.sh)
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/main/install.sh)"
 ```
 
 Until this branch is merged to `main`, install from the branch instead:
 
 ```bash
-FRA_BRANCH=claude/fra-discord-bot-ggwg15 bash <(curl -fsSL https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/claude/fra-discord-bot-ggwg15/install.sh)
+FRA_BRANCH=claude/fra-discord-bot-ggwg15 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/claude/fra-discord-bot-ggwg15/install.sh)"
 ```
+
+### Non-interactive install (no terminal)
+
+Running the installer where no terminal is available — for example via
+another bot's shell command — requires passing the answers as
+environment variables (and the user must have passwordless sudo, which
+is the Raspberry Pi OS default for the `pi` user):
+
+```bash
+FRA_BRANCH=claude/fra-discord-bot-ggwg15 \
+FRA_DISCORD_TOKEN=your-discord-token \
+FRA_MC_EMAIL=you@example.com \
+FRA_MC_PASSWORD=your-mc-password \
+FRA_GUILD_ID=123 FRA_CH_ADMIN=123 FRA_CH_APPS=123 \
+FRA_CH_MEMBERS=123 FRA_CH_LOGS=123 FRA_CH_REPORTS=123 \
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/claude/fra-discord-bot-ggwg15/install.sh)"
+```
+
+All `FRA_CH_*`/`FRA_GUILD_ID` variables are optional (default 0 =
+disabled; edit `config.yaml` later). Note: `bash <(curl ...)` does NOT
+work in `/bin/sh` — use the `bash -c "$(curl ...)"` form above.
 
 Useful afterwards:
 

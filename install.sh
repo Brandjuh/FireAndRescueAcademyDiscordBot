@@ -3,8 +3,12 @@
 # Fire & Rescue Academy Discord Bot — one-command installer for
 # Raspberry Pi (Debian Bookworm) and other Debian-based systems.
 #
-# Fresh install (interactive):
-#   bash <(curl -fsSL https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/main/install.sh)
+# Fresh install, interactive (over SSH on the Pi):
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/main/install.sh)"
+#
+# Fresh install, NON-interactive (no terminal, e.g. a bot shell command):
+#   FRA_DISCORD_TOKEN=xxx FRA_MC_EMAIL=me@mail.com FRA_MC_PASSWORD=secret \
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/main/install.sh)"
 #
 # Or from a local checkout:
 #   ./install.sh
@@ -13,8 +17,11 @@
 # service restart) and leaves your config.yaml/.env untouched.
 #
 # Optional environment overrides:
-#   FRA_BRANCH=main            # git branch to install
-#   FRA_DIR=~/FireAndRescueAcademyDiscordBot   # install location
+#   FRA_BRANCH=main                              # git branch to install
+#   FRA_DIR=~/FireAndRescueAcademyDiscordBot     # install location
+#   FRA_DISCORD_TOKEN / FRA_MC_EMAIL / FRA_MC_PASSWORD   # secrets (.env)
+#   FRA_ALLIANCE_ID=1621  FRA_GUILD_ID=0                 # config.yaml
+#   FRA_CH_ADMIN / FRA_CH_APPS / FRA_CH_MEMBERS / FRA_CH_LOGS / FRA_CH_REPORTS
 #
 # Uninstall (keeps data/ and config):
 #   ./install.sh uninstall
@@ -37,9 +44,20 @@ say()  { echo "${GREEN}==>${RESET} ${BOLD}$*${RESET}"; }
 warn() { echo "${YELLOW}==>${RESET} $*"; }
 die()  { echo "${RED}FOUT:${RESET} $*" >&2; exit 1; }
 
+# Is there a terminal we can prompt on? (A bot/CI shell has none.)
+has_tty() {
+    { exec 9< /dev/tty; } 2>/dev/null || return 1
+    exec 9<&-
+    return 0
+}
+
 # Prompts must work even when the script is piped into bash.
 ask() {
     local prompt="$1" default="${2:-}" answer
+    if ! has_tty; then
+        echo "$default"
+        return
+    fi
     if [ -n "$default" ]; then
         read -r -p "$prompt [$default]: " answer < /dev/tty || true
         echo "${answer:-$default}"
@@ -51,6 +69,7 @@ ask() {
 
 ask_secret() {
     local prompt="$1" answer
+    has_tty || { echo ""; return; }
     read -r -s -p "$prompt: " answer < /dev/tty || true
     echo "" > /dev/tty
     echo "$answer"
@@ -58,6 +77,7 @@ ask_secret() {
 
 ask_number() {
     local prompt="$1" default="${2:-0}" answer
+    has_tty || { echo "$default"; return; }
     while true; do
         answer=$(ask "$prompt" "$default")
         [[ "$answer" =~ ^[0-9]+$ ]] && { echo "$answer"; return; }
@@ -167,21 +187,27 @@ configure() {
     echo ""
 
     if [ ! -f .env ]; then
-        local discord_token mc_email mc_password
-        while true; do
+        local discord_token="${FRA_DISCORD_TOKEN:-}"
+        local mc_email="${FRA_MC_EMAIL:-}"
+        local mc_password="${FRA_MC_PASSWORD:-}"
+
+        if ! has_tty && { [ -z "$discord_token" ] || [ -z "$mc_email" ] || [ -z "$mc_password" ]; }; then
+            die "Geen terminal beschikbaar voor vragen én geen FRA_DISCORD_TOKEN/FRA_MC_EMAIL/FRA_MC_PASSWORD meegegeven.
+Draai dit via SSH op de Pi, of geef de waarden mee als environment-variabelen, bijv.:
+  FRA_DISCORD_TOKEN=xxx FRA_MC_EMAIL=me@mail.com FRA_MC_PASSWORD=secret bash -c \"\$(curl -fsSL <installer-url>)\""
+        fi
+
+        while [ -z "$discord_token" ]; do
             discord_token=$(ask_secret "Discord bot-token")
-            [ -n "$discord_token" ] && break
-            warn "Token mag niet leeg zijn." > /dev/tty
+            [ -z "$discord_token" ] && warn "Token mag niet leeg zijn." > /dev/tty
         done
-        while true; do
+        while [ -z "$mc_email" ]; do
             mc_email=$(ask "MissionChief login e-mail")
-            [ -n "$mc_email" ] && break
-            warn "E-mail mag niet leeg zijn." > /dev/tty
+            [ -z "$mc_email" ] && warn "E-mail mag niet leeg zijn." > /dev/tty
         done
-        while true; do
+        while [ -z "$mc_password" ]; do
             mc_password=$(ask_secret "MissionChief wachtwoord")
-            [ -n "$mc_password" ] && break
-            warn "Wachtwoord mag niet leeg zijn." > /dev/tty
+            [ -z "$mc_password" ] && warn "Wachtwoord mag niet leeg zijn." > /dev/tty
         done
 
         umask 177
@@ -197,13 +223,13 @@ EOF
 
     if [ ! -f config.yaml ]; then
         local alliance_id guild_id ch_admin ch_apps ch_members ch_logs ch_reports
-        alliance_id=$(ask_number "MissionChief alliance-ID" "1621")
-        guild_id=$(ask_number "Discord server (guild) ID" "0")
-        ch_admin=$(ask_number "Kanaal-ID: admin log (bot-fouten/health)" "0")
-        ch_apps=$(ask_number "Kanaal-ID: nieuwe applications" "0")
-        ch_members=$(ask_number "Kanaal-ID: member events (join/leave)" "0")
-        ch_logs=$(ask_number "Kanaal-ID: alliance logs feed" "0")
-        ch_reports=$(ask_number "Kanaal-ID: daily/monthly rapporten" "0")
+        alliance_id=$(ask_number "MissionChief alliance-ID" "${FRA_ALLIANCE_ID:-1621}")
+        guild_id=$(ask_number "Discord server (guild) ID" "${FRA_GUILD_ID:-0}")
+        ch_admin=$(ask_number "Kanaal-ID: admin log (bot-fouten/health)" "${FRA_CH_ADMIN:-0}")
+        ch_apps=$(ask_number "Kanaal-ID: nieuwe applications" "${FRA_CH_APPS:-0}")
+        ch_members=$(ask_number "Kanaal-ID: member events (join/leave)" "${FRA_CH_MEMBERS:-0}")
+        ch_logs=$(ask_number "Kanaal-ID: alliance logs feed" "${FRA_CH_LOGS:-0}")
+        ch_reports=$(ask_number "Kanaal-ID: daily/monthly rapporten" "${FRA_CH_REPORTS:-0}")
 
         sed \
             -e "s/^  alliance_id: .*/  alliance_id: $alliance_id/" \
@@ -297,6 +323,10 @@ main() {
     echo "${BOLD}Fire & Rescue Academy Discord Bot — installer${RESET}"
     require_not_root
     command -v systemctl >/dev/null || die "systemd is vereist (Raspberry Pi OS / Debian)."
+    if ! has_tty && ! sudo -n true 2>/dev/null; then
+        die "sudo vraagt om een wachtwoord maar er is geen terminal beschikbaar.
+Draai de installer via SSH op de Pi, of geef deze gebruiker passwordless sudo."
+    fi
     install_system_deps
     fetch_code
     install_python_deps
@@ -306,4 +336,7 @@ main() {
     summary
 }
 
-main "$@"
+# FRA_INSTALL_NO_MAIN=1 allows sourcing the functions in tests.
+if [ -z "${FRA_INSTALL_NO_MAIN:-}" ]; then
+    main "$@"
+fi
