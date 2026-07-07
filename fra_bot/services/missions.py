@@ -15,6 +15,7 @@ mission is marked ``skipped`` with what *would* have been started.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import aiosqlite
@@ -52,6 +53,8 @@ class MissionScheduler:
         client: MissionChiefClient,
         db: Database,
         geocoder: Geocoder,
+        *,
+        start_lock: asyncio.Lock | None = None,
     ) -> None:
         self.cfg = cfg
         self.client = client
@@ -63,6 +66,10 @@ class MissionScheduler:
         self.state = StateRepo(db)
         self.board = BoardClient(client)
         self._auto = cfg.automation.mission
+        # Shared with EventsService: both start large missions on the same
+        # alliance-wide free cooldown, so their check-then-start must be
+        # serialized to avoid two starts slipping through one free window.
+        self._start_lock = start_lock or asyncio.Lock()
 
     # -- public entry points --------------------------------------------
 
@@ -252,7 +259,12 @@ class MissionScheduler:
                 latitude=lat, longitude=lng, address=address, announce=False,
             )
 
-        return await self._attempt_start(mission, requester, lat, lng, address, announce=announce)
+        # Hold the shared cooldown lock across the whole check-then-start so a
+        # concurrent event/mission start can't consume the same free window.
+        async with self._start_lock:
+            return await self._attempt_start(
+                mission, requester, lat, lng, address, announce=announce
+            )
 
     async def _attempt_start(
         self, mission: aiosqlite.Row, requester: str,

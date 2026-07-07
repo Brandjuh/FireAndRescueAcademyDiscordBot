@@ -12,6 +12,7 @@ with a hard free-only guard so the bot can never spend coins.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -34,6 +35,7 @@ from ..mc.parsers.events import (
     next_free_at,
     parse_event_form,
 )
+from ..mc.parsers.mission_spec import is_mission_post
 from .board_requests import BoardRequestService
 
 log = logging.getLogger(__name__)
@@ -51,10 +53,15 @@ class EventsService(BoardRequestService):
         client: MissionChiefClient,
         db: Database,
         geocoder: Geocoder,
+        *,
+        start_lock: asyncio.Lock | None = None,
     ) -> None:
         super().__init__(cfg, client, db)
         self._auto = cfg.automation.events
         self._geocoder = geocoder
+        # Shared with MissionScheduler: both start large alliance missions on
+        # the same free cooldown, so their check-then-start is serialized.
+        self._start_lock = start_lock or asyncio.Lock()
 
     @property
     def thread_id(self) -> int:
@@ -103,9 +110,12 @@ class EventsService(BoardRequestService):
                 }
             )
 
-        await self._attempt_start(
-            request["id"], requester, payload, announce=announce
-        )
+        # Serialize the check-then-start with the mission scheduler (shared
+        # free-mission cooldown) so one free window can't be double-spent.
+        async with self._start_lock:
+            await self._attempt_start(
+                request["id"], requester, payload, announce=announce
+            )
 
     # ------------------------------------------------------------------
 
@@ -121,7 +131,14 @@ class EventsService(BoardRequestService):
         A maps link, or an explicit ``event:``/``location:`` prefix — NOT
         arbitrary chatter, so we never geocode "thanks everyone" and
         accidentally start a mission at some incidental place name.
+
+        A post that opens with a custom-mission trigger (``own mission:`` …)
+        belongs to the mission scheduler, not here — yielding it prevents the
+        same post being started once as an event and once as a custom
+        mission when both consumers share this thread.
         """
+        if is_mission_post(content):
+            return None
         links = find_maps_links(content)
         if links:
             return links[0]

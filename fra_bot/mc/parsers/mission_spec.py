@@ -52,6 +52,16 @@ class MissionSpecError(ValueError):
     """A supplied mission parameter is missing or out of range."""
 
 
+def is_mission_post(content: str) -> bool:
+    """True when a board post opens with a custom-mission trigger.
+
+    Used by the *events* poller to yield ownership of these posts: a custom
+    mission and a location-only event both live on the same board thread, so
+    without this a mission post (which usually carries a maps link) would be
+    picked up by BOTH consumers and started twice."""
+    return _TRIGGER_RE.search(content or "") is not None
+
+
 @dataclass
 class MissionSpec:
     location_text: str

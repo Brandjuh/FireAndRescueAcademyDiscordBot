@@ -67,9 +67,17 @@ class FRABot(commands.Bot):
         # Phase 2 board automation.
         self.trainings = TrainingsService(cfg, self.mc, self.db)
         self.buildings = BuildingsService(cfg, self.mc, self.db, self.geocoder)
-        self.events = EventsService(cfg, self.mc, self.db, self.geocoder)
+        # Events and custom missions both start large alliance missions on the
+        # same alliance-wide free cooldown; a shared lock serializes their
+        # check-then-start so one free window is never double-spent.
+        self._large_mission_lock = asyncio.Lock()
+        self.events = EventsService(
+            cfg, self.mc, self.db, self.geocoder, start_lock=self._large_mission_lock
+        )
         # Custom "Own mission" scheduling (Discord panel/slash + board).
-        self.missions_service = MissionScheduler(cfg, self.mc, self.db, self.geocoder)
+        self.missions_service = MissionScheduler(
+            cfg, self.mc, self.db, self.geocoder, start_lock=self._large_mission_lock
+        )
 
         self._jobs_started = False
 

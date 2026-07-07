@@ -42,6 +42,18 @@ def test_non_mission_post_returns_none():
     assert parse_mission_spec("thanks everyone!") is None
 
 
+def test_events_yields_mission_posts():
+    # The events poller must NOT treat a custom-mission post as an event,
+    # otherwise the same post is started once as an event and once as a
+    # mission. is_mission_post fires even on an invalid mission post.
+    from fra_bot.mc.parsers.mission_spec import is_mission_post
+
+    assert is_mission_post("own mission: NYC\ntype: 5") is True
+    assert is_mission_post("large scale mission: https://maps.google.com/?q=1,2") is True
+    assert is_mission_post("location: Amsterdam") is False
+    assert is_mission_post("here's a cool https://maps.google.com/?q=1,2") is False
+
+
 def test_mission_post_without_location_raises():
     with pytest.raises(MissionSpecError):
         parse_mission_spec("own mission:\ntype: 5")
