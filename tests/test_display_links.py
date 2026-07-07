@@ -58,3 +58,34 @@ def test_non_course_description_untouched():
         format_log_description("building_constructed", "Building constructed (Hospital North)")
         == "Building constructed (Hospital North)"
     )
+
+
+def test_expansion_description_shows_only_detail():
+    # Title already says "Expansion finished"; keep just the detail.
+    assert (
+        format_log_description("expansion_finished", "Expansion finished (Additional cell)")
+        == "Additional cell"
+    )
+    assert (
+        format_log_description("extension_started", "Extension started (Ambulance bay)")
+        == "Ambulance bay"
+    )
+
+
+def test_expansion_description_handles_newline():
+    assert (
+        format_log_description("expansion_finished", "Expansion finished\n(Additional cell)")
+        == "Additional cell"
+    )
+
+
+def test_expansion_description_strips_prefix_without_parens():
+    assert (
+        format_log_description("expansion_finished", "Expansion finished: Additional cell")
+        == "Additional cell"
+    )
+
+
+def test_expansion_description_empty_when_only_action():
+    # Reduces to nothing so the caller drops the redundant line.
+    assert format_log_description("expansion_finished", "Expansion finished") == ""
