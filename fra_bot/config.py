@@ -140,6 +140,23 @@ class ReportsConfig:
 
 
 @dataclass(frozen=True)
+class GeocodingConfig:
+    """Geocoding provider settings.
+
+    Defaults to free OSM Nominatim (no key). Point ``base_url`` at any
+    Nominatim-compatible service (e.g. maps.co, LocationIQ) and set the key
+    via the ``GEOCODER_API_KEY`` environment variable to use your own quota.
+    ``api_key_param`` is the query parameter the provider expects the key in
+    (``api_key`` for maps.co / OpenCage, ``key`` for LocationIQ).
+    """
+    base_url: str
+    api_key: str
+    api_key_param: str
+    contact_email: str
+    min_interval: float
+
+
+@dataclass(frozen=True)
 class LoggingConfig:
     level: str
     path: Path
@@ -155,6 +172,7 @@ class Config:
     discord: DiscordConfig
     automation: AutomationConfig
     reports: ReportsConfig
+    geocoding: GeocodingConfig
     logging: LoggingConfig
 
 
@@ -297,6 +315,18 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 min_contribution_rate=float(
                     _get(raw, "automation", "mission", "min_contribution_rate", default=5.0)
                 ),
+            ),
+        ),
+        geocoding=GeocodingConfig(
+            base_url=str(
+                _get(raw, "geocoding", "base_url", default="https://nominatim.openstreetmap.org")
+            ).rstrip("/"),
+            # Secret: read from the environment, never config.yaml. Optional.
+            api_key=os.environ.get("GEOCODER_API_KEY", "").strip(),
+            api_key_param=str(_get(raw, "geocoding", "api_key_param", default="api_key")),
+            contact_email=str(_get(raw, "geocoding", "contact_email", default="")).strip(),
+            min_interval=float(
+                _get(raw, "geocoding", "min_interval_seconds", default=1.1)
             ),
         ),
         reports=ReportsConfig(

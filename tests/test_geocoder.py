@@ -7,7 +7,7 @@ from fra_bot.db.database import Database
 from fra_bot.db.repos import StateRepo
 from fra_bot.geo.geocoder import GeocodeError, Geocoder
 
-pytestmark = pytest.mark.asyncio
+# asyncio_mode = auto (pytest.ini) runs the async tests without a mark.
 
 
 @pytest_asyncio.fixture
@@ -77,3 +77,33 @@ async def test_search_no_results_raises(geo):
     geo._nominatim = fake_nominatim
     with pytest.raises(GeocodeError):
         await geo.search("nowhere at all")
+
+
+def test_default_geocoder_uses_nominatim_without_key(db):
+    g = Geocoder(StateRepo(db))
+    url = g._geocode_url("/search", {"q": "NYC"})
+    assert url.startswith("https://nominatim.openstreetmap.org/search")
+    assert "api_key" not in url
+
+
+def test_configured_key_is_injected(db):
+    g = Geocoder(
+        StateRepo(db),
+        base_url="https://geocode.maps.co/",
+        api_key="secret123",
+        api_key_param="api_key",
+    )
+    url = g._geocode_url("/search", {"q": "NYC"})
+    assert url.startswith("https://geocode.maps.co/search")
+    assert "api_key=secret123" in url
+
+
+def test_locationiq_style_key_param(db):
+    g = Geocoder(
+        StateRepo(db),
+        base_url="https://us1.locationiq.com/v1",
+        api_key="abc",
+        api_key_param="key",
+    )
+    url = g._geocode_url("/reverse", {"lat": "1", "lon": "2"})
+    assert "key=abc" in url and "api_key=" not in url
