@@ -1,0 +1,194 @@
+"""Configuration loading.
+
+Non-secret settings live in ``config.yaml`` (see ``config.example.yaml``).
+Secrets are read from environment variables / ``.env``:
+
+* ``DISCORD_TOKEN``
+* ``MC_EMAIL``
+* ``MC_PASSWORD``
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+from dotenv import load_dotenv
+
+
+class ConfigError(RuntimeError):
+    """Raised when configuration is missing or invalid."""
+
+
+@dataclass(frozen=True)
+class DatabaseConfig:
+    path: Path
+
+
+@dataclass(frozen=True)
+class MissionChiefConfig:
+    base_url: str
+    alliance_id: int
+    cookie_path: Path
+    min_delay: float
+    max_delay: float
+    max_requests_per_minute: int
+    circuit_breaker_cooldown_minutes: int
+    email: str
+    password: str
+
+
+@dataclass(frozen=True)
+class SyncConfig:
+    members_interval: int
+    applications_interval: int
+    logs_interval: int
+    treasury_interval: int
+    expenses_interval: int
+    expenses_backfill_pages_per_chunk: int
+    expenses_backfill_interval: int
+
+
+@dataclass(frozen=True)
+class DiscordChannels:
+    admin_log: int
+    applications: int
+    member_events: int
+    alliance_logs: int
+    reports: int
+
+
+@dataclass(frozen=True)
+class DiscordConfig:
+    token: str
+    guild_id: int
+    channels: DiscordChannels
+    admin_role_ids: tuple[int, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class ReportsConfig:
+    daily_delay_minutes: int
+    timezone: str
+
+
+@dataclass(frozen=True)
+class LoggingConfig:
+    level: str
+    path: Path
+    max_bytes: int
+    backup_count: int
+
+
+@dataclass(frozen=True)
+class Config:
+    database: DatabaseConfig
+    missionchief: MissionChiefConfig
+    sync: SyncConfig
+    discord: DiscordConfig
+    reports: ReportsConfig
+    logging: LoggingConfig
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ConfigError(
+            f"Environment variable {name} is not set. "
+            f"Add it to your .env file (see .env.example)."
+        )
+    return value
+
+
+def _get(data: dict, *keys: str, default=None, required: bool = False):
+    node = data
+    for key in keys:
+        if not isinstance(node, dict) or key not in node:
+            if required:
+                raise ConfigError(f"Missing config key: {'.'.join(keys)}")
+            return default
+        node = node[key]
+    return node
+
+
+def load_config(path: str | Path = "config.yaml") -> Config:
+    """Load configuration from YAML + environment variables."""
+    load_dotenv()
+
+    config_path = Path(path)
+    if not config_path.exists():
+        raise ConfigError(
+            f"Config file {config_path} not found. "
+            f"Copy config.example.yaml to config.yaml and edit it."
+        )
+    with config_path.open("r", encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+
+    min_delay = float(_get(raw, "missionchief", "min_delay", default=4.0))
+    max_delay = float(_get(raw, "missionchief", "max_delay", default=9.0))
+    if min_delay <= 0 or max_delay < min_delay:
+        raise ConfigError("missionchief.min_delay/max_delay must satisfy 0 < min <= max")
+
+    channels = _get(raw, "discord", "channels", default={}) or {}
+
+    return Config(
+        database=DatabaseConfig(
+            path=Path(_get(raw, "database", "path", default="data/fra_bot.sqlite3")),
+        ),
+        missionchief=MissionChiefConfig(
+            base_url=str(
+                _get(raw, "missionchief", "base_url", default="https://www.missionchief.com")
+            ).rstrip("/"),
+            alliance_id=int(_get(raw, "missionchief", "alliance_id", required=True)),
+            cookie_path=Path(_get(raw, "missionchief", "cookie_path", default="data/cookies.json")),
+            min_delay=min_delay,
+            max_delay=max_delay,
+            max_requests_per_minute=int(
+                _get(raw, "missionchief", "max_requests_per_minute", default=10)
+            ),
+            circuit_breaker_cooldown_minutes=int(
+                _get(raw, "missionchief", "circuit_breaker_cooldown_minutes", default=15)
+            ),
+            email=_require_env("MC_EMAIL"),
+            password=_require_env("MC_PASSWORD"),
+        ),
+        sync=SyncConfig(
+            members_interval=int(_get(raw, "sync", "members_interval", default=60)),
+            applications_interval=int(_get(raw, "sync", "applications_interval", default=5)),
+            logs_interval=int(_get(raw, "sync", "logs_interval", default=15)),
+            treasury_interval=int(_get(raw, "sync", "treasury_interval", default=30)),
+            expenses_interval=int(_get(raw, "sync", "expenses_interval", default=60)),
+            expenses_backfill_pages_per_chunk=int(
+                _get(raw, "sync", "expenses_backfill_pages_per_chunk", default=30)
+            ),
+            expenses_backfill_interval=int(
+                _get(raw, "sync", "expenses_backfill_interval", default=15)
+            ),
+        ),
+        discord=DiscordConfig(
+            token=_require_env("DISCORD_TOKEN"),
+            guild_id=int(_get(raw, "discord", "guild_id", default=0)),
+            channels=DiscordChannels(
+                admin_log=int(channels.get("admin_log", 0)),
+                applications=int(channels.get("applications", 0)),
+                member_events=int(channels.get("member_events", 0)),
+                alliance_logs=int(channels.get("alliance_logs", 0)),
+                reports=int(channels.get("reports", 0)),
+            ),
+            admin_role_ids=tuple(
+                int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])
+            ),
+        ),
+        reports=ReportsConfig(
+            daily_delay_minutes=int(_get(raw, "reports", "daily_delay_minutes", default=10)),
+            timezone=str(_get(raw, "reports", "timezone", default="America/New_York")),
+        ),
+        logging=LoggingConfig(
+            level=str(_get(raw, "logging", "level", default="INFO")).upper(),
+            path=Path(_get(raw, "logging", "path", default="logs/fra_bot.log")),
+            max_bytes=int(_get(raw, "logging", "max_bytes", default=5 * 1024 * 1024)),
+            backup_count=int(_get(raw, "logging", "backup_count", default=5)),
+        ),
+    )

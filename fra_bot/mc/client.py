@@ -1,0 +1,294 @@
+"""Authenticated MissionChief HTTP client.
+
+Design goals, in order:
+
+1. **Robust** — every fetch validates that we are still logged in; on an
+   expired session we re-login once and retry. Retries with exponential
+   backoff on 429/5xx, honouring ``Retry-After``.
+2. **Human-like** — all requests flow through a shared
+   :class:`~fra_bot.core.pacing.HumanPacer` (randomized delays, hard
+   per-minute cap, circuit breaker).
+3. **Frugal** — cookies (including Devise's ``remember_user_token``) are
+   persisted to disk, so restarts do not trigger a fresh login.
+
+MissionChief is Ruby on Rails + Devise. Notable quirks handled here:
+
+* A *failed* login re-renders the sign-in form with HTTP 200 (no error
+  status), so success is verified with a separate authenticated GET.
+* Any unauthenticated request 302-redirects to ``/users/sign_in`` —
+  that redirect is our session-expiry signal.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import random
+from http.cookies import SimpleCookie
+from pathlib import Path
+from urllib.parse import urljoin
+
+import aiohttp
+from bs4 import BeautifulSoup
+
+from ..config import MissionChiefConfig
+from ..core.pacing import HumanPacer
+from .errors import FetchError, LoginError, SessionExpiredError
+
+log = logging.getLogger(__name__)
+
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+SIGN_IN_PATH = "/users/sign_in"
+CHECK_PATH = "/buildings"
+# Markers proving we are looking at a logged-in page.
+_LOGGED_IN_MARKERS = ("/users/sign_out", "logout", "sign out")
+
+_MAX_ATTEMPTS = 3
+
+
+class MissionChiefClient:
+    def __init__(self, cfg: MissionChiefConfig, pacer: HumanPacer) -> None:
+        self._cfg = cfg
+        self._pacer = pacer
+        self._session: aiohttp.ClientSession | None = None
+        self._login_lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Session plumbing
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers={"User-Agent": USER_AGENT},
+                timeout=aiohttp.ClientTimeout(total=40),
+                cookie_jar=aiohttp.CookieJar(),
+            )
+            self._load_cookies()
+
+    async def close(self) -> None:
+        if self._session is not None and not self._session.closed:
+            self._save_cookies()
+            await self._session.close()
+        self._session = None
+
+    @property
+    def session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            raise RuntimeError("MissionChiefClient not started")
+        return self._session
+
+    def url(self, path: str) -> str:
+        return urljoin(self._cfg.base_url + "/", path.lstrip("/"))
+
+    # ------------------------------------------------------------------
+    # Cookie persistence
+    # ------------------------------------------------------------------
+
+    def _load_cookies(self) -> None:
+        path = Path(self._cfg.cookie_path)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            cookie = SimpleCookie()
+            for item in data.get("cookies", []):
+                cookie[item["name"]] = item["value"]
+                if item.get("domain"):
+                    cookie[item["name"]]["domain"] = item["domain"]
+                if item.get("path"):
+                    cookie[item["name"]]["path"] = item["path"]
+            self.session.cookie_jar.update_cookies(cookie)
+            log.info("Loaded %d cookies from %s", len(data.get("cookies", [])), path)
+        except (OSError, ValueError, KeyError) as exc:
+            log.warning("Could not load cookies from %s: %s", path, exc)
+
+    def _save_cookies(self) -> None:
+        if self._session is None:
+            return
+        path = Path(self._cfg.cookie_path)
+        try:
+            cookies = []
+            for cookie in self.session.cookie_jar:
+                cookies.append(
+                    {
+                        "name": cookie.key,
+                        "value": cookie.value,
+                        "domain": cookie.get("domain", ""),
+                        "path": cookie.get("path", "/"),
+                    }
+                )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"cookies": cookies}, indent=2), encoding="utf-8")
+            tmp.replace(path)
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+        except OSError as exc:
+            log.warning("Could not save cookies to %s: %s", path, exc)
+
+    # ------------------------------------------------------------------
+    # Login
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _looks_logged_in(final_url: str, html: str) -> bool:
+        if SIGN_IN_PATH in final_url:
+            return False
+        lowered = html.lower()
+        return any(marker in lowered for marker in _LOGGED_IN_MARKERS)
+
+    async def login(self) -> None:
+        """Perform the full Devise login flow. Raises LoginError on failure."""
+        async with self._login_lock:
+            await self.start()
+            log.info("Logging in to MissionChief as %s", self._cfg.email)
+
+            await self._pacer.wait_turn()
+            sign_in_url = self.url(SIGN_IN_PATH)
+            async with self.session.get(sign_in_url, allow_redirects=True) as resp:
+                html = await resp.text()
+                landed_on = str(resp.url)
+
+            if SIGN_IN_PATH not in landed_on and self._looks_logged_in(landed_on, html):
+                # Persistent cookie was still valid; nothing to do.
+                log.info("Existing session still valid, skipping login POST")
+                self._save_cookies()
+                return
+
+            soup = BeautifulSoup(html, "lxml")
+            form = soup.find("form", method=lambda m: m and m.lower() == "post")
+            if form is None:
+                raise LoginError("No POST form found on sign-in page (layout change?)")
+            action_url = urljoin(sign_in_url, form.get("action") or SIGN_IN_PATH)
+
+            # Collect every input in the form: this picks up the hidden
+            # authenticity_token (CSRF), utf8 and commit fields.
+            fields: dict[str, str] = {}
+            for inp in form.find_all("input"):
+                name = inp.get("name")
+                if name:
+                    fields[name] = inp.get("value", "")
+            fields["user[email]"] = self._cfg.email
+            fields["user[password]"] = self._cfg.password
+            fields.setdefault("user[remember_me]", "1")
+
+            await self._pacer.wait_turn()
+            async with self.session.post(
+                action_url,
+                data=fields,
+                allow_redirects=True,
+                headers={"Referer": sign_in_url},
+            ) as resp:
+                await resp.text()
+
+            # Devise renders the sign-in form again with HTTP 200 on bad
+            # credentials, so verify with a separate authenticated GET.
+            await self._pacer.wait_turn()
+            async with self.session.get(
+                self.url(CHECK_PATH),
+                allow_redirects=True,
+                headers={"Referer": action_url},
+            ) as resp:
+                check_html = await resp.text()
+                final_url = str(resp.url)
+
+            if not self._looks_logged_in(final_url, check_html):
+                raise LoginError(
+                    "Login verification failed: check request ended on "
+                    f"{final_url}. Check MC_EMAIL/MC_PASSWORD."
+                )
+
+            self._save_cookies()
+            log.info("MissionChief login successful")
+
+    # ------------------------------------------------------------------
+    # Fetching
+    # ------------------------------------------------------------------
+
+    async def fetch_page(self, path: str, *, referer: str | None = None) -> str:
+        """GET a MissionChief page, returning HTML.
+
+        Handles pacing, retries and transparent re-login on session
+        expiry. Raises FetchError / LoginError when all else fails.
+        """
+        await self.start()
+        target = self.url(path)
+        relogged_in = False
+
+        for attempt in range(_MAX_ATTEMPTS):
+            await self._pacer.wait_turn()
+            try:
+                headers = {"Referer": referer} if referer else {}
+                async with self.session.get(
+                    target, allow_redirects=True, headers=headers
+                ) as resp:
+                    status = resp.status
+                    final_url = str(resp.url)
+                    html = await resp.text()
+                    retry_after = resp.headers.get("Retry-After")
+
+                if status == 429 or status >= 500:
+                    self._pacer.record_failure()
+                    delay = _parse_retry_after(retry_after) or min(
+                        5.0 * (2**attempt), 60.0
+                    )
+                    log.warning(
+                        "HTTP %s for %s (attempt %d/%d), backing off %.1fs",
+                        status, target, attempt + 1, _MAX_ATTEMPTS, delay,
+                    )
+                    await asyncio.sleep(delay + random.uniform(0.0, 1.0))
+                    continue
+
+                if status >= 400:
+                    self._pacer.record_failure()
+                    raise FetchError(target, status)
+
+                if SIGN_IN_PATH in final_url:
+                    # Session expired mid-scrape: re-login once, then retry.
+                    if relogged_in:
+                        raise SessionExpiredError(
+                            f"Still redirected to sign-in after re-login ({target})"
+                        )
+                    log.info("Session expired (redirect to sign-in); re-logging in")
+                    relogged_in = True
+                    await self.login()
+                    continue
+
+                self._pacer.record_success()
+                return html
+
+            except aiohttp.ClientError as exc:
+                self._pacer.record_failure()
+                delay = min(5.0 * (2**attempt), 60.0)
+                log.warning(
+                    "Network error fetching %s (attempt %d/%d): %s — retrying in %.1fs",
+                    target, attempt + 1, _MAX_ATTEMPTS, exc, delay,
+                )
+                await asyncio.sleep(delay + random.uniform(0.0, 1.0))
+
+        raise FetchError(target, message=f"Gave up on {target} after {_MAX_ATTEMPTS} attempts")
+
+    async def verify_session(self) -> bool:
+        """Cheap health check: are we still logged in?"""
+        try:
+            await self.fetch_page(CHECK_PATH)
+            return True
+        except (FetchError, LoginError, SessionExpiredError):
+            return False
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return min(float(value), 60.0)
+    except ValueError:
+        return None
