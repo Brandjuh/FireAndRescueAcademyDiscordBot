@@ -210,7 +210,7 @@ class AdminCog(commands.Cog):
     @fra.command(name="update")
     async def update(self, ctx: commands.Context) -> None:
         """Pull the latest code, install deps and restart the bot."""
-        from ..selfupdate import perform_update, reexec
+        from ..selfupdate import perform_update, reexec, write_restart_marker
 
         message = await ctx.send("⏳ Checking for updates…")
         try:
@@ -234,8 +234,16 @@ class AdminCog(commands.Cog):
         )
         if result.detail:
             embed.add_field(name="Changes", value=f"```\n{result.detail[:1000]}\n```", inline=False)
-        embed.set_footer(text="The bot will restart now; give it ~15s.")
+        embed.set_footer(text="Restarting now — I'll confirm here in ~15s.")
         await message.edit(content=None, embed=embed)
+
+        # Remember where to confirm once the fresh process is up.
+        write_restart_marker(
+            self.bot.cfg.database.path,
+            channel_id=ctx.channel.id,
+            old_rev=result.old_rev,
+            new_rev=result.new_rev,
+        )
 
         # Clean up resources, then replace the process with fresh code.
         log.info("Self-update applied (%s); restarting", result.summary)

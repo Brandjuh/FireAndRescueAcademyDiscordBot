@@ -10,9 +10,11 @@ abrupt stop safe anyway.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +22,58 @@ log = logging.getLogger(__name__)
 
 # Repo root = parent of the fra_bot package directory.
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# After an update the process re-execs, losing the command context. We
+# leave a small marker on disk so the freshly started bot knows to post
+# a "restarted" confirmation in the channel the update was run from.
+_MARKER_NAME = "restart_marker.json"
+_MARKER_MAX_AGE_SECONDS = 600  # ignore a stale marker from a failed start
+
+
+def _marker_path(db_path: Path) -> Path:
+    return Path(db_path).parent / _MARKER_NAME
+
+
+def write_restart_marker(
+    db_path: Path, *, channel_id: int, old_rev: str, new_rev: str
+) -> None:
+    path = _marker_path(db_path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "channel_id": int(channel_id),
+                    "old_rev": old_rev,
+                    "new_rev": new_rev,
+                    "written_at": time.time(),
+                }
+            ),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning("Could not write restart marker: %s", exc)
+
+
+def read_and_clear_restart_marker(db_path: Path) -> dict | None:
+    """Return the marker (once) and delete it. None if absent/stale."""
+    path = _marker_path(db_path)
+    if not path.exists():
+        return None
+    data: dict | None = None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    if not data:
+        return None
+    if time.time() - float(data.get("written_at", 0)) > _MARKER_MAX_AGE_SECONDS:
+        return None  # a much older restart; don't post a confusing message
+    return data
 
 
 @dataclass
