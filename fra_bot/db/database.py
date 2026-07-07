@@ -8,9 +8,11 @@ tracked in ``schema_migrations`` so upgrades are one-way and explicit.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
@@ -29,12 +31,50 @@ class Database:
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
         self._conn: aiosqlite.Connection | None = None
+        # Serializes explicit BEGIN..commit blocks. A single aiosqlite
+        # connection is shared by every scheduler task, so without this
+        # two coroutines could interleave their transactions on the one
+        # connection (SQLite allows only one open transaction) — the
+        # second BEGIN would fail and its rollback would abort the
+        # first's in-flight writes. All multi-statement writes take this.
+        self._tx_lock = asyncio.Lock()
 
     @property
     def conn(self) -> aiosqlite.Connection:
         if self._conn is None:
             raise RuntimeError("Database not connected")
         return self._conn
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Run a serialized explicit transaction on the shared connection."""
+        async with self._tx_lock:
+            conn = self.conn
+            await conn.execute("BEGIN")
+            try:
+                yield conn
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+
+    async def execute(self, sql: str, params: tuple = ()) -> int:
+        """Serialized single-statement write. Returns rowcount.
+
+        Reads never take the lock (WAL readers are non-blocking); only
+        writes are serialized so they can't interleave into another
+        coroutine's open transaction on the shared connection.
+        """
+        async with self._tx_lock:
+            cur = await self.conn.execute(sql, params)
+            await self.conn.commit()
+            return cur.rowcount
+
+    async def execute_returning_id(self, sql: str, params: tuple = ()) -> int:
+        async with self._tx_lock:
+            cur = await self.conn.execute(sql, params)
+            await self.conn.commit()
+            return cur.lastrowid
 
     async def connect(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

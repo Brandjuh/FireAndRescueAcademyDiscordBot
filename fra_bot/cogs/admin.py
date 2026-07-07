@@ -11,6 +11,7 @@ from discord.ext import commands
 
 from ..db.repos import (
     ApplicationsRepo,
+    AutomationRepo,
     LogsRepo,
     MembersRepo,
     RunsRepo,
@@ -44,6 +45,7 @@ class AdminCog(commands.Cog):
         self._treasury = TreasuryRepo(bot.db)
         self._runs = RunsRepo(bot.db)
         self._state = StateRepo(bot.db)
+        self._automation = AutomationRepo(bot.db)
 
     @commands.group(name="fra", invoke_without_command=True)
     @is_fra_admin()
@@ -101,9 +103,52 @@ class AdminCog(commands.Cog):
             embed.add_field(name="Recent runs", value="\n".join(lines), inline=False)
         await ctx.send(embed=embed)
 
+    @fra.command(name="automation")
+    async def automation(self, ctx: commands.Context) -> None:
+        """Board automation status: switches, dry-run, recent requests."""
+        auto = self.bot.cfg.automation
+        embed = discord.Embed(
+            title="🤖 Board automation",
+            colour=discord.Colour.orange() if auto.dry_run else discord.Colour.green(),
+            timestamp=dt.datetime.now(dt.timezone.utc),
+        )
+        embed.add_field(
+            name="Mode",
+            value="🧪 DRY-RUN (no actions)" if auto.dry_run else "🟢 LIVE",
+            inline=False,
+        )
+        embed.add_field(
+            name="Trainings",
+            value=f"{'on' if auto.training.enabled else 'off'} · thread {auto.training.thread_id}",
+        )
+        embed.add_field(
+            name="Buildings",
+            value=f"{'on' if auto.building.enabled else 'off'} · thread {auto.building.thread_id}",
+        )
+        embed.add_field(
+            name="Events",
+            value=f"{'on' if auto.events.enabled else 'off'} · thread {auto.events.thread_id}",
+        )
+        embed.add_field(name="Open requests", value=str(await self._automation.open_count()))
+
+        recent = await self._automation.recent(limit=8)
+        if recent:
+            lines = []
+            for row in recent:
+                icon = {"done": "✅", "failed": "❌", "skipped": "⏭️", "waiting": "⏳"}.get(
+                    row["status"], "•"
+                )
+                lines.append(
+                    f"{icon} `{row['kind']}` #{row['post_id']} — "
+                    f"{row['status_detail'] or row['status']}"[:100]
+                )
+            embed.add_field(name="Recent requests", value="\n".join(lines), inline=False)
+        await ctx.send(embed=embed)
+
     @fra.command(name="sync")
     async def sync(self, ctx: commands.Context, scraper: str) -> None:
-        """Manually run a sync: members, applications, logs, treasury, expenses."""
+        """Run a sync/poll: members, applications, logs, treasury, expenses,
+        backfill, trainings, buildings, events."""
         jobs = {
             "members": self.bot.members_sync.run,
             "applications": self.bot.applications_sync.run,
@@ -111,6 +156,9 @@ class AdminCog(commands.Cog):
             "treasury": self.bot.treasury_sync.sync_balance_and_income,
             "expenses": self.bot.treasury_sync.sync_expenses_incremental,
             "backfill": self.bot.treasury_sync.backfill_step,
+            "trainings": self.bot.trainings.poll,
+            "buildings": self.bot.buildings.poll,
+            "events": self.bot.events.poll,
         }
         job = jobs.get(scraper.lower())
         if job is None:
@@ -158,6 +206,47 @@ class AdminCog(commands.Cog):
             description=_format_top10(rows),
         )
         await ctx.send(embed=embed)
+
+    @fra.command(name="update")
+    async def update(self, ctx: commands.Context) -> None:
+        """Pull the latest code, install deps and restart the bot."""
+        from ..selfupdate import perform_update, reexec
+
+        message = await ctx.send("⏳ Checking for updates…")
+        try:
+            result = await perform_update()
+        except Exception as exc:  # surfaced to the admin
+            log.exception("Self-update failed")
+            await message.edit(content=f"❌ Update failed: {exc}")
+            return
+
+        if not result.ok:
+            await message.edit(content=f"❌ {result.summary}\n```\n{result.detail[:1500]}\n```")
+            return
+        if not result.changed:
+            await message.edit(content=f"✅ {result.summary}")
+            return
+
+        embed = discord.Embed(
+            title="⬆️ Updating and restarting",
+            colour=discord.Colour.green(),
+            description=result.summary,
+        )
+        if result.detail:
+            embed.add_field(name="Changes", value=f"```\n{result.detail[:1000]}\n```", inline=False)
+        embed.set_footer(text="The bot will restart now; give it ~15s.")
+        await message.edit(content=None, embed=embed)
+
+        # Clean up resources, then replace the process with fresh code.
+        log.info("Self-update applied (%s); restarting", result.summary)
+        try:
+            await self.bot.scheduler.stop()
+            await self.bot.geocoder.close()
+            await self.bot.mc.close()
+            await self.bot.db.close()
+        except Exception:
+            log.exception("Error during pre-restart cleanup; restarting anyway")
+        reexec()
 
     @fra.command(name="report")
     async def report(self, ctx: commands.Context, kind: str = "daily") -> None:

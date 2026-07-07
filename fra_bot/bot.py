@@ -12,10 +12,15 @@ from .config import Config
 from .core.pacing import HumanPacer
 from .core.scheduler import Scheduler
 from .db.database import Database
+from .db.repos import StateRepo
+from .geo.geocoder import Geocoder
 from .mc.client import MissionChiefClient
 from .services.applications_sync import ApplicationsSyncService
+from .services.buildings import BuildingsService
+from .services.events import EventsService
 from .services.logs_sync import LogsSyncService
 from .services.members_sync import MembersSyncService
+from .services.trainings import TrainingsService
 from .services.treasury_sync import TreasurySyncService
 
 log = logging.getLogger(__name__)
@@ -38,25 +43,34 @@ class FRABot(commands.Bot):
         )
         self.mc = MissionChiefClient(cfg.missionchief, self.pacer)
         self.scheduler = Scheduler()
+        self.geocoder = Geocoder(StateRepo(self.db))
 
         self.members_sync = MembersSyncService(cfg, self.mc, self.db)
         self.applications_sync = ApplicationsSyncService(self.mc, self.db)
         self.logs_sync = LogsSyncService(self.mc, self.db)
         self.treasury_sync = TreasurySyncService(cfg, self.mc, self.db)
 
+        # Phase 2 board automation.
+        self.trainings = TrainingsService(cfg, self.mc, self.db)
+        self.buildings = BuildingsService(cfg, self.mc, self.db, self.geocoder)
+        self.events = EventsService(cfg, self.mc, self.db, self.geocoder)
+
         self._jobs_started = False
 
     async def setup_hook(self) -> None:
         await self.db.connect()
         await self.mc.start()
+        await self.geocoder.start()
 
         from .cogs.admin import AdminCog
+        from .cogs.automation import AutomationCog
         from .cogs.notifications import NotificationsCog
         from .cogs.reports import ReportsCog
 
         await self.add_cog(AdminCog(self))
         await self.add_cog(NotificationsCog(self))
         await self.add_cog(ReportsCog(self))
+        await self.add_cog(AutomationCog(self))
 
     async def on_ready(self) -> None:
         log.info("Logged in to Discord as %s (%s)", self.user, self.user.id)
@@ -113,7 +127,36 @@ class FRABot(commands.Bot):
             timezone=self.cfg.reports.timezone,
             name="treasury-pre-reset",
         )
-        log.info("Background jobs scheduled")
+
+        # Phase 2 board automation pollers (each gated by its own switch).
+        automation = self.cfg.automation
+        if automation.training.enabled:
+            sched.add_interval_job(
+                self._guarded(self.trainings.poll, "board-trainings"),
+                minutes=automation.training.interval,
+                name="board-trainings",
+                initial_delay_seconds=150.0,
+            )
+        if automation.building.enabled:
+            sched.add_interval_job(
+                self._guarded(self.buildings.poll, "board-buildings"),
+                minutes=automation.building.interval,
+                name="board-buildings",
+                initial_delay_seconds=210.0,
+            )
+        if automation.events.enabled:
+            sched.add_interval_job(
+                self._guarded(self.events.poll, "board-events"),
+                minutes=automation.events.interval,
+                name="board-events",
+                initial_delay_seconds=270.0,
+            )
+        log.info(
+            "Background jobs scheduled (automation: dry_run=%s, training=%s, "
+            "building=%s, events=%s)",
+            automation.dry_run, automation.training.enabled,
+            automation.building.enabled, automation.events.enabled,
+        )
 
     def _guarded(self, func, name: str):
         """Wrap a sync job so scheduler jobs log-and-continue on errors,
@@ -155,6 +198,7 @@ class FRABot(commands.Bot):
     async def close(self) -> None:
         log.info("Shutting down…")
         await self.scheduler.stop()
+        await self.geocoder.close()
         await self.mc.close()
         await self.db.close()
         await super().close()

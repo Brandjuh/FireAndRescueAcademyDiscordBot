@@ -18,8 +18,36 @@ Designed to run 24/7 on a **Raspberry Pi 4B with Debian Bookworm**
 | Alliance funds + income top lists | `/verband/kasse` (+`?type=monthly`) | every 30 min + a final capture at 23:52 New York | daily & monthly top-10 reports after the New York midnight reset |
 | Expense ledger (3150+ pages) | `/verband/kasse?page=N` | one resumable backfill, then incremental | — (stored for reporting/auditing) |
 
-Browser emulation (building placement, event starts) is a later phase and
-will build on this data foundation.
+## What it does (phase 2 — board request automation)
+
+The bot watches the alliance board threads and acts on member requests.
+**Everything is off by default and starts in dry-run** (detect + report,
+no MissionChief actions) so you can watch it before letting it act.
+
+| Request | Thread | What the bot does |
+|---|---|---|
+| Trainings | 5935 | Matches the requested course, checks the requester's contribution rate, opens a free 1-hour alliance class in the right academy, verifies a classroom was actually taken, and replies |
+| Hospitals / prisons | 6165 | Geocodes the shared Google Maps link, detects hospital vs prison, checks the live alliance-funds floor, builds via browser emulation (optional Playwright), and replies |
+| Events | 15293 | Geocodes the location and starts a large scale alliance mission there as soon as the free-start cooldown allows (queued otherwise) |
+
+Enable per feature in `config.yaml` under `automation:` and flip
+`dry_run: false` once you trust it. `!fra automation` shows the current
+switches and recent requests.
+
+### Optional: browser emulation for building placement
+
+Building placement drives MissionChief's JS form with Playwright. It is
+**optional** — without it, building requests are geocoded and reported
+for an admin to place manually. To enable automatic building on the Pi:
+
+```bash
+cd ~/FireAndRescueAcademyDiscordBot
+.venv/bin/pip install playwright
+.venv/bin/python -m playwright install --with-deps chromium
+```
+
+Chromium adds ~400 MB and needs memory; on a Pi 4B keep other load low.
+Trainings and events use plain HTTP and need no browser.
 
 ## Design principles
 
@@ -156,6 +184,18 @@ Requires Discord administrator permission or a role listed in
 | `!fra balance` | Latest known alliance funds |
 | `!fra top10 [daily\|monthly]` | Current income top-10 |
 | `!fra report [daily\|monthly]` | Repost the last completed period's report |
+| `!fra automation` | Board automation switches, dry-run state, recent requests |
+| `!fra sync <trainings\|buildings\|events>` | Poll a board thread now |
+| `!fra update` | Pull the latest code, install deps and restart the bot |
+
+### Updating from Discord
+
+`!fra update` fetches the latest code on the bot's branch, installs any
+new dependencies into its virtualenv, and restarts in place (no SSH, no
+sudo needed). It reports the changelog and restarts within ~15 seconds.
+If there's nothing new it just says "Already up to date". Configuration
+(`config.yaml`, `.env`) and the database are never touched. You can
+still update over SSH by re-running `install.sh`.
 
 ## Development
 
@@ -175,6 +215,7 @@ fra_bot/
 │   └── parsers/         # one defensive parser per page type
 ├── db/                  # aiosqlite + migrations + repositories
 │   └── migrations/      # numbered .sql files
-├── services/            # sync services (fetch → parse → store)
-└── cogs/                # Discord layer (publisher, reports, admin)
+├── geo/                 # Google Maps link parsing + geocoding
+├── services/            # sync + board automation services
+└── cogs/                # Discord layer (publisher, reports, admin, automation)
 ```
