@@ -22,6 +22,7 @@ from .display import (
     FALLBACK_DISPLAY,
     MEMBER_EVENT_DISPLAY,
     affected_url,
+    format_log_description,
     profile_url,
 )
 
@@ -142,7 +143,7 @@ class NotificationsCog(commands.Cog):
                     f"**Affected:** [{affected}]({url})" if url else f"**Affected:** {affected}"
                 )
             if row["description"]:
-                lines.append(row["description"])
+                lines.append(format_log_description(row["action_key"], row["description"]))
             if row["contribution_amount"]:
                 lines.append(f"**Contribution:** {row['contribution_amount']:+,} credits")
             unix = _event_unix(row["event_at"])

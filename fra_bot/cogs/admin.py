@@ -210,7 +210,7 @@ class AdminCog(commands.Cog):
     @fra.command(name="update")
     async def update(self, ctx: commands.Context) -> None:
         """Pull the latest code, install deps and restart the bot."""
-        from ..selfupdate import perform_update, reexec, write_restart_marker
+        from ..selfupdate import perform_update, write_restart_marker
 
         message = await ctx.send("⏳ Checking for updates…")
         try:
@@ -245,9 +245,39 @@ class AdminCog(commands.Cog):
             new_rev=result.new_rev,
         )
 
-        # Clean up resources, then replace the process with fresh code.
         log.info("Self-update applied (%s); restarting", result.summary)
+        await self._restart_process()
+
+    @fra.command(name="restart")
+    async def restart(self, ctx: commands.Context) -> None:
+        """Restart the bot (reloads config.yaml / .env) without updating code."""
+        from ..selfupdate import current_rev, write_restart_marker
+
+        rev = await current_rev()
+        embed = discord.Embed(
+            title="🔁 Restarting",
+            colour=discord.Colour.blue(),
+            description="Reloading configuration and restarting.",
+        )
+        embed.set_footer(text="I'll confirm here in ~15s.")
+        await ctx.send(embed=embed)
+
+        write_restart_marker(
+            self.bot.cfg.database.path,
+            channel_id=ctx.channel.id,
+            old_rev=rev,
+            new_rev=rev,
+            reason="restart",
+        )
+        log.info("Restart requested via Discord; restarting")
+        await self._restart_process()
+
+    async def _restart_process(self) -> None:
+        """Clean up resources, then replace the process with a fresh one."""
+        from ..selfupdate import reexec
+
         try:
+            await self.bot.presence.stop()
             await self.bot.scheduler.stop()
             await self.bot.geocoder.close()
             await self.bot.mc.close()

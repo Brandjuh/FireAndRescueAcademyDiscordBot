@@ -83,7 +83,7 @@ class FRABot(commands.Bot):
             await self._announce_restart_if_updated()
 
     async def _announce_restart_if_updated(self) -> None:
-        """If we just restarted from !fra update, confirm in that channel."""
+        """If we just restarted from !fra update / !fra restart, confirm."""
         from .selfupdate import read_and_clear_restart_marker
 
         marker = read_and_clear_restart_marker(self.cfg.database.path)
@@ -93,14 +93,17 @@ class FRABot(commands.Bot):
         if channel is None:
             return
         old_rev, new_rev = marker.get("old_rev", "?"), marker.get("new_rev", "?")
+        reason = marker.get("reason", "update")
+        if reason == "restart":
+            description = f"Restarted (config reloaded) — running `{new_rev}`."
+        elif old_rev != new_rev:
+            description = f"Update applied — now running `{new_rev}` (was `{old_rev}`)."
+        else:
+            description = f"Restarted — running `{new_rev}`."
         embed = discord.Embed(
             title="✅ Bot restarted",
             colour=discord.Colour.green(),
-            description=(
-                f"Update applied — now running `{new_rev}` (was `{old_rev}`)."
-                if old_rev != new_rev
-                else f"Restarted — running `{new_rev}`."
-            ),
+            description=description,
         )
         try:
             await channel.send(embed=embed)
