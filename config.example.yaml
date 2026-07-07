@@ -1,0 +1,63 @@
+# Fire & Rescue Academy Discord Bot — configuration
+#
+# Copy this file to `config.yaml` and fill in the values.
+# Secrets (tokens, passwords) go in `.env` — NOT in this file.
+
+database:
+  # SQLite database file. Relative paths resolve against the working directory.
+  path: data/fra_bot.sqlite3
+
+missionchief:
+  base_url: https://www.missionchief.com
+  # Alliance id as it appears in /verband/mitglieder/<id>
+  alliance_id: 1621
+  # Cookie jar persisted between restarts so we don't re-login every boot.
+  cookie_path: data/cookies.json
+  # Human-like pacing between requests to MissionChief (seconds).
+  # Every request waits a random delay in [min_delay, max_delay].
+  min_delay: 4.0
+  max_delay: 9.0
+  # Hard safety cap: never exceed this many requests per minute.
+  max_requests_per_minute: 10
+  # Pause all scraping for this many minutes after repeated failures.
+  circuit_breaker_cooldown_minutes: 15
+
+sync:
+  # All intervals in minutes. Jitter is applied automatically so runs
+  # don't happen at exactly the same second every time.
+  members_interval: 60          # full member list sweep (~47+ pages)
+  applications_interval: 5      # /verband/bewerbungen
+  logs_interval: 15             # /alliance_logfiles (incremental)
+  treasury_interval: 30         # /verband/kasse balance + income snapshot
+  expenses_interval: 60         # incremental expenses sync
+  # Initial expenses backfill (3150+ pages) runs in slow chunks so it
+  # stays human-like. Pages per chunk; a chunk runs once per interval.
+  # 30 pages / 15 min completes ~3150 pages in a bit over a day.
+  expenses_backfill_pages_per_chunk: 30
+  expenses_backfill_interval: 15
+
+discord:
+  # Guild (server) id the bot operates in.
+  guild_id: 0
+  # Channel ids (0 = disabled)
+  channels:
+    admin_log: 0          # bot health, errors, sync summaries
+    applications: 0       # new alliance application alerts
+    member_events: 0      # joins / leaves / role & contribution changes
+    alliance_logs: 0      # mirrored MissionChief alliance log feed
+    reports: 0            # daily / monthly income reports
+  # Role ids allowed to use admin commands (besides server administrators).
+  admin_role_ids: []
+
+reports:
+  # Reports are generated after the MissionChief daily reset (midnight
+  # America/New_York). Delay a few minutes to let the site settle.
+  daily_delay_minutes: 10
+  timezone: America/New_York
+
+logging:
+  level: INFO
+  # Rotating file log next to the database; console logging is always on.
+  path: logs/fra_bot.log
+  max_bytes: 5242880   # 5 MiB
+  backup_count: 5

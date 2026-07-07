@@ -1,0 +1,9 @@
+# Runtime dependencies — pinned loosely to majors that are known-good on
+# Raspberry Pi 4B / Debian Bookworm (Python 3.11, aarch64).
+discord.py>=2.4,<3.0
+aiohttp>=3.9,<4.0
+aiosqlite>=0.20,<1.0
+beautifulsoup4>=4.12,<5.0
+lxml>=5.0,<7.0
+PyYAML>=6.0,<7.0
+python-dotenv>=1.0,<2.0
