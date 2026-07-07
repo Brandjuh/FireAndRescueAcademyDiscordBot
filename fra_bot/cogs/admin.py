@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands
@@ -312,23 +311,22 @@ class AdminCog(commands.Cog):
             log.exception("Error during pre-restart cleanup; restarting anyway")
         reexec()
 
+    # Friendly aliases for the historical income reports so muscle memory
+    # (`!fra report daily`) still works after the framework generalisation.
+    _REPORT_ALIASES = {"daily": "income-daily", "monthly": "income-monthly"}
+
     @fra.command(name="report")
-    async def report(self, ctx: commands.Context, kind: str = "daily") -> None:
-        """Repost the most recent daily/monthly report on demand."""
-        reports_cog = self.bot.get_cog("ReportsCog")
-        if reports_cog is None:
-            await ctx.send("Reports cog not loaded.")
+    async def report(
+        self, ctx: commands.Context, name: str = "list", period: str = ""
+    ) -> None:
+        """Render any registered report: `!fra report <name> [period]`.
+
+        `!fra report list` shows everything available. The framework is
+        read-only, so it is safe to run while the bot is in dry-run.
+        """
+        reporting = self.bot.get_cog("ReportingCog")
+        if reporting is None:
+            await ctx.send("Reporting cog not loaded.")
             return
-        now_ny = dt.datetime.now(ZoneInfo("America/New_York"))
-        if kind.lower() == "daily":
-            ok = await reports_cog.post_daily_report(
-                (now_ny - dt.timedelta(days=1)).date()
-            )
-        elif kind.lower() == "monthly":
-            first = now_ny.replace(day=1) - dt.timedelta(days=1)
-            ok = await reports_cog.post_monthly_report(first.strftime("%Y-%m"))
-        else:
-            await ctx.send("Kind must be `daily` or `monthly`.")
-            return
-        if not ok:
-            await ctx.send("No snapshot available for that period (yet).")
+        name = self._REPORT_ALIASES.get(name.lower(), name)
+        await reporting.cmd_report(ctx, name, period)

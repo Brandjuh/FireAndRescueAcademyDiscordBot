@@ -47,6 +47,12 @@ class FRABot(commands.Bot):
         self.scheduler = Scheduler()
         self.geocoder = Geocoder(StateRepo(self.db))
         self.presence = PresenceManager(self)
+
+        from .reporting import ReportRegistry
+        from .reporting.reports import register_builtin_reports
+
+        self.reports = ReportRegistry()
+        register_builtin_reports(self.reports, self.db)
         # Per-job locks so a manual !fra sync can't run a second copy of
         # a job that's already running on the scheduler (which would
         # duplicate ledger rows and repeat real MissionChief actions).
@@ -85,12 +91,14 @@ class FRABot(commands.Bot):
         from .cogs.admin import AdminCog
         from .cogs.automation import AutomationCog
         from .cogs.notifications import NotificationsCog
+        from .cogs.reporting import ReportingCog
         from .cogs.reports import ReportsCog
 
         await self.add_cog(AdminCog(self))
         await self.add_cog(NotificationsCog(self))
         await self.add_cog(ReportsCog(self))
         await self.add_cog(AutomationCog(self))
+        await self.add_cog(ReportingCog(self))
 
     async def on_command_error(self, ctx, error) -> None:
         from discord.ext import commands as _commands
