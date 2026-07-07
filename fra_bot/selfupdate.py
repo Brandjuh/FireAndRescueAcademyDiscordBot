@@ -185,4 +185,10 @@ def reexec() -> None:
     log.info("Re-executing for self-update: %s", " ".join(args))
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execv(sys.executable, args)
+    try:
+        os.execv(sys.executable, args)
+    except OSError:
+        # execv failed — do NOT leave a half-torn-down zombie. Exit
+        # non-zero so systemd (Restart=on-failure) starts a fresh process.
+        log.exception("os.execv failed; exiting so the supervisor restarts us")
+        os._exit(1)

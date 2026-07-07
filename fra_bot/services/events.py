@@ -138,7 +138,6 @@ class EventsService(BoardRequestService):
         self, request_id: int, requester: str | None, payload: dict, *, announce: bool = True
     ) -> None:
         new_path = EVENT_KINDS[REQUEST_KIND]["new_path"]
-        create_path = EVENT_KINDS[REQUEST_KIND]["create_path"]
         lat, lng = payload["latitude"], payload["longitude"]
 
         try:

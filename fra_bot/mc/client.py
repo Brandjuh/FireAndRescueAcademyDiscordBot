@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -140,7 +141,12 @@ class MissionChiefClient:
                 )
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"cookies": cookies}, indent=2), encoding="utf-8")
+            # Create the temp file 0600 BEFORE writing the session token,
+            # so the secret is never briefly world-readable on disk.
+            payload = json.dumps({"cookies": cookies}, indent=2)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
             tmp.replace(path)
             try:
                 path.chmod(0o600)

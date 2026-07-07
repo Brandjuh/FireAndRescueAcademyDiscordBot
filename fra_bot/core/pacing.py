@@ -41,17 +41,19 @@ class HumanPacer:
         max_per_minute: int,
         failure_threshold: int = 5,
         cooldown_seconds: float = 900.0,
+        failure_window_seconds: float = 600.0,
     ) -> None:
         self._min_delay = min_delay
         self._max_delay = max_delay
         self._max_per_minute = max(1, max_per_minute)
         self._failure_threshold = failure_threshold
         self._cooldown_seconds = cooldown_seconds
+        self._failure_window = failure_window_seconds
 
         self._lock = asyncio.Lock()
         self._recent: deque[float] = deque()
         self._next_allowed = 0.0
-        self._consecutive_failures = 0
+        self._failures: deque[float] = deque()
         self._circuit_open_until = 0.0
 
     @property
@@ -82,13 +84,19 @@ class HumanPacer:
             self._next_allowed = sent_at + random.uniform(self._min_delay, self._max_delay)
 
     def record_success(self) -> None:
-        self._consecutive_failures = 0
+        # Windowed breaker: a single success no longer wipes the failure
+        # history, so intermittent failures (fail, ok, fail, ok, …) can
+        # still trip it. Old failures simply age out of the window.
+        pass
 
     def record_failure(self) -> None:
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self._failure_threshold:
-            self._circuit_open_until = time.monotonic() + self._cooldown_seconds
-            self._consecutive_failures = 0
+        now = time.monotonic()
+        self._failures.append(now)
+        while self._failures and self._failures[0] < now - self._failure_window:
+            self._failures.popleft()
+        if len(self._failures) >= self._failure_threshold:
+            self._circuit_open_until = now + self._cooldown_seconds
+            self._failures.clear()
             log.warning(
                 "Circuit breaker opened: pausing MissionChief traffic for %.0f minutes",
                 self._cooldown_seconds / 60,

@@ -126,10 +126,11 @@ class TreasurySyncService:
                         "Expense table missing on kasse page 1 — layout change?"
                     )
                 if not page.rows:
-                    # Walked past the last page: commit the whole ledger.
-                    copied = await self._treasury.staging_finalize()
-                    await self._state.set(STATE_BACKFILL_DONE, "1")
-                    await self._state.delete(STATE_BACKFILL_NEXT_PAGE)
+                    # Walked past the last page: commit the whole ledger
+                    # and flip the done flag atomically.
+                    copied = await self._treasury.staging_finalize(
+                        STATE_BACKFILL_DONE, STATE_BACKFILL_NEXT_PAGE
+                    )
                     await self._runs.finish(
                         run_id,
                         status="success",

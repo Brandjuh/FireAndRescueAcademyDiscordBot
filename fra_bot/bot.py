@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 
@@ -46,6 +47,10 @@ class FRABot(commands.Bot):
         self.scheduler = Scheduler()
         self.geocoder = Geocoder(StateRepo(self.db))
         self.presence = PresenceManager(self)
+        # Per-job locks so a manual !fra sync can't run a second copy of
+        # a job that's already running on the scheduler (which would
+        # duplicate ledger rows and repeat real MissionChief actions).
+        self._job_locks: dict[str, asyncio.Lock] = {}
 
         self.members_sync = MembersSyncService(cfg, self.mc, self.db)
         self.applications_sync = ApplicationsSyncService(self.mc, self.db)
@@ -61,6 +66,11 @@ class FRABot(commands.Bot):
 
     async def setup_hook(self) -> None:
         await self.db.connect()
+        from .db.repos import RunsRepo
+
+        orphans = await RunsRepo(self.db).close_orphans()
+        if orphans:
+            log.info("Marked %d interrupted scrape run(s) as failed", orphans)
         await self.mc.start()
         await self.geocoder.start()
 
@@ -73,6 +83,29 @@ class FRABot(commands.Bot):
         await self.add_cog(NotificationsCog(self))
         await self.add_cog(ReportsCog(self))
         await self.add_cog(AutomationCog(self))
+
+    async def on_command_error(self, ctx, error) -> None:
+        from discord.ext import commands as _commands
+
+        if isinstance(error, _commands.CommandNotFound):
+            return
+        if isinstance(error, _commands.CheckFailure):
+            try:
+                await ctx.send("⛔ You don't have permission to use that command.")
+            except discord.HTTPException:
+                pass
+            return
+        if isinstance(error, _commands.UserInputError):
+            try:
+                await ctx.send(f"⚠️ {error}")
+            except discord.HTTPException:
+                pass
+            return
+        log.exception("Command error in %s", getattr(ctx, "command", None), exc_info=error)
+        try:
+            await ctx.send("❌ Something went wrong running that command.")
+        except discord.HTTPException:
+            pass
 
     async def on_ready(self) -> None:
         log.info("Logged in to Discord as %s (%s)", self.user, self.user.id)
@@ -198,18 +231,32 @@ class FRABot(commands.Bot):
             from .core.pacing import CircuitOpenError
             from .mc.errors import MissionChiefError
 
-            self.presence.mark_running(name)
-            try:
-                await func()
-            except CircuitOpenError as exc:
-                log.warning("Job %s skipped: %s", name, exc)
-            except MissionChiefError as exc:
-                log.error("Job %s failed: %s", name, exc)
-                await self.notify_admin(f"⚠️ Sync job **{name}** failed: {exc}")
-            finally:
-                self.presence.mark_done(name)
+            lock = self.job_lock(name)
+            if lock.locked():
+                log.info("Job %s already running; skipping this tick", name)
+                return
+            async with lock:
+                self.presence.mark_running(name)
+                try:
+                    await func()
+                except CircuitOpenError as exc:
+                    log.warning("Job %s skipped: %s", name, exc)
+                except MissionChiefError as exc:
+                    log.error("Job %s failed: %s", name, exc)
+                    await self.notify_admin(f"⚠️ Sync job **{name}** failed: {exc}")
+                finally:
+                    self.presence.mark_done(name)
 
         return runner
+
+    def job_lock(self, name: str) -> asyncio.Lock:
+        """The shared lock for a job, so scheduled and manual runs of the
+        same job never overlap."""
+        lock = self._job_locks.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._job_locks[name] = lock
+        return lock
 
     # ------------------------------------------------------------------
     # Discord helpers

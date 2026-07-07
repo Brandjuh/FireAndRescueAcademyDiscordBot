@@ -27,6 +27,19 @@ def utcnow_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def _split_sql(sql: str) -> list[str]:
+    """Split a migration file into individual statements.
+
+    Full-line ``--`` comments are dropped; the migration files contain no
+    semicolons inside string literals, so splitting on ``;`` is safe here.
+    """
+    kept = [
+        line for line in sql.splitlines() if not line.strip().startswith("--")
+    ]
+    body = "\n".join(kept)
+    return [stmt.strip() for stmt in body.split(";") if stmt.strip()]
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
@@ -111,20 +124,35 @@ class Database:
         async with self.conn.execute("SELECT version FROM schema_migrations") as cur:
             applied = {row["version"] for row in await cur.fetchall()}
 
+        seen_versions: set[int] = set()
         for version, name, sql_path in self._discover_migrations():
+            if version in seen_versions:
+                raise RuntimeError(
+                    f"Duplicate migration version {version:04d} "
+                    f"({sql_path.name}); refusing to start"
+                )
+            seen_versions.add(version)
             if version in applied:
                 continue
             log.info("Applying migration %04d_%s", version, name)
-            sql = sql_path.read_text(encoding="utf-8")
+            statements = _split_sql(sql_path.read_text(encoding="utf-8"))
             try:
-                await self.conn.executescript(sql)
-                await self.conn.execute(
-                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                    (version, name, utcnow_iso()),
-                )
-                await self.conn.commit()
+                # Each migration + its bookkeeping row commit together or
+                # not at all. executescript() auto-commits between
+                # statements, so a mid-migration failure there can't be
+                # rolled back and bricks startup; running the statements
+                # inside one explicit transaction fixes that. Combined
+                # with idempotent DDL (IF NOT EXISTS), a replay after a
+                # partial apply is harmless.
+                async with self.transaction() as conn:
+                    for statement in statements:
+                        await conn.execute(statement)
+                    await conn.execute(
+                        "INSERT INTO schema_migrations (version, name, applied_at) "
+                        "VALUES (?, ?, ?)",
+                        (version, name, utcnow_iso()),
+                    )
             except Exception:
-                await self.conn.rollback()
                 log.exception("Migration %04d_%s failed; database unchanged", version, name)
                 raise
 
