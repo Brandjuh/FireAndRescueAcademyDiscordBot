@@ -46,6 +46,36 @@ will build on this data foundation.
 
 ## Installation (Raspberry Pi 4B, Debian Bookworm)
 
+### Quick install (recommended)
+
+One command — it installs system packages, sets up the virtualenv, asks
+for your Discord token / MissionChief login / channel ids, installs the
+systemd service and starts the bot:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/main/install.sh)
+```
+
+Until this branch is merged to `main`, install from the branch instead:
+
+```bash
+FRA_BRANCH=claude/fra-discord-bot-ggwg15 bash <(curl -fsSL https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/claude/fra-discord-bot-ggwg15/install.sh)
+```
+
+Useful afterwards:
+
+```bash
+journalctl -u fra-bot -f          # follow the logs
+sudo systemctl restart fra-bot    # restart (e.g. after editing config.yaml)
+./install.sh                      # run again = update to the latest version
+./install.sh uninstall            # remove the service (keeps data & config)
+```
+
+The installer is idempotent: re-running it updates the code and
+dependencies but never overwrites your existing `config.yaml` or `.env`.
+
+### Manual install
+
 ```bash
 sudo apt update && sudo apt install -y python3 python3-venv git
 
@@ -67,7 +97,7 @@ chmod 600 .env
 Then install the systemd service so it survives reboots:
 
 ```bash
-sudo cp deploy/fra-bot.service /etc/systemd/system/
+sudo cp deploy/fra-bot.service /etc/systemd/system/   # adjust User/paths first
 sudo systemctl daemon-reload
 sudo systemctl enable --now fra-bot
 journalctl -u fra-bot -f
