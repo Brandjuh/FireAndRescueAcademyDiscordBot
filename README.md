@@ -172,6 +172,19 @@ journalctl -u fra-bot -f
   automatically after a restart. Incremental expense sync takes over
   once the backfill completes. Check progress with `!fra status`.
 
+## Live bot status
+
+The bot's Discord presence reflects what it's doing right now, so you
+can tell at a glance that it's alive:
+
+* `🔄 syncing members…` / `checking applications…` / etc. while a job runs
+* `👀 47 members · 3 applications · backfill p120` when idle
+* `⚠️ paused (MissionChief cooldown)` (do-not-disturb) if the circuit
+  breaker has paused scraping after repeated failures
+
+Updates are driven by a background reconciler that stays well under
+Discord's presence rate limit.
+
 ## Admin commands
 
 Requires Discord administrator permission or a role listed in

@@ -72,3 +72,19 @@ def profile_url(mc_user_id: int | None) -> str | None:
     if not mc_user_id:
         return None
     return f"https://www.missionchief.com/profile/{mc_user_id}"
+
+
+_AFFECTED_URL_PATHS = {
+    "user": "profile",
+    "building": "buildings",
+    "mission": "missions",
+    "vehicle": "vehicles",
+}
+
+
+def affected_url(affected_type: str | None, affected_mc_id: int | None) -> str | None:
+    """Link to the affected entity — a person's profile, a building, etc."""
+    if not affected_mc_id:
+        return None
+    path = _AFFECTED_URL_PATHS.get(affected_type or "user", "profile")
+    return f"https://www.missionchief.com/{path}/{affected_mc_id}"

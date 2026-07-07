@@ -21,6 +21,7 @@ from .display import (
     ACTION_DISPLAY,
     FALLBACK_DISPLAY,
     MEMBER_EVENT_DISPLAY,
+    affected_url,
     profile_url,
 )
 
@@ -135,7 +136,11 @@ class NotificationsCog(commands.Cog):
                 url = profile_url(row["executed_mc_id"])
                 lines.append(f"**By:** [{executed}]({url})" if url else f"**By:** {executed}")
             if row["affected_name"] and row["affected_name"] != row["executed_name"]:
-                lines.append(f"**Affected:** {row['affected_name']}")
+                affected = row["affected_name"]
+                url = affected_url(row["affected_type"], row["affected_mc_id"])
+                lines.append(
+                    f"**Affected:** [{affected}]({url})" if url else f"**Affected:** {affected}"
+                )
             if row["description"]:
                 lines.append(row["description"])
             if row["contribution_amount"]:

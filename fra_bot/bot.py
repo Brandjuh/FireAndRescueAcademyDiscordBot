@@ -14,6 +14,7 @@ from .core.scheduler import Scheduler
 from .db.database import Database
 from .db.repos import StateRepo
 from .geo.geocoder import Geocoder
+from .presence import PresenceManager
 from .mc.client import MissionChiefClient
 from .services.applications_sync import ApplicationsSyncService
 from .services.buildings import BuildingsService
@@ -44,6 +45,7 @@ class FRABot(commands.Bot):
         self.mc = MissionChiefClient(cfg.missionchief, self.pacer)
         self.scheduler = Scheduler()
         self.geocoder = Geocoder(StateRepo(self.db))
+        self.presence = PresenceManager(self)
 
         self.members_sync = MembersSyncService(cfg, self.mc, self.db)
         self.applications_sync = ApplicationsSyncService(self.mc, self.db)
@@ -76,6 +78,7 @@ class FRABot(commands.Bot):
         log.info("Logged in to Discord as %s (%s)", self.user, self.user.id)
         if not self._jobs_started:
             self._jobs_started = True
+            self.presence.start()
             self._start_jobs()
             await self._announce_restart_if_updated()
 
@@ -192,6 +195,7 @@ class FRABot(commands.Bot):
             from .core.pacing import CircuitOpenError
             from .mc.errors import MissionChiefError
 
+            self.presence.mark_running(name)
             try:
                 await func()
             except CircuitOpenError as exc:
@@ -199,6 +203,8 @@ class FRABot(commands.Bot):
             except MissionChiefError as exc:
                 log.error("Job %s failed: %s", name, exc)
                 await self.notify_admin(f"⚠️ Sync job **{name}** failed: {exc}")
+            finally:
+                self.presence.mark_done(name)
 
         return runner
 
@@ -223,6 +229,7 @@ class FRABot(commands.Bot):
 
     async def close(self) -> None:
         log.info("Shutting down…")
+        await self.presence.stop()
         await self.scheduler.stop()
         await self.geocoder.close()
         await self.mc.close()
