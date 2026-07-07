@@ -86,6 +86,31 @@ reports:
   daily_delay_minutes: 10
   timezone: America/New_York
 
+  # Scheduled reports. Each entry renders a registered report to a channel
+  # on the given cadence, shortly after the daily reset. Run `!fra report
+  # list` in Discord to see the available report names and their periods.
+  #   report:     registered report name (e.g. members, treasury, income-daily)
+  #   period:     today | yesterday | week | month | prev-month | all
+  #   cadence:    daily | weekly | monthly
+  #   channel_id: Discord channel to post in
+  #   weekday:    for weekly cadence, 0=Monday … 6=Sunday
+  #   day:        for monthly cadence, day-of-month to fire on
+  scheduled: []
+    # - report: income-daily
+    #   period: today
+    #   cadence: daily
+    #   channel_id: 123456789012345678
+    # - report: members
+    #   period: week
+    #   cadence: weekly
+    #   weekday: 0            # Monday
+    #   channel_id: 123456789012345678
+    # - report: treasury
+    #   period: prev-month
+    #   cadence: monthly
+    #   day: 1
+    #   channel_id: 123456789012345678
+
 logging:
   level: INFO
   # Rotating file log next to the database; console logging is always on.

@@ -196,7 +196,8 @@ Requires Discord administrator permission or a role listed in
 | `!fra sync <members\|applications\|logs\|treasury\|expenses\|backfill>` | Run a sync now |
 | `!fra balance` | Latest known alliance funds |
 | `!fra top10 [daily\|monthly]` | Current income top-10 |
-| `!fra report [daily\|monthly]` | Repost the last completed period's report |
+| `!fra report list` | List every registered report and its periods |
+| `!fra report <name> [period]` | Render any report (`period`: today/yesterday/week/month/prev-month/all; `daily`/`monthly` alias the income top-10) |
 | `!fra automation` | Board automation switches, dry-run state, recent requests |
 | `!fra sync <trainings\|buildings\|events>` | Poll a board thread now |
 | `!fra update` | Pull the latest code, install deps and restart the bot |

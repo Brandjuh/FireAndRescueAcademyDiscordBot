@@ -104,9 +104,20 @@ class AutomationConfig:
 
 
 @dataclass(frozen=True)
+class ScheduledReport:
+    report: str          # registered report name
+    period: str          # period name (today/week/month/…)
+    cadence: str         # daily | weekly | monthly
+    channel_id: int
+    weekday: int = 0     # for weekly: 0=Monday
+    day: int = 1         # for monthly: day-of-month
+
+
+@dataclass(frozen=True)
 class ReportsConfig:
     daily_delay_minutes: int
     timezone: str
+    scheduled: tuple[ScheduledReport, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -258,6 +269,18 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         reports=ReportsConfig(
             daily_delay_minutes=int(_get(raw, "reports", "daily_delay_minutes", default=10)),
             timezone=str(_get(raw, "reports", "timezone", default="America/New_York")),
+            scheduled=tuple(
+                ScheduledReport(
+                    report=str(item["report"]),
+                    period=str(item.get("period", "today")),
+                    cadence=str(item.get("cadence", "daily")).lower(),
+                    channel_id=int(item.get("channel_id", 0)),
+                    weekday=int(item.get("weekday", 0)),
+                    day=int(item.get("day", 1)),
+                )
+                for item in (_get(raw, "reports", "scheduled", default=[]) or [])
+                if item.get("report") and item.get("channel_id")
+            ),
         ),
         logging=LoggingConfig(
             level=str(_get(raw, "logging", "level", default="INFO")).upper(),

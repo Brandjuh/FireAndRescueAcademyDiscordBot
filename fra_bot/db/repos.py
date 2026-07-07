@@ -272,6 +272,19 @@ class MembersRepo:
             (utcnow_iso(), event_id),
         )
 
+    async def event_counts(
+        self, start_iso: str | None, end_iso: str
+    ) -> dict[str, int]:
+        """Member events by type within a period (occurred_at)."""
+        query = "SELECT event_type, COUNT(*) AS n FROM member_events WHERE occurred_at <= ?"
+        params: list[Any] = [end_iso]
+        if start_iso:
+            query += " AND occurred_at >= ?"
+            params.append(start_iso)
+        query += " GROUP BY event_type"
+        async with self._db.conn.execute(query, params) as cur:
+            return {row["event_type"]: row["n"] for row in await cur.fetchall()}
+
     async def credit_deltas(self, since_iso: str, until_iso: str) -> list[aiosqlite.Row]:
         """Earned-credit gains per member between two instants."""
         async with self._db.conn.execute(
@@ -476,6 +489,22 @@ class LogsRepo:
             row = await cur.fetchone()
         return row["n"]
 
+    async def action_counts(
+        self, start_iso: str | None, end_iso: str
+    ) -> dict[str, int]:
+        """Log rows by action_key within a period (event_at, else scraped_at)."""
+        query = (
+            "SELECT action_key, COUNT(*) AS n FROM alliance_logs "
+            "WHERE COALESCE(event_at, scraped_at) <= ?"
+        )
+        params: list[Any] = [end_iso]
+        if start_iso:
+            query += " AND COALESCE(event_at, scraped_at) >= ?"
+            params.append(start_iso)
+        query += " GROUP BY action_key ORDER BY n DESC"
+        async with self._db.conn.execute(query, params) as cur:
+            return {row["action_key"]: row["n"] for row in await cur.fetchall()}
+
 
 class TreasuryRepo:
     def __init__(self, db: Database) -> None:
@@ -585,6 +614,29 @@ class TreasuryRepo:
         async with self._db.conn.execute("SELECT COUNT(*) AS n FROM expenses") as cur:
             row = await cur.fetchone()
         return row["n"]
+
+    async def expense_summary(
+        self, start_iso: str | None, end_iso: str, *, top: int = 5
+    ) -> dict[str, Any]:
+        """Total spend, row count and top spenders within a period."""
+        where = "event_at IS NOT NULL AND event_at <= ?"
+        params: list[Any] = [end_iso]
+        if start_iso:
+            where += " AND event_at >= ?"
+            params.append(start_iso)
+        async with self._db.conn.execute(
+            f"SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total "
+            f"FROM expenses WHERE {where}",
+            params,
+        ) as cur:
+            row = await cur.fetchone()
+        async with self._db.conn.execute(
+            f"SELECT username, SUM(amount) AS spent FROM expenses WHERE {where} "
+            f"GROUP BY username ORDER BY spent DESC LIMIT ?",
+            (*params, top),
+        ) as cur:
+            spenders = [(r["username"], r["spent"]) for r in await cur.fetchall()]
+        return {"count": row["n"], "total": row["total"], "top": spenders}
 
     # -- expenses backfill staging ---------------------------------------
     # Rows are appended in DISPLAY order (newest first) while walking
@@ -867,6 +919,22 @@ class AutomationRepo:
         ) as cur:
             row = await cur.fetchone()
         return row["n"]
+
+    async def activity_counts(
+        self, start_iso: str | None, end_iso: str
+    ) -> list[aiosqlite.Row]:
+        """Request counts grouped by (kind, status) within a period."""
+        query = (
+            "SELECT kind, status, COUNT(*) AS n FROM automation_requests "
+            "WHERE created_at <= ?"
+        )
+        params: list[Any] = [end_iso]
+        if start_iso:
+            query += " AND created_at >= ?"
+            params.append(start_iso)
+        query += " GROUP BY kind, status ORDER BY kind, status"
+        async with self._db.conn.execute(query, params) as cur:
+            return list(await cur.fetchall())
 
 
 def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
