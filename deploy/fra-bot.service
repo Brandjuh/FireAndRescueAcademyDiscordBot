@@ -20,8 +20,11 @@ ExecStart=/home/pi/FireAndRescueAcademyDiscordBot/.venv/bin/python -m fra_bot
 Restart=on-failure
 RestartSec=30
 
-# Keep the Pi healthy: cap memory, lower priority slightly.
-MemoryMax=512M
+# Keep the Pi healthy: cap memory, lower priority slightly. 900M leaves
+# headroom for Chromium/Playwright (building placement) without OOM-killing
+# the bot; MemoryHigh throttles before the hard cap for a softer landing.
+MemoryHigh=800M
+MemoryMax=900M
 Nice=5
 
 # Hardening

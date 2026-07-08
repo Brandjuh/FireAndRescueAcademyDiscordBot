@@ -211,7 +211,16 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             f"Copy config.example.yaml to config.yaml and edit it."
         )
     with config_path.open("r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh) or {}
+        try:
+            raw = yaml.safe_load(fh) or {}
+        except yaml.YAMLError as exc:
+            hint = ""
+            if "'\\t'" in str(exc) or "\t" in str(exc):
+                hint = (
+                    " — this is almost always a TAB character; YAML only allows "
+                    "spaces. Replace tabs with spaces (e.g. in inline comments)."
+                )
+            raise ConfigError(f"Could not parse {config_path}: {exc}{hint}") from exc
 
     min_delay = float(_get(raw, "missionchief", "min_delay", default=4.0))
     max_delay = float(_get(raw, "missionchief", "max_delay", default=9.0))

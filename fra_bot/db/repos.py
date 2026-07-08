@@ -1002,6 +1002,7 @@ class MissionsRepo:
     _COLUMNS = (
         "source", "kind", "mission_source", "preset_type_id", "caption",
         "custom_values", "saved_name", "recurring", "rotation_id",
+        "event_type_id", "event_random", "area", "shape", "call_volume",
         "location_text", "latitude", "longitude", "address",
         "requester_name", "requester_mc_id", "discord_user_id", "channel_id",
         "board_thread_id", "board_post_id",
@@ -1037,10 +1038,11 @@ class MissionsRepo:
                 """
                 INSERT OR IGNORE INTO scheduled_missions
                     (source, kind, mission_source, preset_type_id, caption,
-                     custom_values, saved_name, recurring, location_text,
-                     requester_name, requester_mc_id,
+                     custom_values, saved_name, recurring,
+                     event_type_id, event_random, area, shape, call_volume,
+                     location_text, requester_name, requester_mc_id,
                      board_thread_id, board_post_id, created_at, updated_at)
-                VALUES ('board', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES ('board', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     spec_fields.get("kind", "large"),
@@ -1050,6 +1052,13 @@ class MissionsRepo:
                     spec_fields.get("custom_values"),
                     spec_fields.get("saved_name"),
                     1 if spec_fields.get("recurring") else 0,
+                    spec_fields.get("event_type_id"),
+                    1 if spec_fields.get("event_random") else 0,
+                    spec_fields.get("area"),
+                    # `shape` is the legacy NOT NULL column (from 0003); never
+                    # insert NULL or INSERT OR IGNORE would silently drop the row.
+                    spec_fields.get("shape") or "rectangle",
+                    spec_fields.get("call_volume"),
                     spec_fields.get("location_text"),
                     requester_name,
                     requester_mc_id,
@@ -1236,6 +1245,7 @@ class RotationRepo:
     _COLUMNS = (
         "location_text", "kind", "mission_source", "preset_type_id",
         "caption", "custom_values", "saved_name",
+        "event_type_id", "event_random", "area", "shape", "call_volume",
         "latitude", "longitude", "address", "active", "created_by",
     )
 

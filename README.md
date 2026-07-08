@@ -244,10 +244,15 @@ One system handles every mission/event request. A request has four choices:
 * **location** — a place name ("Grand Rapids", "Wal Amsterdam") or a maps
   link; it's geocoded;
 * **kind** — an alliance **event** or a **large** scale alliance mission;
-* **mission data** — a **preset**, a **custom** Own mission (you supply the
-  required-unit values, e.g. `need_lf=25 need_elw1=6 water_needed=15000`;
+* **large-mission data** — a **preset**, a **custom** Own mission (you supply
+  the required-unit values, e.g. `need_lf=25 need_elw1=6 water_needed=15000`;
   each field caps at 100 except water/foam at 1,000,000), or one of the
   game's **saved** missions picked by name;
+* **event options** — the event **type** (Storm, Civil Unrest, Storm Surge,
+  Fall/Winter/Spring/Summer weather, Sports Event, or **Random** — which picks
+  a standard one and skips seasonal currency events like Soccer Game), plus
+  **Area** (small/medium/large), **Shape** (rectangle/circle) and **Call
+  volume** (30/45/60 s);
 * **schedule** — one-time, or **recurring** (it joins the rotation list).
 
 Requests arrive three ways:

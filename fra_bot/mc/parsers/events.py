@@ -34,6 +34,45 @@ EVENT_KINDS = {
     },
 }
 
+# Alliance event types, from the real /missionAllianceEventNew form. The
+# submitted value is the data-event-id (0-7); id 8 (Soccer Game,
+# data-event-tag="football") is a seasonal currency event we skip for
+# "random" and don't offer as a standard pick.
+EVENT_TYPES: dict[int, str] = {
+    0: "Storm",
+    1: "Civil Unrest",
+    2: "Storm Surge",
+    3: "Fall weather",
+    4: "Winter weather",
+    5: "Spring weather",
+    6: "Summer weather",
+    7: "Sports Event",
+}
+EVENT_NAME_TO_ID = {name.lower(): tid for tid, name in EVENT_TYPES.items()}
+
+# Area -> mission_position[size]; Call volume -> mission_position[amount].
+EVENT_AREAS = {"small": "0", "medium": "1", "large": "2"}
+EVENT_CALL_VOLUMES = {"30": "0", "45": "1", "60": "2"}
+EVENT_SHAPES = ("rectangle", "circle")
+
+
+def resolve_event_type(text: str | None) -> tuple[int | None, bool]:
+    """Map a user string to ``(event_type_id, is_random)``.
+
+    Accepts a type name ("Storm"), an id (0-7), "random"/"any", or blank
+    (treated as random). Raises ``ValueError`` on an unknown value."""
+    raw = (text or "").strip().lower()
+    if raw in ("", "random", "rnd", "any"):
+        return None, True
+    if raw.isdigit():
+        tid = int(raw)
+        if tid in EVENT_TYPES:
+            return tid, False
+        raise ValueError(f"event type id must be 0-7 (got {tid})")
+    if raw in EVENT_NAME_TO_ID:
+        return EVENT_NAME_TO_ID[raw], False
+    raise ValueError(f"unknown event type: {text!r}")
+
 _LAST_FREE_RE = re.compile(
     r"Last\s+free\s+mission[:\s]*"
     r"([A-Za-z]{3},?\s+\d{1,2}\s+[A-Za-z]{3}\.?\s+\d{4}"
@@ -174,6 +213,88 @@ def build_event_payload(
             merged["mission_position[mission_type_id]"] = radio
 
     return [(key, value) for key, value in merged.items() if value != "" or key.endswith("]")]
+
+
+def parse_event_types(html: str) -> list[dict]:
+    """Read the event-type radios from /missionAllianceEventNew.
+
+    Each entry: ``{"id": int, "name": str, "tag": str}`` where ``tag`` is the
+    ``data-event-tag`` (empty for the standard weather/civil events, e.g.
+    ``"football"`` for the seasonal Soccer Game)."""
+    soup = BeautifulSoup(html, "lxml")
+    out: list[dict] = []
+    for inp in soup.select('input[name="event_radio_group"]'):
+        raw_id = inp.get("data-event-id")
+        if raw_id is None:
+            continue
+        try:
+            event_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        label = inp.find_parent("label")
+        name = label.get_text(" ", strip=True) if label else ""
+        out.append({"id": event_id, "name": name, "tag": inp.get("data-event-tag") or ""})
+    return out
+
+
+def standard_event_ids(html: str | None = None) -> list[int]:
+    """Ids eligible for a 'random' event: the standard (non-currency) ones.
+
+    When given the live form, use the radios whose ``data-event-tag`` is
+    empty (skips seasonal currency events like Soccer Game); otherwise fall
+    back to the known catalog (0-7)."""
+    if html:
+        ids = [
+            e["id"] for e in parse_event_types(html)
+            if not e["tag"] and e["id"] in EVENT_TYPES
+        ]
+        if ids:
+            return ids
+    return list(EVENT_TYPES)
+
+
+def build_alliance_event_payload(
+    form: EventForm,
+    *,
+    latitude: float,
+    longitude: float,
+    address: str,
+    event_type_id: int,
+    event_tag: str = "",
+    area: str = "medium",
+    shape: str = "rectangle",
+    call_volume: str = "45",
+) -> list[tuple[str, str]]:
+    """Body for /missionAllianceEventCreate.
+
+    Selects the event type (``mission_position[mission_type_id]`` = the
+    data-event-id, mirrored into ``event_radio_group``/``event_identifier``),
+    sets Area (size), Shape and Call volume (amount), and pins ``coins`` to 0.
+
+    The event form defaults coins to 1 ("Start Event (20 Coins)"); we always
+    submit 0 — the scheduler only ever starts the free weekly event, gated by
+    the cooldown, so it can never spend coins.
+    """
+    merged = dict(form.fields)
+    merged["mission_position[mission_type_id]"] = str(event_type_id)
+    merged["event_radio_group"] = "on"
+    merged["event_identifier"] = event_tag or ""
+    merged["mission_position[latitude]"] = f"{latitude:.6f}"
+    merged["mission_position[longitude]"] = f"{longitude:.6f}"
+    merged["mission_position[address]"] = address
+    merged.setdefault("mission_position[poi_type]", "0")
+    merged["mission_position[shape]"] = shape if shape in EVENT_SHAPES else "rectangle"
+    merged["mission_position[size]"] = EVENT_AREAS.get(area, "1")
+    merged["mission_position[amount]"] = EVENT_CALL_VOLUMES.get(str(call_volume), "1")
+    merged.setdefault("mission_position[duration]", "2")
+    merged["mission_position[coins]"] = "0"
+
+    body = [(key, value) for key, value in merged.items() if value != "" or key.endswith("]")]
+    # event_identifier is blank for standard events but the form always sends
+    # it; keep it so the create endpoint sees the same shape as the browser.
+    if not any(key == "event_identifier" for key, _ in body):
+        body.append(("event_identifier", merged.get("event_identifier", "")))
+    return body
 
 
 def is_free_submit(form: EventForm) -> bool:
