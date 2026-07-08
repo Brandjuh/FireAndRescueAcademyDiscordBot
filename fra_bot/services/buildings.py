@@ -243,10 +243,14 @@ class BuildingsService(BoardRequestService):
             return None
         return parse_total_funds(html)
 
-    async def test_build(self, building_type: str, location_text: str) -> str:
+    async def test_build(
+        self, building_type: str | None, location_text: str
+    ) -> str:
         """Admin diagnostic: geocode a location and drive the build form for
         it, honouring dry_run (in dry-run it stops short of submitting). Runs
-        the whole chain on demand — no board post needed. Returns a summary."""
+        the whole chain on demand — no board post needed. When
+        ``building_type`` is None it's auto-detected from the address, like
+        the board flow. Returns a summary."""
         from ..geo.geocoder import GeocodeError
 
         try:
@@ -261,6 +265,15 @@ class BuildingsService(BoardRequestService):
             f"📍 Resolved to **{location.address or 'unknown address'}** "
             f"({location.latitude:.5f}, {location.longitude:.5f})"
         ]
+        if building_type is None:
+            building_type = detect_building_type(location.address, None)
+            if building_type is None:
+                lines.append(
+                    "❌ Couldn't tell hospital from prison at this address — "
+                    "say which: `!fra testbuild hospital <location>`."
+                )
+                return "\n".join(lines)
+            lines.append(f"🏗️ Detected type: **{building_type}**")
         funds = await self._live_funds()
         if funds is not None:
             lines.append(

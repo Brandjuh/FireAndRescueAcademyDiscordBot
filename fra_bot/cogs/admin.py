@@ -401,26 +401,32 @@ class AdminCog(commands.Cog):
             )
 
     @fra.command(name="testbuild")
-    async def testbuild(
-        self, ctx: commands.Context, building_type: str, *, location: str
-    ) -> None:
+    async def testbuild(self, ctx: commands.Context, *, args: str = "") -> None:
         """Test the building flow for a location without a board post.
 
-        `!fra testbuild hospital 350 5th Ave, New York` — in dry-run this
-        drives the real form (type, pin, address, alliance button) but does
-        NOT submit; with dry_run off it actually builds.
+        `!fra testbuild <address or maps link>` — the type is auto-detected
+        from the address (hospital/prison). `!fra testbuild hospital <loc>`
+        forces the type. In dry-run this drives the real form (type, pin,
+        address, alliance button) but does NOT submit; with dry_run off it
+        actually builds.
         """
-        if building_type.lower() not in ("hospital", "prison"):
-            await ctx.send("Building type must be `hospital` or `prison`.")
+        args = args.strip()
+        parts = args.split(maxsplit=1)
+        building_type = None
+        location = args
+        if parts and parts[0].lower() in ("hospital", "prison"):
+            building_type = parts[0].lower()
+            location = parts[1].strip() if len(parts) > 1 else ""
+        if not location:
+            await ctx.send(
+                "Usage: `!fra testbuild [hospital|prison] <address or maps link>`"
+            )
             return
         await ctx.send(
-            f"⏳ Testing **{building_type.lower()}** build at `{location}`… "
-            "(browser start can take a moment)"
+            f"⏳ Testing build at `{location}`… (browser start can take a moment)"
         )
         try:
-            result = await self.bot.buildings.test_build(
-                building_type.lower(), location
-            )
+            result = await self.bot.buildings.test_build(building_type, location)
         except Exception as exc:  # noqa: BLE001 - report, don't crash
             log.exception("testbuild failed")
             await ctx.send(f"❌ Test failed: {exc}")
