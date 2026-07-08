@@ -39,10 +39,13 @@ from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.events import (
     EVENT_KINDS,
+    EVENT_TYPES,
+    build_alliance_event_payload,
     build_event_payload,
     is_free_submit,
     next_free_at,
     parse_event_form,
+    standard_event_ids,
 )
 from ..mc.parsers.missions_custom import (
     CustomMission,
@@ -134,6 +137,11 @@ class MissionScheduler:
             custom_values=_values_json(spec),
             saved_name=spec.saved_name,
             recurring=1 if spec.recurring else 0,
+            event_type_id=spec.event_type_id,
+            event_random=1 if spec.event_random else 0,
+            area=spec.area,
+            shape=spec.shape,
+            call_volume=spec.call_volume,
             location_text=spec.location_text,
             requester_name=requester_name,
             requester_mc_id=requester_mc_id,
@@ -230,6 +238,11 @@ class MissionScheduler:
                     "custom_values": _values_json(spec),
                     "saved_name": spec.saved_name,
                     "recurring": spec.recurring,
+                    "event_type_id": spec.event_type_id,
+                    "event_random": spec.event_random,
+                    "area": spec.area,
+                    "shape": spec.shape,
+                    "call_volume": spec.call_volume,
                     "location_text": spec.location_text,
                 },
                 requester_name=post.author_name,
@@ -346,6 +359,7 @@ class MissionScheduler:
                 custom_values=_load_values(mission["custom_values"]),
                 saved_name=mission["saved_name"],
                 latitude=lat, longitude=lng, address=address,
+                **_event_args(mission),
             )
         await self._apply_queue_outcome(
             mission, outcome, requester, lat, lng, address, announce=announce
@@ -425,6 +439,11 @@ class MissionScheduler:
             caption=mission["caption"],
             custom_values=mission["custom_values"],
             saved_name=mission["saved_name"],
+            event_type_id=mission["event_type_id"],
+            event_random=mission["event_random"],
+            area=mission["area"],
+            shape=mission["shape"],
+            call_volume=mission["call_volume"],
             latitude=lat, longitude=lng, address=address,
             created_by=mission["requester_name"] or "member",
         )
@@ -463,6 +482,7 @@ class MissionScheduler:
                 custom_values=_load_values(entry["custom_values"]),
                 saved_name=entry["saved_name"],
                 latitude=lat, longitude=lng, address=address,
+                **_event_args(entry),
             )
 
         if outcome.state in ("waiting", "form_error", "http_error"):
@@ -500,6 +520,11 @@ class MissionScheduler:
         latitude: float,
         longitude: float,
         address: str,
+        event_type_id: int | None = None,
+        event_random: bool = False,
+        area: str = "medium",
+        shape: str = "rectangle",
+        call_volume: str = "45",
         allow_coins: bool = False,
         dry: bool | None = None,
     ) -> StartOutcome:
@@ -529,8 +554,19 @@ class MissionScheduler:
                 )
         if form.action is None or form.authenticity_token is None:
             return StartOutcome("form_error", "mission form incomplete; will retry")
-        if not allow_coins and not is_free_submit(form):
+        # The event form always defaults coins to 1 ("Start Event (20 Coins)"),
+        # so is_free_submit(form) can't gauge it — the free weekly event is
+        # gated by the cooldown above and we force coins=0 in the payload. Only
+        # the large form (coins default 0) is checked by this heuristic.
+        if not allow_coins and kind != "event" and not is_free_submit(form):
             return StartOutcome("refused", "refusing to start: form would spend coins")
+
+        # Resolve a "random" event to a concrete standard type now that we
+        # have the live form (skips seasonal currency events like Soccer Game).
+        chosen_event_id = event_type_id
+        if kind == "event" and (event_random or chosen_event_id is None):
+            pool = standard_event_ids(html)
+            chosen_event_id = pool[self._pick_index(len(pool))] if pool else 0
 
         # Build the right body.
         try:
@@ -538,6 +574,8 @@ class MissionScheduler:
                 form, html, kind=kind, source=source, preset_type_id=preset_type_id,
                 caption=caption, custom_values=custom_values, saved_name=saved_name,
                 latitude=latitude, longitude=longitude, address=address,
+                event_type_id=chosen_event_id, area=area, shape=shape,
+                call_volume=call_volume,
             )
         except _SavedMissionNotFound as exc:
             return StartOutcome("not_found", str(exc))
@@ -545,8 +583,12 @@ class MissionScheduler:
             body = _with_coins(body)
 
         if effective_dry:
-            what = self._describe(kind, source, preset_type_id, caption, custom_values, saved_name)
-            paid = "(PAID — ~10 coins) " if allow_coins else ""
+            what = self._describe(
+                kind, source, preset_type_id, caption, custom_values, saved_name,
+                event_type_id=chosen_event_id, area=area, shape=shape,
+                call_volume=call_volume, event_random=event_random,
+            )
+            paid = "(PAID — coins) " if allow_coins else ""
             return StartOutcome(
                 "dry_run",
                 f"dry-run: would start {paid}{what} at {latitude:.5f},{longitude:.5f}",
@@ -611,20 +653,33 @@ class MissionScheduler:
                 custom_values=spec.custom.values if spec.custom else {},
                 saved_name=spec.saved_name,
                 latitude=lat, longitude=lng, address=address,
+                event_type_id=spec.event_type_id,
+                event_random=spec.event_random,
+                area=spec.area, shape=spec.shape, call_volume=spec.call_volume,
                 allow_coins=True,
                 dry=not confirm,  # preview unless the owner confirmed
             )
         outcome.detail = f"{outcome.detail} — {address}"
         return outcome
 
+    @staticmethod
+    def _pick_index(n: int) -> int:
+        """Random index in [0, n) — isolated so tests can pin it."""
+        import random
+
+        return random.randrange(n) if n > 0 else 0
+
     def _build_body(
         self, form, html, *, kind, source, preset_type_id, caption,
         custom_values, saved_name, latitude, longitude, address,
+        event_type_id=None, area="medium", shape="rectangle", call_volume="45",
     ) -> list[tuple[str, str]]:
         if kind == "event":
-            return build_event_payload(
-                form, kind="event", latitude=latitude, longitude=longitude,
-                address=address,
+            tag = ""  # standard events carry no data-event-tag
+            return build_alliance_event_payload(
+                form, latitude=latitude, longitude=longitude, address=address,
+                event_type_id=event_type_id if event_type_id is not None else 0,
+                event_tag=tag, area=area, shape=shape, call_volume=call_volume,
             )
         if source == "custom":
             custom = CustomMission(caption=caption or "Custom mission", values=dict(custom_values))
@@ -671,9 +726,14 @@ class MissionScheduler:
     def _describe(
         kind: str, source: str, preset_type_id: int | None,
         caption: str | None, custom_values: dict[str, int], saved_name: str | None,
+        *, event_type_id: int | None = None, area: str = "medium",
+        shape: str = "rectangle", call_volume: str = "45",
+        event_random: bool = False,
     ) -> str:
         if kind == "event":
-            return "alliance event"
+            name = EVENT_TYPES.get(event_type_id, "event") if event_type_id is not None else "event"
+            tag = "random " if event_random else ""
+            return f"{tag}alliance event '{name}' ({area}/{shape}/{call_volume}s)"
         if source == "custom":
             cm = CustomMission(caption=caption or "custom", values=dict(custom_values))
             return f"custom '{cm.caption}' ({cm.summary()})"
@@ -727,6 +787,24 @@ def _with_coins(body: list[tuple[str, str]], *, count: int = 1) -> list[tuple[st
     merged["mission_position[coins]"] = "1"
     merged["mission_position[amount]"] = str(max(1, count))
     return list(merged.items())
+
+
+def _event_args(row) -> dict:
+    """Pull the alliance-event knobs off a queue/rotation row for
+    :meth:`_perform_start`. Missing/NULL columns fall back to the defaults."""
+    def _get(key, default=None):
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
+
+    return {
+        "event_type_id": _get("event_type_id"),
+        "event_random": bool(_get("event_random", 0)),
+        "area": _get("area") or "medium",
+        "shape": _get("shape") or "rectangle",
+        "call_volume": _get("call_volume") or "45",
+    }
 
 
 def _values_json(spec: MissionSpec) -> str | None:

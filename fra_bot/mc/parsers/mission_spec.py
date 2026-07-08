@@ -48,6 +48,10 @@ _KEY_RE = {
     "saved": re.compile(r"(?:^|\n)\s*(?:saved|saved_?mission|preset_?name)\s*[:=]\s*(.+)", re.IGNORECASE),
     "name": re.compile(r"(?:^|\n)\s*(?:name|caption|title)\s*[:=]\s*(.+)", re.IGNORECASE),
     "custom": re.compile(r"(?:^|\n)\s*(?:custom|units|params|requirements)\s*[:=]\s*(.+)", re.IGNORECASE),
+    "event": re.compile(r"(?:^|\n)\s*(?:event|event_?type)\s*[:=]\s*(.+)", re.IGNORECASE),
+    "area": re.compile(r"(?:^|\n)\s*area\s*[:=]\s*([A-Za-z]+)", re.IGNORECASE),
+    "shape": re.compile(r"(?:^|\n)\s*shape\s*[:=]\s*([A-Za-z]+)", re.IGNORECASE),
+    "call_volume": re.compile(r"(?:^|\n)\s*(?:call\s*volume|volume|call)\s*[:=]\s*(\d+)", re.IGNORECASE),
     "location": re.compile(
         r"(?:^|\n)[^\S\n]*(?:location|where|address|loc)[^\S\n]*[:=][^\S\n]*(.+)",
         re.IGNORECASE,
@@ -81,6 +85,13 @@ class MissionSpec:
     custom: CustomMission | None = None
     saved_name: str | None = None
     recurring: bool = False
+    # Alliance-event knobs (kind == "event"). event_type_id None + random True
+    # means "pick a standard event at start time".
+    event_type_id: int | None = None
+    event_random: bool = False
+    area: str = "medium"
+    shape: str = "rectangle"
+    call_volume: str = "45"
 
     def validate(self) -> "MissionSpec":
         """Clamp/validate the request; raise on anything unusable."""
@@ -127,11 +138,47 @@ class MissionSpec:
         else:
             self.preset_type_id = None
 
+        self._validate_event_fields()
         return self
+
+    def _validate_event_fields(self) -> None:
+        from .events import EVENT_AREAS, EVENT_CALL_VOLUMES, EVENT_SHAPES, EVENT_TYPES
+
+        if self.kind != "event":
+            # Event knobs are meaningless for large missions; reset to defaults.
+            self.event_type_id, self.event_random = None, False
+            self.area, self.shape, self.call_volume = "medium", "rectangle", "45"
+            return
+        self.area = (self.area or "medium").lower()
+        if self.area not in EVENT_AREAS:
+            raise MissionSpecError(f"area must be one of {', '.join(EVENT_AREAS)}")
+        self.shape = (self.shape or "rectangle").lower()
+        if self.shape not in EVENT_SHAPES:
+            raise MissionSpecError(f"shape must be one of {', '.join(EVENT_SHAPES)}")
+        self.call_volume = str(self.call_volume or "45").strip()
+        if self.call_volume not in EVENT_CALL_VOLUMES:
+            raise MissionSpecError(
+                f"call volume must be one of {', '.join(EVENT_CALL_VOLUMES)} (seconds)"
+            )
+        if self.event_type_id is not None and self.event_type_id not in EVENT_TYPES:
+            raise MissionSpecError("event type id must be 0-7")
+        # No concrete type + not random → default to random.
+        if self.event_type_id is None:
+            self.event_random = True
 
     # Convenience for the queue/rotation storage layer.
     def describe(self) -> str:
-        if self.source == "custom" and self.custom is not None:
+        if self.kind == "event":
+            from .events import EVENT_TYPES
+
+            if self.event_random or self.event_type_id is None:
+                etype = "random"
+            else:
+                etype = EVENT_TYPES.get(self.event_type_id, self.event_type_id)
+            body = (
+                f"{etype} · {self.area}/{self.shape}/{self.call_volume}s"
+            )
+        elif self.source == "custom" and self.custom is not None:
             body = f"custom '{self.custom.caption}' ({self.custom.summary()})"
         elif self.source == "saved":
             body = f"saved '{self.saved_name}'"
@@ -188,6 +235,27 @@ def parse_mission_spec(content: str) -> MissionSpec | None:
         caption = (name_match.group(1).strip() if name_match else "") or location
         custom = CustomMission(caption=caption, values=values)
 
+    # Event knobs (only used when kind == "event").
+    event_type_id: int | None = None
+    event_random = False
+    area = shape = call_volume = None
+    if kind == "event":
+        from .events import resolve_event_type
+
+        event_match = _KEY_RE["event"].search(content)
+        try:
+            event_type_id, event_random = resolve_event_type(
+                event_match.group(1) if event_match else ""
+            )
+        except ValueError as exc:
+            raise MissionSpecError(str(exc)) from exc
+        area_match = _KEY_RE["area"].search(content)
+        shape_match = _KEY_RE["shape"].search(content)
+        volume_match = _KEY_RE["call_volume"].search(content)
+        area = area_match.group(1) if area_match else "medium"
+        shape = shape_match.group(1) if shape_match else "rectangle"
+        call_volume = volume_match.group(1) if volume_match else "45"
+
     spec = MissionSpec(
         location_text=location,
         kind=kind,
@@ -196,5 +264,10 @@ def parse_mission_spec(content: str) -> MissionSpec | None:
         custom=custom,
         saved_name=saved_name,
         recurring=recurring,
+        event_type_id=event_type_id,
+        event_random=event_random,
+        area=area or "medium",
+        shape=shape or "rectangle",
+        call_volume=call_volume or "45",
     )
     return spec.validate()

@@ -685,10 +685,16 @@ class AdminCog(commands.Cog):
         """Parse `<location> | key: value | …` into a validated MissionSpec."""
         from ..cogs.missions import build_spec
 
+        # Segment key -> build_spec kwarg (most are identical).
+        aliases = {"event": "event_type", "type": "event_type", "volume": "call_volume",
+                   "call": "call_volume"}
+        allowed = {
+            "kind", "preset", "saved", "custom", "name", "schedule",
+            "event", "type", "area", "shape", "call_volume", "volume", "call",
+        }
         segments = [s.strip() for s in text.split("|")]
         location = segments[0]
         kwargs: dict[str, str] = {}
-        allowed = {"kind", "preset", "saved", "custom", "name", "schedule"}
         for seg in segments[1:]:
             if not seg:
                 continue
@@ -700,7 +706,7 @@ class AdminCog(commands.Cog):
                 raise ValueError(
                     f"unknown option '{key}' (use: {', '.join(sorted(allowed))})"
                 )
-            kwargs[key] = value.strip()
+            kwargs[aliases.get(key, key)] = value.strip()
         return build_spec(location=location, **kwargs)
 
     @fra.command(name="testbuild")

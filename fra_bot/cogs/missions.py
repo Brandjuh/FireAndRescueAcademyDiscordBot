@@ -27,6 +27,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from ..db.repos import MissionsRepo
+from ..mc.parsers.events import EVENT_TYPES, resolve_event_type
 from ..mc.parsers.mission_spec import PRESET_TYPE_IDS, MissionSpec, MissionSpecError
 from ..mc.parsers.missions_custom import (
     CustomMission,
@@ -61,9 +62,33 @@ def build_spec(
     saved: str | None = None,
     custom: str | None = None,
     name: str | None = None,
+    event_type: str | None = None,
+    area: str | None = None,
+    shape: str | None = None,
+    call_volume: str | None = None,
 ) -> MissionSpec:
     """Turn raw intake fields (slash args or modal text) into a validated
     :class:`MissionSpec`. Raises :class:`MissionSpecError` on bad input."""
+    kind = (kind or "large").lower()
+
+    # Alliance event: its own knobs, none of the large-mission source options.
+    if kind == "event":
+        try:
+            event_type_id, event_random = resolve_event_type(event_type)
+        except ValueError as exc:
+            raise MissionSpecError(str(exc)) from exc
+        return MissionSpec(
+            location_text=location,
+            kind="event",
+            source="preset",
+            event_type_id=event_type_id,
+            event_random=event_random,
+            area=(area or "medium"),
+            shape=(shape or "rectangle"),
+            call_volume=(call_volume or "45"),
+            recurring=(schedule or "once").lower() == "recurring",
+        ).validate()
+
     saved = (saved or "").strip() or None
     custom = (custom or "").strip() or None
     if saved and custom:
@@ -86,7 +111,7 @@ def build_spec(
 
     return MissionSpec(
         location_text=location,
-        kind=(kind or "large").lower(),
+        kind=kind,
         source=source,
         preset_type_id=preset_type_id,
         custom=custom_mission,
@@ -120,7 +145,32 @@ class MissionDetailsModal(discord.ui.Modal):
         self.name = None
         self.saved = None
         self.custom = None
-        if source == "custom":
+        self.event_type = None
+        self.area = None
+        self.shape = None
+        self.call_volume = None
+        if kind == "event":
+            self.event_type = discord.ui.TextInput(
+                label="Event type", required=False, default="random", max_length=20,
+                placeholder="Storm / Civil Unrest / Sports Event / … or random",
+            )
+            self.area = discord.ui.TextInput(
+                label="Area", required=False, default="medium", max_length=8,
+                placeholder="small / medium / large",
+            )
+            self.shape = discord.ui.TextInput(
+                label="Shape", required=False, default="rectangle", max_length=10,
+                placeholder="rectangle / circle",
+            )
+            self.call_volume = discord.ui.TextInput(
+                label="Call volume (seconds)", required=False, default="45", max_length=2,
+                placeholder="30 / 45 / 60",
+            )
+            self.add_item(self.event_type)
+            self.add_item(self.area)
+            self.add_item(self.shape)
+            self.add_item(self.call_volume)
+        elif source == "custom":
             self.name = discord.ui.TextInput(
                 label="Mission name", required=False, max_length=30,
                 placeholder="defaults to the location",
@@ -150,6 +200,10 @@ class MissionDetailsModal(discord.ui.Modal):
             name=str(self.name) if self.name else None,
             saved=str(self.saved) if self.saved else None,
             custom=str(self.custom) if self.custom else None,
+            event_type=str(self.event_type) if self.event_type else None,
+            area=str(self.area) if self.area else None,
+            shape=str(self.shape) if self.shape else None,
+            call_volume=str(self.call_volume) if self.call_volume else None,
         )
 
 
@@ -203,13 +257,8 @@ class MissionChooserView(discord.ui.View):
 
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary, emoji="➡️")
     async def cont(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if self.source in ("custom", "saved") and self.kind != "large":
-            await interaction.response.send_message(
-                "⚠️ Custom and saved missions are large scale only. Pick "
-                "**Large scale** for the kind, or **Preset** for the data.",
-                ephemeral=True,
-            )
-            return
+        # For an event the "mission data" select is ignored — the modal asks
+        # for the event type / area / shape / call volume instead.
         await interaction.response.send_modal(
             MissionDetailsModal(self._cog, kind=self.kind, schedule=self.schedule, source=self.source)
         )
@@ -263,11 +312,16 @@ class MissionsCog(commands.Cog):
         name: str | None = None,
         saved: str | None = None,
         custom: str | None = None,
+        event_type: str | None = None,
+        area: str | None = None,
+        shape: str | None = None,
+        call_volume: str | None = None,
     ) -> None:
         try:
             spec = build_spec(
                 location=location, kind=kind, schedule=schedule,
                 saved=saved, custom=custom, name=name,
+                event_type=event_type, area=area, shape=shape, call_volume=call_volume,
             )
         except (ValueError, MissionSpecError) as exc:
             await self._respond(interaction, f"⚠️ {exc}", ephemeral=True)
@@ -282,10 +336,14 @@ class MissionsCog(commands.Cog):
         location="Place name (e.g. Grand Rapids) or a Google Maps link",
         kind="Alliance event, or a large scale alliance mission (default)",
         schedule="One-time, or recurring (adds it to the rotation list)",
-        preset="Optional preset mission type (large scale only)",
-        saved="Optional: start a saved mission by its name (large scale only)",
-        custom="Optional custom Own mission units, e.g. need_lf=25 need_elw1=6 water_needed=15000",
-        name="Optional name for a custom mission",
+        preset="Large scale: optional preset mission type",
+        saved="Large scale: start a saved mission by its name",
+        custom="Large scale: custom Own mission units, e.g. need_lf=25 need_elw1=6 water_needed=15000",
+        name="Large scale: name for a custom mission",
+        event_type="Event: which event (default Random picks a standard one)",
+        area="Event: footprint size",
+        shape="Event: footprint shape",
+        call_volume="Event: mission call volume in seconds",
     )
     async def slash_mission(
         self,
@@ -297,11 +355,19 @@ class MissionsCog(commands.Cog):
         saved: str | None = None,
         custom: str | None = None,
         name: str | None = None,
+        event_type: Literal[
+            "Random", "Storm", "Civil Unrest", "Storm Surge", "Fall weather",
+            "Winter weather", "Spring weather", "Summer weather", "Sports Event",
+        ] = "Random",
+        area: Literal["Small", "Medium", "Large"] = "Medium",
+        shape: Literal["Rectangle", "Circle"] = "Rectangle",
+        call_volume: Literal["30", "45", "60"] = "45",
     ) -> None:
         try:
             spec = build_spec(
                 location=location, kind=kind, schedule=schedule,
                 preset=preset, saved=saved, custom=custom, name=name,
+                event_type=event_type, area=area, shape=shape, call_volume=call_volume,
             )
         except (ValueError, MissionSpecError) as exc:
             await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)

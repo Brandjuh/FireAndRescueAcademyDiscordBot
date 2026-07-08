@@ -177,20 +177,38 @@ _ELIGIBLE_SAVED = _large_form(saved=_SAVED_ANCHOR)
 _STARTED = _large_form("Wed, 01 Jan 2025 12:00")           # advanced cooldown
 _WAITING = _large_form("Fri, 01 Jan 2100 12:00")           # cooldown in the future
 _COIN = _large_form(coins="500")
-_EVENT_FORM = """
-<html><body>
-Last free mission: Mon, 01 Jul 2019 12:00
-<form action="/missionAllianceEventCreate" method="post">
-  <input type="hidden" name="authenticity_token" value="tok"/>
-  <input type="radio" name="mission_position[mission_type_id]" value="7" checked/>
-  <input type="hidden" name="mission_position[coins]" value="0"/>
-  <input type="submit" value="Start free mission"/>
-</form></body></html>
-"""
+def _event_form(last_free="Mon, 01 Jul 2019 12:00", *, coins="1"):
+    # Faithful to the real /missionAllianceEventNew: data-event-id radios
+    # (0-7 standard, 8 = Soccer Game with data-event-tag="football"), no radio
+    # checked, coins defaults to 1 ("Start Event (20 Coins)").
+    radios = "".join(
+        f'<label class="radio"><input type="radio" name="event_radio_group" '
+        f'data-event-id="{i}" data-event-tag="{"football" if i == 8 else ""}"> E{i}</label>'
+        for i in range(9)
+    )
+    return f"""
+    <html><body>
+    <span id="alliance_event_last_free_mission">Last free mission: {last_free}</span>
+    <form action="/missionAllianceEventCreate" id="new_mission_position" method="post">
+      <input type="hidden" name="authenticity_token" value="tok"/>
+      {radios}
+      <input type="hidden" name="mission_position[mission_type_id]" value=""/>
+      <input type="hidden" name="mission_position[size]" value="1"/>
+      <input type="hidden" name="mission_position[shape]" value=""/>
+      <input type="hidden" name="mission_position[amount]" value="1"/>
+      <input type="hidden" name="mission_position[coins]" value="{coins}"/>
+      <input type="submit" value="Start Event ( 20 Coins )"/>
+    </form></body></html>
+    """
+
+
+_EVENT = _event_form()
+_EVENT_STARTED = _event_form("Wed, 01 Jan 2025 12:00")
+_EVENT_WAITING = _event_form("Fri, 01 Jan 2100 12:00")
 
 
 class FakeClient:
-    def __init__(self, large_html=_ELIGIBLE, event_html=_EVENT_FORM, *, post_status=200):
+    def __init__(self, large_html=_ELIGIBLE, event_html=_EVENT, *, post_status=200):
         self.large_html = large_html
         self.event_html = event_html
         self.post_status = post_status
@@ -206,7 +224,7 @@ class FakeClient:
         self.fetched.append(path)
         is_event = "Event" in path
         if self.posted:  # verification fetch: show an advanced cooldown
-            return _STARTED
+            return _EVENT_STARTED if is_event else _STARTED
         return self.event_html if is_event else self.large_html
 
     async def post_form(self, path, data, **kwargs):
@@ -333,12 +351,67 @@ async def test_saved_missing_from_dropdown_fails(db):
     assert client.post_calls == 0  # never submitted
 
 
-async def test_event_kind_uses_event_path(db):
-    client = FakeClient(_ELIGIBLE, _EVENT_FORM)
+# -- alliance events --------------------------------------------------------
+
+async def test_event_live_posts_type_area_shape_volume_coins0(db):
+    client = FakeClient(_ELIGIBLE, _EVENT)
     sched = _scheduler(_cfg(dry_run=False), client, db)
-    await _enqueue(sched, kind="event")
+    await _enqueue(
+        sched, kind="event", event_type_id=3, area="large", shape="circle",
+        call_volume="60",
+    )
     await sched._advance()
-    assert any("Event" in p for p in client.fetched)
+    assert any("missionAllianceEventNew" in p for p in client.fetched)
+    body = client.posted_body
+    assert body["mission_position[mission_type_id]"] == "3"     # Fall weather
+    assert body["mission_position[size]"] == "2"                # large
+    assert body["mission_position[shape]"] == "circle"
+    assert body["mission_position[amount]"] == "2"              # 60s
+    # The event form defaults coins to 1; we must submit 0 (free weekly only).
+    assert body["mission_position[coins]"] == "0"
+
+
+async def test_event_not_refused_despite_form_coins_default(db):
+    # is_free_submit(form) is False for the event form (coins=1), but the
+    # event path must NOT refuse on that — it forces coins=0 and is
+    # cooldown-gated instead.
+    client = FakeClient(_ELIGIBLE, _EVENT)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    mid = await _enqueue(sched, kind="event", event_type_id=0)
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "done"
+    assert client.post_calls == 1
+
+
+async def test_event_random_picks_standard_type(db):
+    client = FakeClient(_ELIGIBLE, _EVENT)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    await _enqueue(sched, kind="event", event_random=1)
+    await sched._advance()
+    body = client.posted_body
+    chosen = int(body["mission_position[mission_type_id]"])
+    assert 0 <= chosen <= 7          # a standard type, never 8 (Soccer Game)
+
+
+async def test_event_cooldown_waits(db):
+    client = FakeClient(_ELIGIBLE, _EVENT_WAITING)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    mid = await _enqueue(sched, kind="event", event_type_id=1)
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "waiting"
+    assert client.post_calls == 0
+
+
+async def test_event_dry_run_describes_type(db):
+    client = FakeClient(_ELIGIBLE, _EVENT)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    mid = await _enqueue(sched, kind="event", event_type_id=2, area="small")
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "skipped"
+    assert "Storm Surge" in row["status_detail"]
 
 
 # -- contribution gate ------------------------------------------------------
