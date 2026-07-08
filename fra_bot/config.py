@@ -128,10 +128,11 @@ class AutomationConfig:
 class ScheduledReport:
     report: str          # registered report name
     period: str          # period name (today/week/month/…)
-    cadence: str         # daily | weekly | monthly
+    cadence: str         # daily | weekly | monthly | yearly
     channel_id: int
     weekday: int = 0     # for weekly: 0=Monday
-    day: int = 1         # for monthly: day-of-month
+    day: int = 1         # for monthly/yearly: day-of-month
+    month: int = 1       # for yearly: month (1=January)
 
 
 @dataclass(frozen=True)
@@ -348,6 +349,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                     channel_id=int(item.get("channel_id", 0)),
                     weekday=int(item.get("weekday", 0)),
                     day=int(item.get("day", 1)),
+                    month=int(item.get("month", 1)),
                 )
                 for item in (_get(raw, "reports", "scheduled", default=[]) or [])
                 if item.get("report") and item.get("channel_id")

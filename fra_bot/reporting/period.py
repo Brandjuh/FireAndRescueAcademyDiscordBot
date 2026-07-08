@@ -22,6 +22,8 @@ PERIODS = {
     "week": "Last 7 days",
     "month": "This month",
     "prev-month": "Last month",
+    "year": "This year",
+    "prev-year": "Last year",
     "all": "All time",
 }
 
@@ -66,6 +68,13 @@ def resolve_period(name: str, *, now: dt.datetime | None = None) -> Period:
         first_this = day_start.replace(day=1)
         end = first_this
         start = (first_this - dt.timedelta(days=1)).replace(day=1)
+    elif name == "year":
+        start = day_start.replace(month=1, day=1)
+        end = now
+    elif name == "prev-year":
+        first_this_year = day_start.replace(month=1, day=1)
+        end = first_this_year
+        start = first_this_year.replace(year=first_this_year.year - 1)
     else:  # all
         return Period(name, PERIODS[name], None, now)
 

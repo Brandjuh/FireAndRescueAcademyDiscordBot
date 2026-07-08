@@ -62,6 +62,32 @@ def test_prev_month_spans_the_previous_month():
     assert period.end == july_first
 
 
+def test_year_starts_on_jan_1():
+    period = resolve_period("year", now=NOW)
+    jan1 = dt.datetime(2026, 1, 1, 0, 0, tzinfo=NY).astimezone(UTC)
+    assert period.start == jan1
+    assert period.end == NOW
+
+
+def test_prev_year_spans_the_previous_year():
+    period = resolve_period("prev-year", now=NOW)
+    jan1_2025 = dt.datetime(2025, 1, 1, 0, 0, tzinfo=NY).astimezone(UTC)
+    jan1_2026 = dt.datetime(2026, 1, 1, 0, 0, tzinfo=NY).astimezone(UTC)
+    assert period.start == jan1_2025
+    assert period.end == jan1_2026
+
+
+def test_scheduled_report_yearly_cadence_is_due():
+    from types import SimpleNamespace
+
+    from fra_bot.cogs.reporting import ReportingCog
+
+    sched = SimpleNamespace(cadence="yearly", month=1, day=1, weekday=0)
+    assert ReportingCog._is_due(sched, dt.datetime(2027, 1, 1, 0, 5)) is True
+    assert ReportingCog._is_due(sched, dt.datetime(2027, 2, 1, 0, 5)) is False
+    assert ReportingCog._is_due(sched, dt.datetime(2027, 1, 2, 0, 5)) is False
+
+
 def test_all_period_is_unbounded_below():
     period = resolve_period("all", now=NOW)
     assert period.start is None
