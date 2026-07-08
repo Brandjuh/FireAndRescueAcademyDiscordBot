@@ -101,6 +101,23 @@ async def test_board_dedup_and_cancel(db):
     assert await repo.cancel(first) is False
 
 
+async def test_delete_mission_and_delete_terminal(db):
+    repo = MissionsRepo(db)
+    open_id = await repo.create(source="discord", location_text="open")
+    done_id = await repo.create(source="discord", location_text="done")
+    await repo.set_status(done_id, "done", "started")
+    # Hard-delete a specific row (any status).
+    assert await repo.delete(open_id) is True
+    assert await repo.delete(open_id) is False          # gone
+    assert await repo.get(open_id) is None
+    # delete_terminal clears finished rows, leaves open ones.
+    still_open = await repo.create(source="discord", location_text="still open")
+    removed = await repo.delete_terminal()
+    assert removed == 1                                  # only the 'done' row
+    assert await repo.get(done_id) is None
+    assert await repo.get(still_open) is not None
+
+
 async def test_rotation_cycle_is_fair(db):
     rot = RotationRepo(db)
     a = await rot.add(location_text="A", created_by="admin")
@@ -404,3 +421,52 @@ async def test_next_up_prefers_request_then_rotation(db):
 async def test_next_up_none_when_empty(db):
     sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
     assert await sched.next_up() is None
+
+
+# -- owner-only paid (coins) path -------------------------------------------
+
+async def test_coin_mission_preview_never_posts_even_when_live(db):
+    client = FakeClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)  # live, but no confirm
+    spec = MissionSpec(location_text="NYC", kind="large", source="preset").validate()
+    outcome = await sched.run_coin_mission(spec, confirm=False)
+    assert outcome.state == "dry_run"
+    assert "PAID" in outcome.detail
+    assert client.post_calls == 0  # preview must never submit
+
+
+async def test_coin_mission_confirm_posts_with_coins_even_in_dry_run(db):
+    client = FakeClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=True), client, db)  # global dry-run ON…
+    spec = MissionSpec(location_text="NYC", kind="large", source="preset").validate()
+    outcome = await sched.run_coin_mission(spec, confirm=True)  # …but confirmed
+    assert outcome.state == "started"
+    assert client.post_calls == 1
+    assert client.posted_body["mission_position[coins]"] == "1"  # spent coins
+
+
+async def test_coin_mission_ignores_free_cooldown(db):
+    # A future free cooldown blocks a FREE start, but coins ignore it.
+    client = FakeClient(_WAITING)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    spec = MissionSpec(location_text="NYC").validate()
+    outcome = await sched.run_coin_mission(spec, confirm=True)
+    assert outcome.state == "started"
+    assert client.posted_body["mission_position[coins]"] == "1"
+
+
+async def test_coin_mission_custom_posts_fields_and_coins(db):
+    from fra_bot.mc.parsers.missions_custom import CustomMission
+
+    client = FakeClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    spec = MissionSpec(
+        location_text="NYC", kind="large", source="custom",
+        custom=CustomMission("Paid fire", {"need_lf": 25}),
+    ).validate()
+    outcome = await sched.run_coin_mission(spec, confirm=True)
+    assert outcome.state == "started"
+    body = client.posted_body
+    assert body["mission_position[mission_type_id]"] == "-1"
+    assert body[value_field_name("need_lf")] == "25"
+    assert body["mission_position[coins]"] == "1"

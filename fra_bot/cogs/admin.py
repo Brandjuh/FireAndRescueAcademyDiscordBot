@@ -24,6 +24,11 @@ from ..services.treasury_sync import STATE_BACKFILL_DONE, STATE_BACKFILL_NEXT_PA
 
 log = logging.getLogger(__name__)
 
+# Only these Discord user IDs may spend alliance coins via !fra coinmission.
+# Everything else in the bot is strictly free-only; this is a deliberate,
+# owner-only exception, and it still previews unless `| confirm` is given.
+COIN_AUTHORIZED_USER_IDS = {132620654087241729}
+
 
 def is_fra_admin_ctx(ctx: commands.Context) -> bool:
     """True when the invoker may run admin commands."""
@@ -453,6 +458,93 @@ class AdminCog(commands.Cog):
                 f"Mission #{mission_id} could not be cancelled "
                 "(not found, or already started/finished)."
             )
+
+    @fra.command(name="deletemission", aliases=["delmission", "rmmission"])
+    async def mission_delete(self, ctx: commands.Context, target: str) -> None:
+        """Delete a mission from the list — any status.
+
+        `!fra deletemission <id>` removes one row. `!fra deletemission all`
+        clears every FINISHED mission (done/failed/skipped/cancelled), leaving
+        open ones alone. Use `!fra cancelmission` to stop an open one without
+        deleting it.
+        """
+        if target.lower() == "all":
+            n = await self._missions.delete_terminal()
+            await ctx.send(f"🗑️ Deleted {n} finished mission(s).")
+            return
+        try:
+            mission_id = int(target)
+        except ValueError:
+            await ctx.send("Usage: `!fra deletemission <id|all>`")
+            return
+        if await self._missions.delete(mission_id):
+            await ctx.send(f"🗑️ Mission #{mission_id} deleted.")
+        else:
+            await ctx.send(f"Mission #{mission_id} not found.")
+
+    @fra.command(name="coinmission", aliases=["paidmission"])
+    async def coin_mission(self, ctx: commands.Context, *, spec_text: str = "") -> None:
+        """Start a mission/event using COINS — owner-only.
+
+        Unlike every other path (which is strictly free-only), this spends
+        alliance coins and ignores the free-mission cooldown, so it can start
+        right away. Restricted to specific Discord user id(s).
+
+        `!fra coinmission <location> [| kind: event] [| preset: Pile-up]
+        [| custom: need_lf=25 …] [| saved: <name>] [| name: <caption>] [| confirm]`
+
+        Without `| confirm` it only PREVIEWS the cost — nothing is spent. Add
+        `| confirm` to actually start and spend coins (works even while the
+        rest of the bot is in dry-run).
+        """
+        if ctx.author.id not in COIN_AUTHORIZED_USER_IDS:
+            await ctx.send("⛔ This command is restricted to the alliance owner.")
+            return
+        spec_text = spec_text.strip()
+        if not spec_text:
+            await ctx.send(
+                "Usage: `!fra coinmission <location> [| kind: event] "
+                "[| preset: Pile-up] [| custom: need_lf=25 …] [| saved: <name>] "
+                "[| name: <caption>] [| confirm]`\n"
+                "_Add `| confirm` to actually spend coins; without it you get a preview._"
+            )
+            return
+
+        # Pull the `confirm` flag out of the pipe-separated segments.
+        confirm = False
+        kept: list[str] = []
+        for seg in (s.strip() for s in spec_text.split("|")):
+            if seg.lower() in ("confirm", "confirm: yes", "confirm:yes", "yes"):
+                confirm = True
+            elif seg:
+                kept.append(seg)
+        try:
+            spec = self._parse_rotation_spec(" | ".join(kept))
+        except Exception as exc:  # noqa: BLE001 - surface the reason
+            await ctx.send(f"⚠️ {exc}")
+            return
+
+        verb = "Starting (PAID)" if confirm else "Previewing"
+        message = await ctx.send(
+            f"⏳ {verb} — {spec.describe()} at *{spec.location_text}*…"
+        )
+        try:
+            outcome = await self.bot.missions_service.run_coin_mission(spec, confirm=confirm)
+        except Exception as exc:  # noqa: BLE001 - report, don't crash the cog
+            log.exception("coinmission failed")
+            await message.edit(content=f"❌ Failed: {exc}")
+            return
+
+        icon = {
+            "started": "💰🚨", "dry_run": "🧪", "not_found": "❌",
+            "form_error": "❌", "http_error": "❌", "refused": "❌",
+            "unverified": "⚠️",
+        }.get(outcome.state, "•")
+        tail = (
+            "\n_Add `| confirm` to actually spend coins._"
+            if outcome.state == "dry_run" else ""
+        )
+        await message.edit(content=f"{icon} {outcome.detail}{tail}"[:1900])
 
     @fra.command(name="nextmission")
     async def next_mission(self, ctx: commands.Context) -> None:

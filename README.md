@@ -223,6 +223,8 @@ Requires Discord administrator permission or a role listed in
 | `!fra missionpanel` | Post the "Request a mission" panel to the configured channel |
 | `!fra missions [limit]` | List recent scheduled missions and their status |
 | `!fra cancelmission <id>` | Cancel a not-yet-started scheduled mission |
+| `!fra deletemission <id\|all>` | Delete a mission row (any status); `all` clears finished ones |
+| `!fra coinmission <location> [\| …] [\| confirm]` | Owner-only: start using **coins** (ignores the free cooldown). Previews unless `\| confirm` |
 | `!fra nextmission` | Show which mission/event is up next and where (for the eventpinger) |
 | `!fra rotation` / `list` | Show the auto-start rotation list and which entry is next |
 | `!fra rotation add <location> [\| kind: event] [\| preset: Pile-up] [\| custom: need_lf=25 …] [\| saved: <name>] [\| name: <caption>]` | Add a location to the rotation |
