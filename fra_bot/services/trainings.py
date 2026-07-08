@@ -12,6 +12,7 @@ signup window, mirroring the alliance's existing policy.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
@@ -66,6 +67,57 @@ class TrainingsService(BoardRequestService):
 
     def guide_body(self) -> str:
         return _training_guide(self._auto.min_contribution_rate)
+
+    async def guide_content(self, now_epoch: float) -> tuple[str, str] | None:
+        """Static guide + a live "free classrooms per academy type" block +
+        the last-updated line. Only the static part feeds the signature, so
+        availability refreshes on the throttle (hourly), not every poll."""
+        from ..mc.board import guide_updated_line
+
+        static = self.guide_body()
+        signature = hashlib.sha1(static.encode("utf-8")).hexdigest()[:12]
+        availability = await self._collect_availability()
+        desired = "\n".join(
+            [static, "", _availability_block(availability), "", guide_updated_line(now_epoch)]
+        )
+        return desired, signature
+
+    async def _collect_availability(self) -> dict[str, int] | None:
+        """Free classrooms per discipline across all alliance academies.
+
+        Returns ``None`` if the building list can't be read (shown as
+        "temporarily unavailable"); a per-academy page failure just omits that
+        academy's rooms."""
+        try:
+            listings: list[AcademyListing] = []
+            path = ALLIANCE_BUILDINGS_PATH
+            for _ in range(MAX_ACADEMY_LIST_PAGES):
+                html = await self.client.fetch_page(path)
+                listings.extend(parse_alliance_buildings_page(html))
+                nxt = find_next_page_path(html)
+                if not nxt:
+                    break
+                path = nxt
+        except MissionChiefError as exc:
+            log.warning("training availability: could not read academy list: %s", exc)
+            return None
+
+        counts = {key: 0 for key in _DISCIPLINE_TITLES}
+        seen: set[int] = set()
+        for listing in listings:
+            if listing.discipline not in counts or listing.building_id in seen:
+                continue
+            seen.add(listing.building_id)
+            try:
+                page = parse_academy_page(
+                    await self.client.fetch_page(f"/buildings/{listing.building_id}")
+                )
+            except MissionChiefError as exc:
+                log.debug("training availability: academy %s failed (%s)",
+                          listing.building_id, exc)
+                continue
+            counts[listing.discipline] += max(0, page.available_rooms)
+        return counts
 
     async def parse_request(self, post: BoardPost) -> dict | None:
         matches, ambiguous = match_trainings(post.content)
@@ -348,40 +400,45 @@ class TrainingsService(BoardRequestService):
 
 
 def _training_guide(min_rate: float) -> str:
-    """The how-to-request post the bot maintains on the training board. Starts
-    with :data:`GUIDE_MARKER` so it's never re-parsed as a request. Lists every
-    course from the catalog so members know exactly what they can ask for."""
+    """The STABLE how-to-request post for the training board. Starts with
+    :data:`GUIDE_MARKER` (so it's never re-parsed as a request) and uses forum
+    BBCode headers. The caller appends live availability + a last-updated line."""
     lines = [
-        f"{GUIDE_MARKER} here",
+        GUIDE_MARKER,
         "",
-        "Just post the training you want — the course name on its own is "
-        "enough. e.g.:",
-        "• HazMat",
-        "• SWAT",
-        "• Lifeguard Training",
+        "[b]How to request[/b]",
+        "Post the training name on its own line. Want several? Put one per line.",
         "",
-        "You can ask for more than one at once (one per line, or separated by "
-        "commas).",
+        "[b]Copy an example[/b]",
+        "HazMat",
+        "SWAT",
+        "Lifeguard Training",
         "",
-        "Some courses are taught in more than one academy type. For those, put "
-        "the academy in front so it opens in the right one:",
-        "• Fire - Lifeguard Training   ·   Water Rescue - Lifeguard Training",
-        "• EMS - Ocean Navigation   ·   Police - Sharpshooter Training",
+        "[b]Same course in two academies?[/b]",
+        "Put the academy in front so it opens in the right one:",
+        "Fire - Lifeguard Training",
+        "Water Rescue - Lifeguard Training",
         "",
-        "Every class is opened FREE, one class per recognised course, and stays "
-        "open to the whole alliance for 1 hour to sign up.",
+        "[b]Good to know[/b]",
+        "- Classes open FREE, one class per recognised course.",
+        "- A class stays open to the whole alliance for 1 hour to sign up.",
+        f"- Members below {min_rate:g}% alliance contribution are skipped.",
         "",
-        "Available courses:",
+        "[b]Courses you can request[/b]",
     ]
     for key, title in _DISCIPLINE_TITLES.items():
         courses = DISCIPLINES.get(key) or {}
-        if not courses:
-            continue
-        names = ", ".join(sorted(courses))
-        lines.append(f"• {title}: {names}")
-    lines += [
-        "",
-        f"Requests from members below {min_rate:g}% alliance contribution are "
-        "skipped.",
-    ]
+        if courses:
+            lines.append(f"{title}: {', '.join(sorted(courses))}")
+    return "\n".join(lines)
+
+
+def _availability_block(counts: dict[str, int] | None) -> str:
+    """The live "free classrooms per academy type" section for the guide."""
+    lines = ["[b]Free classrooms right now[/b]"]
+    if counts is None:
+        lines.append("Temporarily unavailable — I'll refresh this shortly.")
+        return "\n".join(lines)
+    for key, title in _DISCIPLINE_TITLES.items():
+        lines.append(f"{title}: {counts.get(key, 0)}")
     return "\n".join(lines)

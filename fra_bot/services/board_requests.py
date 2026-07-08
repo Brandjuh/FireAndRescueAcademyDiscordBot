@@ -21,6 +21,7 @@ not executed), dedup via ``board_posts``, and skipping our own posts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
@@ -36,7 +37,13 @@ from ..db.repos import (
     RunsRepo,
     StateRepo,
 )
-from ..mc.board import REPLY_MARKER, BoardClient, ensure_guide_post
+from ..mc.board import (
+    REPLY_MARKER,
+    BoardClient,
+    ensure_guide_post,
+    guide_now,
+    guide_updated_line,
+)
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.board import BoardPost
@@ -78,9 +85,24 @@ class BoardRequestService:
     guide_marker: str | None = None
 
     def guide_body(self) -> str | None:
-        """The full how-to-request guide text (first line starts with
-        :attr:`guide_marker`). Return ``None`` to skip posting a guide."""
+        """The STABLE how-to-request guide text (first line starts with
+        :attr:`guide_marker`). Return ``None`` to skip posting a guide. The
+        base appends a "last updated" line; subclasses that want live sections
+        (e.g. availability) override :meth:`guide_content` instead."""
         return None
+
+    async def guide_content(self, now_epoch: float) -> tuple[str, str] | None:
+        """Return ``(full_post_text, stable_signature)`` or ``None`` to skip.
+
+        The signature covers only the stable instructions, so live bits (the
+        "last updated" line, availability) can refresh on the throttle without
+        counting as a content change. Default: the static ``guide_body`` plus a
+        last-updated line."""
+        body = self.guide_body()
+        if not body:
+            return None
+        signature = hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
+        return f"{body}\n\n{guide_updated_line(now_epoch)}", signature
 
     async def parse_request(self, post: BoardPost) -> dict | None:
         """Decide if *post* is a request of our kind. NO side effects.
@@ -110,20 +132,29 @@ class BoardRequestService:
     def _guide_hash_key(self) -> str:
         return f"board_guide_hash:{self.kind}:{self.thread_id}"
 
+    def _guide_refreshed_key(self) -> str:
+        return f"board_guide_refreshed:{self.kind}:{self.thread_id}"
+
     async def _ensure_guide(self) -> None:
         """Maintain this board's how-to-request guide (find-or-edit, never
         duplicate). Gated only by ``reply_to_board`` — a guide is an
-        informational forum post, so it's kept current even in dry-run."""
+        informational forum post, so it's kept current even in dry-run. The
+        board is only re-written when the instructions change (or hourly, to
+        freshen the "last updated" line and any live sections)."""
         if not self.cfg.automation.reply_to_board or not self.guide_marker:
             return
-        desired = self.guide_body()
-        if not desired:
+        now = guide_now()
+        content = await self.guide_content(now)
+        if content is None:
             return
+        desired, signature = content
         try:
             await ensure_guide_post(
                 self.board, self.state, self.thread_id,
                 id_key=self._guide_id_key(), hash_key=self._guide_hash_key(),
-                marker=self.guide_marker, desired=desired,
+                refreshed_key=self._guide_refreshed_key(),
+                marker=self.guide_marker, desired=desired, signature=signature,
+                now_epoch=now,
             )
         except MissionChiefError as exc:
             log.warning(

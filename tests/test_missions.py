@@ -773,11 +773,34 @@ async def test_ensure_guide_creates_then_skips_unchanged(db):
     await sched._ensure_guide(15307, "large")
     assert len(board.created) == 1                     # first time: created once
     assert board.created[0][1].startswith("[FRA] 📋 How to request a LARGE")
+    assert "Last updated:" in board.created[0][1]       # carries a freshness stamp
     assert await sched.state.get("mission_board_guide_id:15307") == "55"
-    # Same content next poll: no duplicate, no needless edit.
+    # Same content next poll: no duplicate, no needless edit (within the
+    # refresh window, unchanged instructions).
     await sched._ensure_guide(15307, "large")
     assert len(board.created) == 1
     assert board.edited == []
+
+
+async def test_ensure_guide_post_throttles_timestamp_refresh(db):
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.mc.board import ensure_guide_post
+
+    state = StateRepo(db)
+    board = GuideBoard(existing=None)
+    keys = dict(id_key="g:id", hash_key="g:hash", refreshed_key="g:ref",
+                marker="[FRA] X", signature="sig1")
+    await ensure_guide_post(board, state, 1, desired="body @100",
+                            now_epoch=100.0, min_refresh_seconds=3600, **keys)
+    assert len(board.created) == 1                     # created
+    # Same signature 10s later → throttled, no edit.
+    await ensure_guide_post(board, state, 1, desired="body @110",
+                            now_epoch=110.0, min_refresh_seconds=3600, **keys)
+    assert board.edited == []
+    # Same signature past the refresh window → edits to freshen the timestamp.
+    await ensure_guide_post(board, state, 1, desired="body @9999",
+                            now_epoch=9999.0, min_refresh_seconds=3600, **keys)
+    assert board.edited and board.edited[-1] == (55, "body @9999")
 
 
 async def test_ensure_guide_edits_existing_instead_of_duplicating(db):

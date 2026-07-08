@@ -6,7 +6,7 @@ can recognize (and never re-process) the bot's own posts.
 
 from __future__ import annotations
 
-import hashlib
+import datetime as dt
 import logging
 
 from bs4 import BeautifulSoup
@@ -18,6 +18,21 @@ from .parsers.board import BoardThreadPage, parse_board_thread_page
 log = logging.getLogger(__name__)
 
 REPLY_MARKER = "[FRA]"
+
+
+def guide_now() -> float:
+    """Current UTC epoch seconds — the guide's refresh clock."""
+    return dt.datetime.now(dt.timezone.utc).timestamp()
+
+
+def guide_updated_line(now_epoch: float | None = None) -> str:
+    """A human 'last updated' line for the bottom of a guide post."""
+    moment = (
+        dt.datetime.fromtimestamp(now_epoch, dt.timezone.utc)
+        if now_epoch is not None
+        else dt.datetime.now(dt.timezone.utc)
+    )
+    return f"Last updated: {moment.strftime('%Y-%m-%d %H:%M UTC')}"
 
 
 class BoardClient:
@@ -210,34 +225,53 @@ async def ensure_guide_post(
     *,
     id_key: str,
     hash_key: str,
+    refreshed_key: str,
     marker: str,
     desired: str,
+    signature: str,
+    now_epoch: float,
+    min_refresh_seconds: float = 3600.0,
 ) -> None:
     """Keep exactly one guide post on a board: find our existing one and EDIT
     it in place, else create it — never duplicate.
 
-    ``state`` is a key/value store (:class:`StateRepo`): ``id_key`` remembers
-    which post is our guide and ``hash_key`` its content hash, so the board is
-    only touched when the text actually changes. This is an informational forum
-    post (not a game action), so callers maintain it even in dry-run. Board
-    errors propagate as :class:`MissionChiefError` for the caller to catch.
+    ``signature`` is a hash of the guide's *stable* text (its instructions),
+    while ``desired`` is the full post including volatile bits like a
+    "last updated" timestamp or live availability. The board is re-written when
+    the stable text changes, or at most once per ``min_refresh_seconds`` to
+    freshen the volatile bits — so a timestamp never triggers an edit on every
+    poll. ``state`` (a :class:`StateRepo`) remembers the post id, the stable
+    signature and when it was last refreshed.
+
+    This is an informational forum post (not a game action), so callers
+    maintain it even in dry-run. Board errors propagate as
+    :class:`MissionChiefError` for the caller to catch.
     """
-    digest = hashlib.sha1(desired.encode("utf-8")).hexdigest()[:12]
+
+    async def _record(post_id: int) -> None:
+        await state.set(id_key, str(post_id))
+        await state.set(hash_key, signature)
+        await state.set(refreshed_key, repr(now_epoch))
+
     stored = await state.get(id_key)
-    if stored and await state.get(hash_key) == digest:
-        return  # a guide with this exact text is already up
     if stored:
+        same_signature = await state.get(hash_key) == signature
+        raw_refreshed = await state.get(refreshed_key)
+        try:
+            last_refreshed = float(raw_refreshed) if raw_refreshed else 0.0
+        except (TypeError, ValueError):
+            last_refreshed = 0.0
+        if same_signature and (now_epoch - last_refreshed) < min_refresh_seconds:
+            return  # unchanged and refreshed recently — leave it be
         if await board.edit_post(int(stored), desired):
-            await state.set(hash_key, digest)
+            await _record(int(stored))
             return
         await state.delete(id_key)  # stale id — fall through and re-find
     existing = await board.find_bot_post(thread_id, marker)
     if existing is not None:
         if await board.edit_post(existing, desired):
-            await state.set(id_key, str(existing))
-            await state.set(hash_key, digest)
+            await _record(existing)
         return
     new_id = await board.create_post_get_id(thread_id, desired)
     if new_id is not None:
-        await state.set(id_key, str(new_id))
-        await state.set(hash_key, digest)
+        await _record(new_id)

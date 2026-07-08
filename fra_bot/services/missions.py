@@ -23,6 +23,7 @@ a mission is marked ``skipped`` with what *would* have been started.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -41,7 +42,13 @@ from ..db.repos import (
 )
 from ..geo.geocoder import GeocodeError, Geocoder
 from ..geo.maps_links import find_maps_links
-from ..mc.board import REPLY_MARKER, BoardClient, ensure_guide_post
+from ..mc.board import (
+    REPLY_MARKER,
+    BoardClient,
+    ensure_guide_post,
+    guide_now,
+    guide_updated_line,
+)
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.events import (
@@ -238,23 +245,31 @@ class MissionScheduler:
     def _guide_hash_key(self, thread_id: int) -> str:
         return f"mission_board_guide_hash:{thread_id}"
 
+    def _guide_refreshed_key(self, thread_id: int) -> str:
+        return f"mission_board_guide_refreshed:{thread_id}"
+
     async def _ensure_guide(self, thread_id: int, default_kind: str) -> None:
         """Keep exactly one how-to-request guide post on the board: find our
         existing one and EDIT it in place, else create it — never duplicate.
 
         This is an informational forum post (not a game action), so it is
-        maintained even in dry-run — only gated by ``reply_to_board``. A
-        content hash means we only touch the board when the text changes."""
+        maintained even in dry-run — only gated by ``reply_to_board``. The
+        board is only re-written when the instructions change (or hourly, to
+        freshen the "last updated" line)."""
         if not self.cfg.automation.reply_to_board:
             return
-        desired = _board_guide(default_kind, self._auto.min_contribution_rate)
+        static = _board_guide(default_kind, self._auto.min_contribution_rate)
+        signature = hashlib.sha1(static.encode("utf-8")).hexdigest()[:12]
+        now = guide_now()
+        desired = f"{static}\n\n{guide_updated_line(now)}"
         try:
             await ensure_guide_post(
                 self.board, self.state, thread_id,
                 id_key=self._guide_id_key(thread_id),
                 hash_key=self._guide_hash_key(thread_id),
+                refreshed_key=self._guide_refreshed_key(thread_id),
                 marker=_guide_marker(default_kind),
-                desired=desired,
+                desired=desired, signature=signature, now_epoch=now,
             )
         except MissionChiefError as exc:
             log.warning("mission: could not maintain guide on %s: %s", thread_id, exc)
@@ -888,43 +903,59 @@ def _guide_marker(default_kind: str) -> str:
 
 
 def _board_guide(default_kind: str, min_rate: float) -> str:
-    """The how-to-request post the bot maintains on a request board. Starts
-    with the [FRA] marker so it's never re-parsed as a request."""
+    """The how-to-request post the bot maintains on a request board.
+
+    Starts with the [FRA] marker (so it's never re-parsed as a request) and
+    uses forum BBCode headers. Kept short and copy-friendly: the examples sit
+    on their own lines so members can tap-and-copy one on a phone. This is the
+    STABLE text — the caller appends a "last updated" line."""
     if default_kind == "event":
-        lines = [
-            "[FRA] 📋 How to request an ALLIANCE EVENT here",
+        return "\n".join([
+            _guide_marker("event"),
             "",
-            "Just post a location — a place name or a Google Maps link. e.g.:",
-            "• New York City",
-            "• Amsterdam, Netherlands",
-            "• https://maps.app.goo.gl/…",
+            "[b]How to request[/b]",
+            "Post a location on its own line — a place name or a Google Maps link.",
+            "No extras needed: you get a random event, Large / Circle / 30s.",
             "",
-            "Optional extra lines to fine-tune (leave out for the defaults):",
-            "• event: Storm   (or Civil Unrest / Storm Surge / Fall/Winter/Spring/Summer weather / Sports Event / Random)",
-            "• area: small | medium | large   ·   shape: rectangle | circle   ·   call: 30 | 45 | 60",
-            "• schedule: recurring   (keep it in the rotation)",
+            "[b]Copy an example and change the place[/b]",
+            "New York City",
+            "Amsterdam, Netherlands",
+            "https://maps.app.goo.gl/xxxxx",
             "",
-            "No extras? You get a random event at Large / Circle / 30s.",
-        ]
-    else:
-        lines = [
-            "[FRA] 📋 How to request a LARGE SCALE ALLIANCE MISSION here",
+            "[b]Want to fine-tune? Add any of these on their own lines[/b]",
+            "event: Storm      (or Civil Unrest, Storm Surge, Fall/Winter/Spring/Summer weather, Sports Event, Random)",
+            "area: large       (small, medium or large)",
+            "shape: circle     (circle or rectangle)",
+            "call: 30          (30, 45 or 60 seconds)",
+            "schedule: recurring   (keep it coming back)",
             "",
-            "Just post a location — a place name or a Google Maps link. e.g.:",
-            "• New York City",
-            "• Amsterdam, Netherlands",
-            "• https://maps.app.goo.gl/…",
-            "",
-            "Optional extra lines to fine-tune (leave out for a standard mission):",
-            "• custom: need_lf=25 need_elw1=6 water_needed=15000   (your own required units)",
-            "• saved: <name>   (start one of the game's Saved Missions by name)",
-            "• name: <mission name>   ·   schedule: recurring",
-        ]
-    lines += [
+            "[b]Good to know[/b]",
+            "- One event per post.",
+            "- It starts at the next free alliance slot — this can take a while.",
+            f"- Members below {min_rate:g}% alliance contribution are skipped.",
+        ])
+    return "\n".join([
+        _guide_marker("large"),
         "",
-        f"Requests from members below {min_rate:g}% alliance contribution are skipped.",
-    ]
-    return "\n".join(lines)
+        "[b]How to request[/b]",
+        "Post a location on its own line — a place name or a Google Maps link. That's all you need.",
+        "",
+        "[b]Copy an example and change the place[/b]",
+        "New York City",
+        "Amsterdam, Netherlands",
+        "https://maps.app.goo.gl/xxxxx",
+        "",
+        "[b]Want more control? Add any of these on their own lines[/b]",
+        "name: My mission name",
+        "custom: need_lf=25 need_elw1=6 water_needed=15000   (your own required units)",
+        "saved: <name>        (start one of the game's Saved Missions by name)",
+        "schedule: recurring   (keep it coming back)",
+        "",
+        "[b]Good to know[/b]",
+        "- One mission per post.",
+        "- It starts at the next free alliance slot — this can take a while.",
+        f"- Members below {min_rate:g}% alliance contribution are skipped.",
+    ])
 
 
 def _with_coins(body: list[tuple[str, str]], *, count: int = 1) -> list[tuple[str, str]]:
