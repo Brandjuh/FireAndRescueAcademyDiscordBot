@@ -85,6 +85,47 @@ class BrowserUnavailable(RuntimeError):
     """Playwright is not installed / usable."""
 
 
+def cookies_for(base_url: str, cookie_jar) -> list[dict]:
+    """Shape an aiohttp cookie jar for Playwright's add_cookies."""
+    return [
+        {"name": cookie.key, "value": cookie.value, "url": base_url}
+        for cookie in cookie_jar
+    ]
+
+
+async def render_page(
+    base_url: str, cookies: list[dict], path: str, *, timeout_ms: int = 30000
+) -> str:
+    """Return a page's HTML after JavaScript has run (authenticated).
+
+    Used by the `!fra dump` diagnostic for JS-driven forms (e.g.
+    `/buildings/new`) where the server HTML alone doesn't reflect the final
+    DOM. Raises BrowserUnavailable when Playwright isn't installed.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:  # pragma: no cover - depends on env
+        raise BrowserUnavailable(
+            "Playwright not installed; run 'pip install playwright && "
+            "python -m playwright install chromium'"
+        ) from exc
+
+    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 1000})
+            await context.add_cookies(cookies)
+            page = await context.new_page()
+            page.set_default_timeout(timeout_ms)
+            await page.goto(url, wait_until="networkidle")
+            return await page.content()
+        finally:
+            await browser.close()
+
+
 @dataclass
 class BuildResult:
     ok: bool

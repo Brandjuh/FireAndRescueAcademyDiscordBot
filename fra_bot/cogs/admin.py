@@ -394,3 +394,65 @@ class AdminCog(commands.Cog):
                 f"Mission #{mission_id} could not be cancelled "
                 "(not found, or already started/finished)."
             )
+
+    @fra.command(name="dump")
+    async def dump(
+        self, ctx: commands.Context, path: str, mode: str = "http"
+    ) -> None:
+        """Fetch a MissionChief page's HTML for inspection.
+
+        `!fra dump /missionAllianceNew?tlat=40.7&tlng=-74` — server HTML.
+        `!fra dump /buildings/new rendered` — HTML after JavaScript runs
+        (needs Playwright). CSRF tokens are redacted before upload.
+        """
+        import io
+
+        from ..mc.page_dump import redact_html, sanitize_dump_path
+
+        try:
+            path = sanitize_dump_path(path)
+        except ValueError as exc:
+            await ctx.send(f"⚠️ {exc}")
+            return
+
+        rendered = mode.lower() in ("rendered", "js", "browser")
+        await ctx.send(
+            f"⏳ Fetching `{path}` ({'rendered' if rendered else 'http'})…"
+        )
+        try:
+            if rendered:
+                from ..mc.browser_builder import (
+                    BrowserBuilder,
+                    cookies_for,
+                    render_page,
+                )
+
+                if not BrowserBuilder.available():
+                    await ctx.send(
+                        "Playwright isn't installed here — try without `rendered`, "
+                        "or `pip install playwright && python -m playwright install chromium`."
+                    )
+                    return
+                base = self.bot.cfg.missionchief.base_url
+                cookies = cookies_for(base, self.bot.mc.session.cookie_jar)
+                html = await render_page(base, cookies, path)
+            else:
+                html = await self.bot.mc.fetch_page(path)
+        except Exception as exc:  # noqa: BLE001 - report, don't crash the cog
+            await ctx.send(f"❌ Dump failed: {exc}")
+            return
+
+        html = redact_html(html)
+        slug = path.strip("/").split("?")[0].replace("/", "_") or "page"
+        suffix = "rendered" if rendered else "http"
+        buffer = io.BytesIO(html.encode("utf-8"))
+        try:
+            await ctx.send(
+                content=(
+                    f"📄 `{path}` — {len(html):,} bytes "
+                    f"({suffix}, CSRF tokens redacted)."
+                ),
+                file=discord.File(buffer, filename=f"{slug}-{suffix}.html"),
+            )
+        except discord.HTTPException as exc:
+            await ctx.send(f"Fetched {len(html):,} bytes but couldn't upload it: {exc}")
