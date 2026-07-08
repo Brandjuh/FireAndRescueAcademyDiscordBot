@@ -48,12 +48,12 @@ async def test_reverse_result_is_cached(geo):
 
     async def fake_nominatim(path, params):
         calls.append(path)
-        return {"display_name": "Cached Place"}
+        return {"display_name": "Cached Place", "type": "hospital"}
 
     geo._nominatim = fake_nominatim
     a = await geo.reverse(51.5, -0.12)
     b = await geo.reverse(51.5, -0.12)  # second call served from cache
-    assert a == b == "Cached Place"
+    assert a == b == ("Cached Place", "hospital")
     assert len(calls) == 1
 
 
@@ -68,6 +68,33 @@ async def test_place_only_link_falls_back_to_search(geo):
     )
     assert result.source == "nominatim_search"
     assert abs(result.latitude - 34.05) < 1e-6
+
+
+async def test_maps_place_link_carries_place_text_for_type_detection(geo):
+    # A hospital pin often reverse-geocodes to a plain street with no
+    # "hospital" in it; the place NAME from the link is what makes detection
+    # work — exactly the "member drops a maps pin" flow.
+    from fra_bot.services.buildings import detect_building_type
+
+    async def fake_nominatim(path, params):
+        assert path == "/search"
+        return [{
+            "lat": "47.02", "lon": "4.83",
+            "display_name": "Av. Guigone de Salins, Beaune",
+            "type": "hospital",  # the OSM amenity tag
+        }]
+
+    geo._nominatim = fake_nominatim
+    result = await geo.resolve_maps_link(
+        "https://www.google.com/maps/place/Centre+Hospitalier+de+Beaune/"
+    )
+    assert result.place_text == "Centre Hospitalier de Beaune"
+    assert result.place_type == "hospital"
+    assert "hospital" not in (result.address or "").lower()  # street only
+    # Address alone misses it; the OSM type (or the place name) detects it.
+    assert detect_building_type(result.address, None) is None
+    assert detect_building_type(result.address, None, result.place_type) == "hospital"
+    assert detect_building_type(result.address, result.place_text) == "hospital"
 
 
 async def test_search_no_results_raises(geo):
