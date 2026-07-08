@@ -230,3 +230,17 @@ async def test_training_guide_suppressed_when_replies_off(db):
     svc.board = board
     await svc._ensure_guide()
     assert board.created == [] and board.edited == []
+
+
+async def test_training_guide_content_has_availability_and_timestamp(db):
+    import hashlib
+
+    svc, _ = _service(db, dry_run=True)
+    desired, signature = await svc.guide_content(now_epoch=1000.0)
+    assert desired.startswith("[FRA] 📋 How to request a TRAINING")
+    assert "[b]Free classrooms right now[/b]" in desired
+    assert "Last updated:" in desired
+    # The fake academy (fire, id 4951748) has 2 free classrooms.
+    assert "🚒 Fire: 2" in desired
+    # Signature covers only the stable instructions, not the live sections.
+    assert signature == hashlib.sha1(svc.guide_body().encode("utf-8")).hexdigest()[:12]
