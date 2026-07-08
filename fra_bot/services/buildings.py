@@ -242,3 +242,59 @@ class BuildingsService(BoardRequestService):
             log.warning("Building funds check failed: %s", exc)
             return None
         return parse_total_funds(html)
+
+    async def test_build(self, building_type: str, location_text: str) -> str:
+        """Admin diagnostic: geocode a location and drive the build form for
+        it, honouring dry_run (in dry-run it stops short of submitting). Runs
+        the whole chain on demand — no board post needed. Returns a summary."""
+        from ..geo.geocoder import GeocodeError
+
+        try:
+            if find_maps_links(location_text):
+                location = await self._geocoder.resolve_maps_link(location_text)
+            else:
+                location = await self._geocoder.search(location_text)
+        except GeocodeError as exc:
+            return f"❌ Geocoding failed: {exc}"
+
+        lines = [
+            f"📍 Resolved to **{location.address or 'unknown address'}** "
+            f"({location.latitude:.5f}, {location.longitude:.5f})"
+        ]
+        funds = await self._live_funds()
+        if funds is not None:
+            lines.append(
+                f"💰 Alliance funds: {funds:,} (floor {self._auto.min_alliance_funds:,})"
+            )
+
+        if not BrowserBuilder.available():
+            lines.append(
+                "⚠️ Playwright isn't installed, so the form can't be driven. "
+                "Install it to test the browser build."
+            )
+            return "\n".join(lines)
+
+        name = location.address.split(",")[0] if location.address else building_type
+        try:
+            result = await self._builder.build(
+                building_type=building_type,
+                latitude=location.latitude,
+                longitude=location.longitude,
+                name=name,
+                address=location.address,
+                dry_run=self.dry_run,
+            )
+        except BrowserUnavailable as exc:
+            lines.append(f"⚠️ {exc}")
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 - surface it, don't crash the cog
+            lines.append(f"❌ Browser build errored: {exc}")
+            return "\n".join(lines)
+
+        detail = result.detail
+        if result.building_id:
+            detail += f" — https://www.missionchief.com/buildings/{result.building_id}"
+        icon = "✅" if result.ok else "❌"
+        mode = "DRY-RUN" if self.dry_run else "LIVE"
+        lines.append(f"{icon} [{mode}] {detail}")
+        return "\n".join(lines)

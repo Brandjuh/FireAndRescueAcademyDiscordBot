@@ -180,7 +180,12 @@ class BrowserBuilder:
         longitude: float,
         name: str,
         address: str | None,
+        dry_run: bool = False,
     ) -> BuildResult:
+        """Drive the form to build the building. When ``dry_run`` is set, do
+        everything except the final submit — a full check of the flow
+        (type, position, address, alliance button) against the live site
+        without creating anything."""
         try:
             from playwright.async_api import async_playwright
         except ImportError as exc:  # pragma: no cover - depends on env
@@ -235,13 +240,26 @@ class BrowserBuilder:
                     )
                 except Exception:  # noqa: BLE001 - address is optional; proceed
                     pass
+                resolved_address = await page.evaluate(
+                    "() => { const a = document.querySelector('#building_address');"
+                    " return a ? a.value : ''; }"
+                )
 
                 # 3. Free-only guard: the alliance button must not spend coins.
                 info = await page.evaluate(_ALLIANCE_BTN_INFO_SCRIPT, type_id)
                 if not info.get("found"):
                     return BuildResult(False, None, info.get("error", "no alliance build button"))
-                if "coin" in (info.get("label") or "").lower():
+                label = info.get("label") or ""
+                if "coin" in label.lower():
                     return BuildResult(False, None, "refusing to build: button would spend coins")
+
+                if dry_run:
+                    # Everything is set up correctly; stop short of submitting.
+                    return BuildResult(
+                        True, None,
+                        f"dry-run OK — would click '{label}'; "
+                        f"map address resolved to '{resolved_address or '(empty)'}'",
+                    )
 
                 building_id = None
                 try:
