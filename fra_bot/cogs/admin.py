@@ -548,6 +548,50 @@ class AdminCog(commands.Cog):
         )
         await message.edit(content=f"{icon} {outcome.detail}{tail}"[:1900])
 
+    @fra.command(name="upgradebuildings", aliases=["upgradebuilding", "buildingupgrade"])
+    async def upgrade_buildings(self, ctx: commands.Context, *, arg: str = "") -> None:
+        """Level up + extend all alliance hospitals & prisons.
+
+        Raises hospital levels to the max and buys every extension EXCEPT the
+        final "large" one (Large Hospital / Large Prison). Prisons are walked
+        one extension at a time.
+
+        `!fra upgradebuildings` previews (no changes). `!fra upgradebuildings
+        confirm` executes — owner-only, spends alliance credits (works even
+        while the bot is in dry-run), and never lets funds drop below the
+        floor. Runs a bounded chunk per call; re-run to continue.
+        """
+        execute = arg.strip().lower() in ("confirm", "confirm yes", "yes", "live", "go")
+        if execute and ctx.author.id not in COIN_AUTHORIZED_USER_IDS:
+            await ctx.send(
+                "⛔ Executing upgrades spends alliance credits and is restricted to "
+                "the alliance owner. Run it without `confirm` for a preview."
+            )
+            return
+        lock = self.bot.job_lock("building-upgrade")
+        if lock.locked():
+            await ctx.send("⏳ A building-upgrade run is already in progress — skipped.")
+            return
+        verb = "Executing" if execute else "Previewing"
+        message = await ctx.send(
+            f"⏳ {verb} alliance hospital/prison upgrades — this can take a while…"
+        )
+        floor = self.bot.cfg.automation.building.min_alliance_funds
+        async with lock:
+            self.bot.presence.mark_running("building-upgrade")
+            try:
+                report = await self.bot.building_upgrade.upgrade_all(execute=execute)
+            except Exception as exc:  # noqa: BLE001 — report, don't crash the cog
+                log.exception("building upgrade failed")
+                await message.edit(content=f"❌ Building upgrade failed: {exc}")
+                return
+            finally:
+                self.bot.presence.mark_done("building-upgrade")
+        summary = report.summary(floor=floor)
+        await message.edit(content=summary[:1990])
+        for start in range(1990, len(summary), 1990):
+            await ctx.send(summary[start : start + 1990])
+
     @fra.command(name="nextmission")
     async def next_mission(self, ctx: commands.Context) -> None:
         """Show which mission/event is up next and where (for the eventpinger)."""
