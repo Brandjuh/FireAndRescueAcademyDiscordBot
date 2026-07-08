@@ -489,6 +489,22 @@ class LogsRepo:
             row = await cur.fetchone()
         return row["n"]
 
+    async def applications_received(self) -> dict[str, int]:
+        """Application outcomes recorded in the alliance log: accepted
+        (``added_to_alliance``) and denied (``application_denied``).
+
+        This is the reliable "how many applications came in" figure — the
+        applications *table* only sees requests still open during a poll,
+        and most are handled between polls. Coverage reaches as far back as
+        the stored log history goes.
+        """
+        async with self._db.conn.execute(
+            "SELECT action_key, COUNT(*) AS n FROM alliance_logs "
+            "WHERE action_key IN ('added_to_alliance', 'application_denied') "
+            "GROUP BY action_key"
+        ) as cur:
+            return {row["action_key"]: row["n"] for row in await cur.fetchall()}
+
     async def action_counts(
         self, start_iso: str | None, end_iso: str
     ) -> dict[str, int]:

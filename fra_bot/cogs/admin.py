@@ -73,7 +73,9 @@ class AdminCog(commands.Cog):
     async def status(self, ctx: commands.Context) -> None:
         """Bot health: data counts, backfill progress, recent sync runs."""
         member_count = await self._members.active_count()
-        open_apps = await self._apps.open_count()
+        apps = await self._logs.applications_received()
+        apps_accepted = apps.get("added_to_alliance", 0)
+        apps_denied = apps.get("application_denied", 0)
         log_count = await self._logs.count()
         expense_count = await self._treasury.expense_count()
         balance = await self._treasury.latest_balance()
@@ -84,7 +86,10 @@ class AdminCog(commands.Cog):
             timestamp=dt.datetime.now(dt.timezone.utc),
         )
         embed.add_field(name="Active members", value=f"{member_count:,}")
-        embed.add_field(name="Open applications", value=str(open_apps))
+        embed.add_field(
+            name="Applications received",
+            value=f"{apps_accepted + apps_denied:,}  (✅ {apps_accepted:,} · 🚫 {apps_denied:,})",
+        )
         embed.add_field(name="Alliance logs stored", value=f"{log_count:,}")
         embed.add_field(name="Expenses stored", value=f"{expense_count:,}")
         if balance is not None:

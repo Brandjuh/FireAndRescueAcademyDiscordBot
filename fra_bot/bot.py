@@ -243,9 +243,11 @@ class FRABot(commands.Bot):
             initial_delay_seconds=420.0,
         )
         # Final pre-reset capture of the daily/monthly income standings.
+        # Close to midnight NY (the reset) so the snapshot reflects the full
+        # day, but with a safety margin for the fetch to finish first.
         sched.add_daily_job(
             self._guarded(self.treasury_sync.sync_balance_and_income, "pre-reset"),
-            at=dt.time(23, 52),
+            at=dt.time(23, 55),
             timezone=self.cfg.reports.timezone,
             name="treasury-pre-reset",
         )
