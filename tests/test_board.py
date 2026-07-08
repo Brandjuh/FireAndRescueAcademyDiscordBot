@@ -216,3 +216,38 @@ async def test_edit_post_returns_false_when_post_is_gone():
 
     board = BoardClient(GoneClient())
     assert await board.edit_post(12345, "new text") is False
+
+
+async def test_find_bot_post_matches_despite_emoji_rendering():
+    """The forum re-renders emoji (often into images that vanish from the
+    text), so marker matching must be a normalized substring check — a
+    guide posted with 📋 must still be FOUND when the page returns it
+    without the emoji."""
+    from fra_bot.mc.board import BoardClient
+
+    html = """
+    <html><body>
+    <script>var user_id = 999;</script>
+    <div id="post-on-page-1">
+      <a href="/alliance_posts/501">#1</a>
+      <a href="/profile/999">FRA Bot</a>
+      <div class="col-md-11">[FRA]  How to request a TRAINING here<br>Post the training name…</div>
+    </div>
+    <form id="new_alliance_post" action="/alliance_posts?alliance_thread_id=15305">
+      <input name="authenticity_token" value="tok"/>
+    </form>
+    </body></html>
+    """
+
+    class OnePage:
+        def url(self, path):
+            return path
+
+        async def fetch_page(self, path, *, referer=None):
+            return html
+
+    board = BoardClient(OnePage())
+    found = await board.find_bot_post(15305, "[FRA] 📋 How to request a TRAINING")
+    assert found == 501
+    # Other markers still don't match.
+    assert await board.find_bot_post(15305, "[FRA] 📋 How to request a BUILDING") is None

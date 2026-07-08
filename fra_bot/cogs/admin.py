@@ -580,17 +580,25 @@ class AdminCog(commands.Cog):
                 content=("\n".join(lines) + "\n⏳ …")[:1990]
             )
 
+        async def _locked_note(job: str) -> None:
+            if self.bot.job_lock(job).locked():
+                lines.append(f"⏳ waiting for the running `{job}` poll to finish…")
+                await _report()
+
         try:
             if auto.training.enabled:
+                await _locked_note("board-trainings")
                 async with self.bot.job_lock("board-trainings"):
                     lines.append(await self.bot.trainings.force_guide(repost=repost))
                 await _report()
             if auto.building.enabled:
+                await _locked_note("board-buildings")
                 async with self.bot.job_lock("board-buildings"):
                     lines.append(await self.bot.buildings.force_guide(repost=repost))
                 await _report()
             boards = self.bot.missions_service._request_boards()
             if boards:
+                await _locked_note("missions")
                 async with self.bot.job_lock("missions"):
                     for thread_id, kind in boards:
                         lines.append(
@@ -601,6 +609,7 @@ class AdminCog(commands.Cog):
         except Exception as exc:  # noqa: BLE001 — surface it to the admin
             log.exception("guide sync failed")
             lines.append(f"❌ guide sync aborted: {exc}")
+        lines = [line for line in lines if not line.startswith("⏳ waiting")]
         if not lines:
             lines.append(
                 "No boards enabled — turn on training/building/events/mission "

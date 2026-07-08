@@ -310,6 +310,33 @@ class _SeqBoard:
         return self._page, fresh
 
 
+async def test_poll_executes_queue_even_when_board_is_broken(db):
+    """THE starvation fix: a Discord-sourced request must execute even when
+    the board thread is unreachable — before, the scan error aborted the poll
+    ahead of _execute_ready and the request hung 'pending' forever."""
+    from fra_bot.mc.errors import FetchError
+
+    svc, _ = _service(db, dry_run=True)
+
+    class _BrokenBoard:
+        async def fetch_new_posts(self, thread_id, last_seen):
+            raise FetchError("/alliance_threads/5935", 403)
+
+    svc.board = _BrokenBoard()
+    rid = await svc.requests.create(
+        kind="training", thread_id=0, post_id=1234,
+        requester_name="Alice", requester_mc_id=None,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat", "duration": 3}],
+            "ambiguous": [], "discord_user_id": 42, "channel_id": 7,
+            "remind": False,
+        }),
+    )
+    await svc.poll()                                  # board raises inside
+    row = await svc.requests.get(rid)
+    assert row["status"] == "done"                    # queue still ran
+
+
 async def test_first_post_on_initially_empty_thread_is_processed(db):
     """An empty thread's first poll is the baseline; the FIRST real post that
     arrives later must be processed — not swallowed as baseline again."""
