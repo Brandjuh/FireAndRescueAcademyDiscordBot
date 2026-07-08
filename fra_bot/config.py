@@ -86,6 +86,10 @@ class BuildingAutomationConfig:
     interval: int
     min_alliance_funds: int
     set_tax_percent: int
+    # Daily worldwide auto-build: one hospital + one prison per day at a real
+    # OSM location, funds-gated and deduped against existing buildings.
+    daily_build_enabled: bool
+    daily_build_time: str  # "HH:MM" in reports.timezone
 
 
 @dataclass(frozen=True)
@@ -310,6 +314,12 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 set_tax_percent=int(
                     _get(raw, "automation", "building", "set_tax_percent", default=20)
+                ),
+                daily_build_enabled=bool(
+                    _get(raw, "automation", "building", "daily_build_enabled", default=False)
+                ),
+                daily_build_time=str(
+                    _get(raw, "automation", "building", "daily_build_time", default="03:00")
                 ),
             ),
             events=EventsAutomationConfig(

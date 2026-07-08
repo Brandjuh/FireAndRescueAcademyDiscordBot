@@ -81,6 +81,13 @@ automation:
     min_alliance_funds: 2000000
     # Alliance tax to set on newly built buildings (0/10/20/30/40/50).
     set_tax_percent: 20
+    # Daily worldwide auto-build: one hospital + one prison per day at a real
+    # OpenStreetMap location, picked at random from across the world. Each
+    # build is skipped until tomorrow if alliance funds are below the floor
+    # above, and never placed within 250 m of an existing same-type building.
+    # Honours dry_run (reports what it would build). Off by default.
+    daily_build_enabled: false
+    daily_build_time: "03:00"   # HH:MM in reports.timezone
   events:
     enabled: false            # master switch for event/mission starts
     thread_id: 15293
