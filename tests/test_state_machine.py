@@ -96,6 +96,27 @@ async def test_sweep_flags_interrupted_processing(db):
     assert row["posted_at"] is None  # will be announced
 
 
+async def test_sweep_stale_processing_only_touches_old(db):
+    import datetime as dt
+
+    repo = AutomationRepo(db)
+    rid = await repo.create(
+        kind="event", thread_id=1, post_id=2,
+        requester_name="A", requester_mc_id=9, payload="{}",
+    )
+    await repo.claim(rid)  # 'processing', updated_at = now
+    # A cutoff in the past must NOT disturb a just-claimed (in-flight) row.
+    past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5)).isoformat()
+    assert await repo.sweep_stale_processing(past) == 0
+    assert (await repo.get(rid))["status"] == "processing"
+    # A cutoff in the future releases it (simulates it being stuck > threshold).
+    future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+    assert await repo.sweep_stale_processing(future) == 1
+    row = await repo.get(rid)
+    assert row["status"] == "failed" and "stale" in row["status_detail"]
+    assert row["posted_at"] is None
+
+
 class _CapService:
     """Just enough BoardRequestService to exercise _execute_ready's cap."""
 

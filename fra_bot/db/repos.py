@@ -902,6 +902,22 @@ class AutomationRepo:
             (utcnow_iso(),),
         )
 
+    async def sweep_stale_processing(self, cutoff_iso: str) -> int:
+        """Release requests stuck in 'processing' since before ``cutoff_iso``.
+
+        The startup sweep only runs at boot; this is the periodic safety net
+        for a request that got stranded while the bot kept running (an
+        interrupted action that never reached a terminal state). Only rows
+        whose ``updated_at`` predates the cutoff are touched, so a genuinely
+        in-flight action (claimed just now) is never disturbed."""
+        return await self._db.execute(
+            "UPDATE automation_requests SET status = 'failed', "
+            "status_detail = 'interrupted mid-action (stale) — please verify on MissionChief', "
+            "posted_at = NULL, updated_at = ? "
+            "WHERE status = 'processing' AND updated_at < ?",
+            (utcnow_iso(), cutoff_iso),
+        )
+
     async def set_status(
         self,
         request_id: int,
@@ -1100,6 +1116,18 @@ class MissionsRepo:
             "status_detail = 'interrupted mid-start — please verify on MissionChief', "
             "posted_at = NULL, updated_at = ? WHERE status = 'processing'",
             (utcnow_iso(),),
+        )
+
+    async def sweep_stale_processing(self, cutoff_iso: str) -> int:
+        """Release missions stuck in 'processing' since before ``cutoff_iso``
+        (periodic safety net; only rows older than the cutoff, so a just-
+        claimed start is never disturbed)."""
+        return await self._db.execute(
+            "UPDATE scheduled_missions SET status = 'failed', "
+            "status_detail = 'interrupted mid-start (stale) — please verify on MissionChief', "
+            "posted_at = NULL, updated_at = ? "
+            "WHERE status = 'processing' AND updated_at < ?",
+            (utcnow_iso(), cutoff_iso),
         )
 
     async def set_status(

@@ -101,6 +101,21 @@ async def test_board_dedup_and_cancel(db):
     assert await repo.cancel(first) is False
 
 
+async def test_sweep_stale_processing_only_touches_old(db):
+    import datetime as dt
+
+    repo = MissionsRepo(db)
+    mid = await repo.create(source="discord", location_text="x")
+    await repo.claim(mid)  # 'processing', updated_at = now
+    past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5)).isoformat()
+    assert await repo.sweep_stale_processing(past) == 0        # just-claimed: untouched
+    assert (await repo.get(mid))["status"] == "processing"
+    future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).isoformat()
+    assert await repo.sweep_stale_processing(future) == 1      # stuck: released
+    row = await repo.get(mid)
+    assert row["status"] == "failed" and "stale" in row["status_detail"]
+
+
 async def test_delete_mission_and_delete_terminal(db):
     repo = MissionsRepo(db)
     open_id = await repo.create(source="discord", location_text="open")
