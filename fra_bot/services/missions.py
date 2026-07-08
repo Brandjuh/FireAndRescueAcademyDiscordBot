@@ -34,7 +34,7 @@ from ..db.database import Database, utcnow_iso
 from ..db.repos import MembersRepo, MissionsRepo, RotationRepo, RunsRepo, StateRepo
 from ..geo.geocoder import GeocodeError, Geocoder
 from ..geo.maps_links import find_maps_links
-from ..mc.board import REPLY_MARKER, BoardClient
+from ..mc.board import REPLY_MARKER, BoardClient, ensure_guide_post
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.events import (
@@ -235,30 +235,15 @@ class MissionScheduler:
         content hash means we only touch the board when the text changes."""
         if not self.cfg.automation.reply_to_board:
             return
-        import hashlib
-
         desired = _board_guide(default_kind, self._auto.min_contribution_rate)
-        digest = hashlib.sha1(desired.encode("utf-8")).hexdigest()[:12]
-        marker = _guide_marker(default_kind)
         try:
-            stored = await self.state.get(self._guide_id_key(thread_id))
-            if stored and await self.state.get(self._guide_hash_key(thread_id)) == digest:
-                return  # a guide with this exact text is already up
-            if stored:
-                if await self.board.edit_post(int(stored), desired):
-                    await self.state.set(self._guide_hash_key(thread_id), digest)
-                    return
-                await self.state.delete(self._guide_id_key(thread_id))  # stale id
-            existing = await self.board.find_bot_post(thread_id, marker)
-            if existing is not None:
-                if await self.board.edit_post(existing, desired):
-                    await self.state.set(self._guide_id_key(thread_id), str(existing))
-                    await self.state.set(self._guide_hash_key(thread_id), digest)
-                return
-            new_id = await self.board.create_post_get_id(thread_id, desired)
-            if new_id is not None:
-                await self.state.set(self._guide_id_key(thread_id), str(new_id))
-                await self.state.set(self._guide_hash_key(thread_id), digest)
+            await ensure_guide_post(
+                self.board, self.state, thread_id,
+                id_key=self._guide_id_key(thread_id),
+                hash_key=self._guide_hash_key(thread_id),
+                marker=_guide_marker(default_kind),
+                desired=desired,
+            )
         except MissionChiefError as exc:
             log.warning("mission: could not maintain guide on %s: %s", thread_id, exc)
 

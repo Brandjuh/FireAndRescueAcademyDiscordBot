@@ -6,6 +6,7 @@ can recognize (and never re-process) the bot's own posts.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from bs4 import BeautifulSoup
@@ -198,3 +199,43 @@ class BoardClient:
             log.warning("Deleting post %s failed with HTTP %s", post_id, status)
             return False
         return True
+
+
+async def ensure_guide_post(
+    board: BoardClient,
+    state,
+    thread_id: int,
+    *,
+    id_key: str,
+    hash_key: str,
+    marker: str,
+    desired: str,
+) -> None:
+    """Keep exactly one guide post on a board: find our existing one and EDIT
+    it in place, else create it — never duplicate.
+
+    ``state`` is a key/value store (:class:`StateRepo`): ``id_key`` remembers
+    which post is our guide and ``hash_key`` its content hash, so the board is
+    only touched when the text actually changes. This is an informational forum
+    post (not a game action), so callers maintain it even in dry-run. Board
+    errors propagate as :class:`MissionChiefError` for the caller to catch.
+    """
+    digest = hashlib.sha1(desired.encode("utf-8")).hexdigest()[:12]
+    stored = await state.get(id_key)
+    if stored and await state.get(hash_key) == digest:
+        return  # a guide with this exact text is already up
+    if stored:
+        if await board.edit_post(int(stored), desired):
+            await state.set(hash_key, digest)
+            return
+        await state.delete(id_key)  # stale id — fall through and re-find
+    existing = await board.find_bot_post(thread_id, marker)
+    if existing is not None:
+        if await board.edit_post(existing, desired):
+            await state.set(id_key, str(existing))
+            await state.set(hash_key, digest)
+        return
+    new_id = await board.create_post_get_id(thread_id, desired)
+    if new_id is not None:
+        await state.set(id_key, str(new_id))
+        await state.set(hash_key, digest)

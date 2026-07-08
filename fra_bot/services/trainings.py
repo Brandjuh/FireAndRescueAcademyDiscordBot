@@ -26,7 +26,12 @@ from ..mc.parsers.academy import (
     parse_alliance_buildings_page,
 )
 from ..mc.parsers.board import BoardPost
-from ..mc.trainings_catalog import AmbiguousMatch, TrainingMatch, match_trainings
+from ..mc.trainings_catalog import (
+    DISCIPLINES,
+    AmbiguousMatch,
+    TrainingMatch,
+    match_trainings,
+)
 from .board_requests import BoardRequestService
 
 log = logging.getLogger(__name__)
@@ -36,9 +41,20 @@ MAX_ACADEMY_LIST_PAGES = 10
 ALLIANCE_SIGNUP_SECONDS = 3600  # class stays open to the alliance for 1h
 BOARD_FEE = 0                   # board classes are free
 
+GUIDE_MARKER = "[FRA] 📋 How to request a TRAINING"
+
+# Friendly discipline headings for the guide, in display order.
+_DISCIPLINE_TITLES = {
+    "fire": "🚒 Fire",
+    "police": "🚓 Police",
+    "ems": "🚑 EMS",
+    "coastal": "🌊 Water Rescue",
+}
+
 
 class TrainingsService(BoardRequestService):
     kind = "training"
+    guide_marker = GUIDE_MARKER
 
     def __init__(self, cfg: Config, client: MissionChiefClient, db: Database) -> None:
         super().__init__(cfg, client, db)
@@ -47,6 +63,9 @@ class TrainingsService(BoardRequestService):
     @property
     def thread_id(self) -> int:
         return self._auto.thread_id
+
+    def guide_body(self) -> str:
+        return _training_guide(self._auto.min_contribution_rate)
 
     async def parse_request(self, post: BoardPost) -> dict | None:
         matches, ambiguous = match_trainings(post.content)
@@ -326,3 +345,43 @@ class TrainingsService(BoardRequestService):
                 )
             ]
         return candidates
+
+
+def _training_guide(min_rate: float) -> str:
+    """The how-to-request post the bot maintains on the training board. Starts
+    with :data:`GUIDE_MARKER` so it's never re-parsed as a request. Lists every
+    course from the catalog so members know exactly what they can ask for."""
+    lines = [
+        f"{GUIDE_MARKER} here",
+        "",
+        "Just post the training you want — the course name on its own is "
+        "enough. e.g.:",
+        "• HazMat",
+        "• SWAT",
+        "• Lifeguard Training",
+        "",
+        "You can ask for more than one at once (one per line, or separated by "
+        "commas).",
+        "",
+        "Some courses are taught in more than one academy type. For those, put "
+        "the academy in front so it opens in the right one:",
+        "• Fire - Lifeguard Training   ·   Water Rescue - Lifeguard Training",
+        "• EMS - Ocean Navigation   ·   Police - Sharpshooter Training",
+        "",
+        "Every class is opened FREE, one class per recognised course, and stays "
+        "open to the whole alliance for 1 hour to sign up.",
+        "",
+        "Available courses:",
+    ]
+    for key, title in _DISCIPLINE_TITLES.items():
+        courses = DISCIPLINES.get(key) or {}
+        if not courses:
+            continue
+        names = ", ".join(sorted(courses))
+        lines.append(f"• {title}: {names}")
+    lines += [
+        "",
+        f"Requests from members below {min_rate:g}% alliance contribution are "
+        "skipped.",
+    ]
+    return "\n".join(lines)
