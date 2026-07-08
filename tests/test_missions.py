@@ -150,6 +150,16 @@ async def test_sweep_stale_processing_only_touches_old(db):
     assert row["status"] == "failed" and "stale" in row["status_detail"]
 
 
+async def test_sweep_requeue_in_dry_run(db):
+    repo = MissionsRepo(db)
+    mid = await repo.create(source="discord", location_text="x")
+    await repo.claim(mid)  # -> processing
+    # Dry-run re-queue: back to 'pending' to re-process cleanly, no scary note.
+    assert await repo.sweep_processing(requeue=True) == 1
+    row = await repo.get(mid)
+    assert row["status"] == "pending" and row["status_detail"] is None
+
+
 async def test_delete_mission_and_delete_terminal(db):
     repo = MissionsRepo(db)
     open_id = await repo.create(source="discord", location_text="open")

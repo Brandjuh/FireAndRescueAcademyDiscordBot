@@ -890,11 +890,21 @@ class AutomationRepo:
         )
         return n == 1
 
-    async def sweep_processing(self) -> int:
+    async def sweep_processing(self, *, requeue: bool = False) -> int:
         """A request left 'processing' was interrupted mid-action by a
         crash/restart. Re-running could repeat a non-idempotent
         MissionChief action, so flag it for manual review instead of
-        silently losing it or blindly retrying. Call once at startup."""
+        silently losing it or blindly retrying. Call once at startup.
+
+        ``requeue`` (dry-run) instead re-arms it to 'pending': in dry-run no
+        real action can have half-run, so it's safe (and less alarming) to
+        just re-process it cleanly."""
+        if requeue:
+            return await self._db.execute(
+                "UPDATE automation_requests SET status = 'pending', "
+                "status_detail = NULL, updated_at = ? WHERE status = 'processing'",
+                (utcnow_iso(),),
+            )
         return await self._db.execute(
             "UPDATE automation_requests SET status = 'failed', "
             "status_detail = 'interrupted mid-action — please verify on MissionChief', "
@@ -902,14 +912,22 @@ class AutomationRepo:
             (utcnow_iso(),),
         )
 
-    async def sweep_stale_processing(self, cutoff_iso: str) -> int:
+    async def sweep_stale_processing(self, cutoff_iso: str, *, requeue: bool = False) -> int:
         """Release requests stuck in 'processing' since before ``cutoff_iso``.
 
         The startup sweep only runs at boot; this is the periodic safety net
         for a request that got stranded while the bot kept running (an
         interrupted action that never reached a terminal state). Only rows
         whose ``updated_at`` predates the cutoff are touched, so a genuinely
-        in-flight action (claimed just now) is never disturbed."""
+        in-flight action (claimed just now) is never disturbed. ``requeue``
+        (dry-run) re-arms it to 'pending' rather than failing it."""
+        if requeue:
+            return await self._db.execute(
+                "UPDATE automation_requests SET status = 'pending', "
+                "status_detail = NULL, updated_at = ? "
+                "WHERE status = 'processing' AND updated_at < ?",
+                (utcnow_iso(), cutoff_iso),
+            )
         return await self._db.execute(
             "UPDATE automation_requests SET status = 'failed', "
             "status_detail = 'interrupted mid-action (stale) — please verify on MissionChief', "
@@ -1109,8 +1127,16 @@ class MissionsRepo:
         )
         return n == 1
 
-    async def sweep_processing(self) -> int:
-        """Flag missions interrupted mid-start for manual review (startup)."""
+    async def sweep_processing(self, *, requeue: bool = False) -> int:
+        """Flag missions interrupted mid-start for manual review (startup).
+        ``requeue`` (dry-run) re-arms them to 'pending' instead — nothing real
+        can have half-run in dry-run, so they just re-process cleanly."""
+        if requeue:
+            return await self._db.execute(
+                "UPDATE scheduled_missions SET status = 'pending', "
+                "status_detail = NULL, updated_at = ? WHERE status = 'processing'",
+                (utcnow_iso(),),
+            )
         return await self._db.execute(
             "UPDATE scheduled_missions SET status = 'failed', "
             "status_detail = 'interrupted mid-start — please verify on MissionChief', "
@@ -1118,10 +1144,18 @@ class MissionsRepo:
             (utcnow_iso(),),
         )
 
-    async def sweep_stale_processing(self, cutoff_iso: str) -> int:
+    async def sweep_stale_processing(self, cutoff_iso: str, *, requeue: bool = False) -> int:
         """Release missions stuck in 'processing' since before ``cutoff_iso``
         (periodic safety net; only rows older than the cutoff, so a just-
-        claimed start is never disturbed)."""
+        claimed start is never disturbed). ``requeue`` (dry-run) re-arms to
+        'pending' instead of failing."""
+        if requeue:
+            return await self._db.execute(
+                "UPDATE scheduled_missions SET status = 'pending', "
+                "status_detail = NULL, updated_at = ? "
+                "WHERE status = 'processing' AND updated_at < ?",
+                (utcnow_iso(), cutoff_iso),
+            )
         return await self._db.execute(
             "UPDATE scheduled_missions SET status = 'failed', "
             "status_detail = 'interrupted mid-start (stale) — please verify on MissionChief', "
