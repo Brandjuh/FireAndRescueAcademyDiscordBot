@@ -383,7 +383,9 @@ class LogsRepo:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    async def insert_batch(self, rows: list[dict[str, Any]]) -> int:
+    async def insert_batch(
+        self, rows: list[dict[str, Any]], *, mark_posted: bool = False
+    ) -> int:
         """Insert parsed log rows; duplicates are skipped.
 
         ``rows`` must be in CHRONOLOGICAL order (oldest first) so that
@@ -391,8 +393,12 @@ class LogsRepo:
         are disambiguated by occurrence_index; across batches the
         UNIQUE(signature, occurrence_index) constraint deduplicates
         re-scraped rows while keeping genuinely repeated events.
+
+        ``mark_posted`` stamps the rows as already announced — used by the
+        history backfill so old entries never flood the Discord feed.
         """
         now = utcnow_iso()
+        posted_at = now if mark_posted else None
         inserted = 0
         conn = self._db.conn
 
@@ -424,8 +430,8 @@ class LogsRepo:
                         (signature, occurrence_index, raw_timestamp, event_at,
                          action_key, description, executed_name, executed_mc_id,
                          affected_name, affected_type, affected_mc_id,
-                         contribution_amount, scraped_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         contribution_amount, scraped_at, posted_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         sig,
@@ -441,6 +447,7 @@ class LogsRepo:
                         row.get("affected_mc_id"),
                         row.get("contribution_amount"),
                         now,
+                        posted_at,
                     ),
                 )
                 inserted += cur.rowcount if cur.rowcount > 0 else 0

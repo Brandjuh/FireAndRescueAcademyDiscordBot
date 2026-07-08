@@ -41,6 +41,32 @@ async def test_state_repo_roundtrip(db):
     assert await state.get("k") is None
 
 
+def _log_row(sig, action="added_to_alliance"):
+    return {
+        "signature": sig,
+        "raw_timestamp": "06 Jul 14:23",
+        "event_at": "2024-07-06T18:23:00+00:00",
+        "action_key": action,
+        "description": "x",
+    }
+
+
+async def test_insert_batch_default_is_pending(db):
+    logs = LogsRepo(db)
+    await logs.insert_batch([_log_row("n1")])
+    pending = await logs.pending_posts()
+    assert len(pending) == 1
+
+
+async def test_backfill_insert_marks_posted(db):
+    logs = LogsRepo(db)
+    inserted = await logs.insert_batch([_log_row("bf1"), _log_row("bf2")], mark_posted=True)
+    assert inserted == 2
+    # Marked already-posted, so the publisher never queues them.
+    assert await logs.pending_posts() == []
+    assert await logs.count() == 2
+
+
 async def test_applications_received_counts_accepted_and_denied(db):
     logs = LogsRepo(db)
     now = "2026-07-07T12:00:00+00:00"

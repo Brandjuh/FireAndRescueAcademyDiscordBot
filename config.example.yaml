@@ -35,6 +35,11 @@ sync:
   # 30 pages / 15 min completes ~3150 pages in a bit over a day.
   expenses_backfill_pages_per_chunk: 30
   expenses_backfill_interval: 15
+  # Full alliance-log history backfill (walks every page back to the
+  # alliance's start; a few thousand pages). Runs in slow chunks and marks
+  # old rows as already-posted so history never floods Discord. Resumable.
+  logs_backfill_pages_per_chunk: 20
+  logs_backfill_interval: 15
 
 discord:
   # Guild (server) id the bot operates in.
