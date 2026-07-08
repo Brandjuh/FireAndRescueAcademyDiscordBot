@@ -995,9 +995,14 @@ class MissionsRepo:
     never double-start a (non-idempotent) mission.
     """
 
+    # Canonical request columns (the unified model). Legacy footprint
+    # columns (mission_type_id/poi_type/size/shape/amount/coins) still exist
+    # for old rows but are no longer written — the model is now
+    # kind/mission_source/preset_type_id/caption/custom_values/saved_name.
     _COLUMNS = (
-        "source", "mission_type_id", "poi_type", "size", "shape", "amount",
-        "coins", "location_text", "latitude", "longitude", "address",
+        "source", "kind", "mission_source", "preset_type_id", "caption",
+        "custom_values", "saved_name", "recurring", "rotation_id",
+        "location_text", "latitude", "longitude", "address",
         "requester_name", "requester_mc_id", "discord_user_id", "channel_id",
         "board_thread_id", "board_post_id",
     )
@@ -1022,24 +1027,29 @@ class MissionsRepo:
     ) -> int | None:
         """Insert a board-sourced mission, deduped on (thread, post).
 
-        Returns the new id, or None if this post already enqueued a
-        mission (idempotent re-scan)."""
+        ``spec_fields`` carries the unified model keys (kind, mission_source,
+        preset_type_id, caption, custom_values, saved_name, recurring,
+        location_text). Returns the new id, or None if this post already
+        enqueued a mission (idempotent re-scan)."""
         now = utcnow_iso()
         async with self._db.transaction() as conn:
             cur = await conn.execute(
                 """
                 INSERT OR IGNORE INTO scheduled_missions
-                    (source, mission_type_id, poi_type, size, shape, amount,
-                     location_text, requester_name, requester_mc_id,
+                    (source, kind, mission_source, preset_type_id, caption,
+                     custom_values, saved_name, recurring, location_text,
+                     requester_name, requester_mc_id,
                      board_thread_id, board_post_id, created_at, updated_at)
-                VALUES ('board', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES ('board', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    spec_fields.get("mission_type_id"),
-                    spec_fields.get("poi_type", 0),
-                    spec_fields.get("size", 1),
-                    spec_fields.get("shape", "circle"),
-                    spec_fields.get("amount", 1),
+                    spec_fields.get("kind", "large"),
+                    spec_fields.get("mission_source", "preset"),
+                    spec_fields.get("preset_type_id"),
+                    spec_fields.get("caption"),
+                    spec_fields.get("custom_values"),
+                    spec_fields.get("saved_name"),
+                    1 if spec_fields.get("recurring") else 0,
                     spec_fields.get("location_text"),
                     requester_name,
                     requester_mc_id,
@@ -1119,6 +1129,14 @@ class MissionsRepo:
             tuple(params),
         )
 
+    async def link_rotation(self, mission_id: int, rotation_id: int) -> None:
+        """Record that this (recurring) request was promoted to a rotation
+        entry, so it can never be promoted twice."""
+        await self._db.execute(
+            "UPDATE scheduled_missions SET rotation_id = ?, updated_at = ? WHERE id = ?",
+            (rotation_id, utcnow_iso(), mission_id),
+        )
+
     async def cancel(self, mission_id: int) -> bool:
         """Cancel a not-yet-started mission. Returns True if it was open."""
         n = await self._db.execute(
@@ -1140,6 +1158,16 @@ class MissionsRepo:
             "SELECT * FROM scheduled_missions ORDER BY id DESC LIMIT ?", (limit,)
         ) as cur:
             return list(await cur.fetchall())
+
+    async def next_pending(self) -> aiosqlite.Row | None:
+        """The member request at the head of the line — the next thing the
+        scheduler would start (before falling back to the rotation). Used to
+        answer "what's next and where" for the eventpinger."""
+        async with self._db.conn.execute(
+            "SELECT * FROM scheduled_missions "
+            "WHERE status IN ('pending', 'waiting') ORDER BY id ASC LIMIT 1"
+        ) as cur:
+            return await cur.fetchone()
 
     async def open_count(self) -> int:
         async with self._db.conn.execute(
@@ -1179,6 +1207,125 @@ class MissionsRepo:
             "UPDATE scheduled_missions SET posted_at = ? WHERE id = ?",
             (utcnow_iso(), mission_id),
         )
+
+
+class RotationRepo:
+    """The admin rotation list: locations the bot auto-starts and keeps
+    cycling forever, one per free mission slot, filling gaps when no member
+    request is pending.
+
+    "Next up" is the active entry started least recently (never-started
+    first), so the cycle is fair round-robin without a stored pointer.
+    """
+
+    _COLUMNS = (
+        "location_text", "kind", "mission_source", "preset_type_id",
+        "caption", "custom_values", "saved_name",
+        "latitude", "longitude", "address", "active", "created_by",
+    )
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def add(self, **fields: Any) -> int:
+        cols = [c for c in self._COLUMNS if c in fields]
+        now = utcnow_iso()
+        placeholders = ", ".join(["?"] * (len(cols) + 2))
+        params = [fields[c] for c in cols] + [now, now]
+        return await self._db.execute_returning_id(
+            f"INSERT INTO mission_rotation ({', '.join(cols)}, created_at, updated_at) "
+            f"VALUES ({placeholders})",
+            tuple(params),
+        )
+
+    async def get(self, rotation_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM mission_rotation WHERE id = ?", (rotation_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def list_all(self, *, active_only: bool = False) -> list[aiosqlite.Row]:
+        query = "SELECT * FROM mission_rotation"
+        if active_only:
+            query += " WHERE active = 1"
+        query += " ORDER BY id ASC"
+        async with self._db.conn.execute(query) as cur:
+            return list(await cur.fetchall())
+
+    async def next_entry(self) -> aiosqlite.Row | None:
+        """The active entry due to run next: least-recently started first,
+        never-started (NULL last_started_at) ahead of all, ties by id."""
+        async with self._db.conn.execute(
+            "SELECT * FROM mission_rotation WHERE active = 1 "
+            "ORDER BY (last_started_at IS NOT NULL), last_started_at, id LIMIT 1"
+        ) as cur:
+            return await cur.fetchone()
+
+    async def active_count(self) -> int:
+        async with self._db.conn.execute(
+            "SELECT COUNT(*) AS n FROM mission_rotation WHERE active = 1"
+        ) as cur:
+            row = await cur.fetchone()
+        return row["n"]
+
+    async def mark_started(
+        self,
+        rotation_id: int,
+        *,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        address: str | None = None,
+    ) -> None:
+        """Advance the cycle for this entry, caching its resolved location."""
+        sets = [
+            "last_started_at = ?", "start_count = start_count + 1", "updated_at = ?"
+        ]
+        params: list[Any] = [utcnow_iso(), utcnow_iso()]
+        if latitude is not None:
+            sets.append("latitude = ?")
+            params.append(latitude)
+        if longitude is not None:
+            sets.append("longitude = ?")
+            params.append(longitude)
+        if address is not None:
+            sets.append("address = ?")
+            params.append(address)
+        params.append(rotation_id)
+        await self._db.execute(
+            f"UPDATE mission_rotation SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+
+    async def cache_location(
+        self, rotation_id: int, latitude: float, longitude: float, address: str | None
+    ) -> None:
+        await self._db.execute(
+            "UPDATE mission_rotation SET latitude = ?, longitude = ?, address = ?, "
+            "updated_at = ? WHERE id = ?",
+            (latitude, longitude, address, utcnow_iso(), rotation_id),
+        )
+
+    async def set_active(self, rotation_id: int, active: bool) -> bool:
+        n = await self._db.execute(
+            "UPDATE mission_rotation SET active = ?, updated_at = ? WHERE id = ?",
+            (1 if active else 0, utcnow_iso(), rotation_id),
+        )
+        return n == 1
+
+    async def deactivate_with_note(self, rotation_id: int, note: str) -> None:
+        """Pause an entry that can't run (e.g. its location won't geocode),
+        recording why so an admin sees it in the list."""
+        await self._db.execute(
+            "UPDATE mission_rotation SET active = 0, address = ?, updated_at = ? "
+            "WHERE id = ?",
+            (note[:200], utcnow_iso(), rotation_id),
+        )
+
+    async def remove(self, rotation_id: int) -> bool:
+        n = await self._db.execute(
+            "DELETE FROM mission_rotation WHERE id = ?", (rotation_id,)
+        )
+        return n == 1
 
 
 def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:

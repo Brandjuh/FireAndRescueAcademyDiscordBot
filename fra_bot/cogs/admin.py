@@ -14,6 +14,7 @@ from ..db.repos import (
     LogsRepo,
     MembersRepo,
     MissionsRepo,
+    RotationRepo,
     RunsRepo,
     StateRepo,
     TreasuryRepo,
@@ -52,6 +53,7 @@ class AdminCog(commands.Cog):
         self._state = StateRepo(bot.db)
         self._automation = AutomationRepo(bot.db)
         self._missions = MissionsRepo(bot.db)
+        self._rotation = RotationRepo(bot.db)
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Gate EVERY command in this cog.
@@ -151,6 +153,14 @@ class AdminCog(commands.Cog):
             name="Events",
             value=f"{'on' if auto.events.enabled else 'off'} · thread {auto.events.thread_id}",
         )
+        embed.add_field(
+            name="Missions",
+            value=(
+                f"{'on' if auto.mission.enabled else 'off'} · "
+                f"board {'on' if auto.mission.board_enabled else 'off'} · "
+                f"rotation {await self._rotation.active_count()}"
+            ),
+        )
         embed.add_field(name="Open requests", value=str(await self._automation.open_count()))
 
         recent = await self._automation.recent(limit=8)
@@ -182,6 +192,7 @@ class AdminCog(commands.Cog):
             "trainings": (self.bot.trainings.poll, "board-trainings"),
             "buildings": (self.bot.buildings.poll, "board-buildings"),
             "events": (self.bot.events.poll, "board-events"),
+            "missions": (self.bot.missions_service.poll, "missions"),
         }
         entry = jobs.get(scraper.lower())
         if entry is None:
@@ -370,8 +381,10 @@ class AdminCog(commands.Cog):
         lines = []
         for r in rows:
             where = r["address"] or r["location_text"] or "?"
+            recur = " 🔁" if r["recurring"] else ""
             lines.append(
-                f"`#{r['id']:>3}` **{r['status']}** — {r['source']} — {where[:60]}"
+                f"`#{r['id']:>3}` **{r['status']}** — {r['kind']}/{r['mission_source']}"
+                f"{recur} — {where[:50]}"
                 + (f" — {r['status_detail']}" if r["status_detail"] else "")
             )
         embed = discord.Embed(
@@ -399,6 +412,163 @@ class AdminCog(commands.Cog):
                 f"Mission #{mission_id} could not be cancelled "
                 "(not found, or already started/finished)."
             )
+
+    @fra.command(name="nextmission")
+    async def next_mission(self, ctx: commands.Context) -> None:
+        """Show which mission/event is up next and where (for the eventpinger)."""
+        nxt = await self.bot.missions_service.next_up()
+        if nxt is None:
+            await ctx.send(
+                "No mission is queued and the rotation is empty. "
+                "Add locations with `!fra rotation add`."
+            )
+            return
+        origin = "member request" if nxt["origin"] == "request" else "rotation"
+        who = f" (for {nxt['requester']})" if nxt.get("requester") else ""
+        cap = f" · {nxt['caption']}" if nxt.get("caption") else ""
+        embed = discord.Embed(
+            title="⏭️ Next up",
+            colour=discord.Colour.blurple(),
+            description=(
+                f"**{nxt['kind']}** · {nxt['mission_source']}{cap}\n"
+                f"📍 {nxt['location'] or '?'}\n"
+                f"_source: {origin}{who}_"
+            ),
+        )
+        await ctx.send(embed=embed)
+
+    # -- mission rotation list ------------------------------------------
+
+    @fra.group(name="rotation", invoke_without_command=True)
+    async def rotation(self, ctx: commands.Context) -> None:
+        """Manage the auto-start rotation list. Subcommands: add, list,
+        remove, on, off."""
+        await self._render_rotation_list(ctx)
+
+    @rotation.command(name="add")
+    async def rotation_add(self, ctx: commands.Context, *, spec_text: str = "") -> None:
+        """Add a location to the rotation.
+
+        `!fra rotation add Grand Rapids`
+        `!fra rotation add Amsterdam | kind: event`
+        `!fra rotation add NYC | custom: need_lf=25 need_elw1=6 | name: Big fire`
+        `!fra rotation add Berlin | saved: Wildfire`
+        """
+        spec_text = spec_text.strip()
+        if not spec_text:
+            await ctx.send(
+                "Usage: `!fra rotation add <location> [| kind: event] "
+                "[| preset: Pile-up] [| custom: need_lf=25 …] [| saved: <name>] "
+                "[| name: <caption>]`"
+            )
+            return
+        try:
+            spec = self._parse_rotation_spec(spec_text)
+        except Exception as exc:  # noqa: BLE001 - surface the reason
+            await ctx.send(f"⚠️ {exc}")
+            return
+        import json as _json
+
+        rid = await self._rotation.add(
+            location_text=spec.location_text,
+            kind=spec.kind,
+            mission_source=spec.source,
+            preset_type_id=spec.preset_type_id,
+            caption=spec.custom.caption if spec.custom else spec.saved_name,
+            custom_values=_json.dumps(spec.custom.values) if spec.custom else None,
+            saved_name=spec.saved_name,
+            active=1,
+            created_by=ctx.author.display_name,
+        )
+        await ctx.send(
+            f"🔁 Rotation **#{rid}** added — {spec.describe()} — at "
+            f"*{spec.location_text}*."
+        )
+
+    @rotation.command(name="list")
+    async def rotation_list(self, ctx: commands.Context) -> None:
+        """Show the rotation list and which entry is next."""
+        await self._render_rotation_list(ctx)
+
+    async def _render_rotation_list(self, ctx: commands.Context) -> None:
+        rows = await self._rotation.list_all()
+        if not rows:
+            await ctx.send(
+                "The rotation list is empty. Add one with `!fra rotation add <location>`."
+            )
+            return
+        nxt = await self._rotation.next_entry()
+        next_id = nxt["id"] if nxt else None
+        lines = []
+        for r in rows:
+            mark = "▶️" if r["id"] == next_id else ("✅" if r["active"] else "⏸️")
+            where = r["address"] or r["location_text"] or "?"
+            started = r["last_started_at"][:10] if r["last_started_at"] else "never"
+            lines.append(
+                f"{mark} `#{r['id']:>3}` {r['kind']}/{r['mission_source']} — "
+                f"{where[:45]} — started ×{r['start_count']} ({started})"
+            )
+        auto = self.bot.cfg.automation.mission
+        embed = discord.Embed(
+            title="🔁 Mission rotation",
+            colour=discord.Colour.blurple(),
+            description="\n".join(lines)[:4096],
+        )
+        embed.set_footer(
+            text=(
+                f"▶️ next · ✅ active · ⏸️ paused · "
+                f"scheduler: {'on' if auto.enabled else 'off'} · "
+                f"dry_run: {self.bot.cfg.automation.dry_run}"
+            )
+        )
+        await ctx.send(embed=embed)
+
+    @rotation.command(name="remove", aliases=["rm", "delete"])
+    async def rotation_remove(self, ctx: commands.Context, rotation_id: int) -> None:
+        """Remove an entry from the rotation."""
+        if await self._rotation.remove(rotation_id):
+            await ctx.send(f"🗑️ Rotation #{rotation_id} removed.")
+        else:
+            await ctx.send(f"Rotation #{rotation_id} not found.")
+
+    @rotation.command(name="off", aliases=["pause"])
+    async def rotation_off(self, ctx: commands.Context, rotation_id: int) -> None:
+        """Pause an entry (kept in the list, but skipped)."""
+        if await self._rotation.set_active(rotation_id, False):
+            await ctx.send(f"⏸️ Rotation #{rotation_id} paused.")
+        else:
+            await ctx.send(f"Rotation #{rotation_id} not found.")
+
+    @rotation.command(name="on", aliases=["resume"])
+    async def rotation_on(self, ctx: commands.Context, rotation_id: int) -> None:
+        """Resume a paused entry."""
+        if await self._rotation.set_active(rotation_id, True):
+            await ctx.send(f"▶️ Rotation #{rotation_id} resumed.")
+        else:
+            await ctx.send(f"Rotation #{rotation_id} not found.")
+
+    @staticmethod
+    def _parse_rotation_spec(text: str):
+        """Parse `<location> | key: value | …` into a validated MissionSpec."""
+        from ..cogs.missions import build_spec
+
+        segments = [s.strip() for s in text.split("|")]
+        location = segments[0]
+        kwargs: dict[str, str] = {}
+        allowed = {"kind", "preset", "saved", "custom", "name", "schedule"}
+        for seg in segments[1:]:
+            if not seg:
+                continue
+            key, sep, value = seg.partition(":")
+            if not sep:
+                raise ValueError(f"segment '{seg}' must be `key: value`")
+            key = key.strip().lower()
+            if key not in allowed:
+                raise ValueError(
+                    f"unknown option '{key}' (use: {', '.join(sorted(allowed))})"
+                )
+            kwargs[key] = value.strip()
+        return build_spec(location=location, **kwargs)
 
     @fra.command(name="testbuild")
     async def testbuild(self, ctx: commands.Context, *, args: str = "") -> None:
