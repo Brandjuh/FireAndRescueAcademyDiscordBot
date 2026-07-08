@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 
+from bs4 import BeautifulSoup
+
 from .client import MissionChiefClient
 from .errors import ParseError
 from .parsers.board import BoardThreadPage, parse_board_thread_page
@@ -99,5 +101,100 @@ class BoardClient:
         )
         if status >= 400:
             log.warning("Board reply to thread %s failed with HTTP %s", thread_id, status)
+            return False
+        return True
+
+    async def find_bot_post(
+        self, thread_id: int, marker: str, *, max_pages: int | None = None
+    ) -> int | None:
+        """Newest post authored by us whose content starts with ``marker``.
+
+        Used to locate an existing guide post so it can be EDITED instead of
+        duplicated. Walks back from the last page up to ``max_pages``."""
+        base_path = f"/alliance_threads/{thread_id}"
+        newest = await self.fetch_latest_page(thread_id)
+        uid = newest.current_user_id
+        found: int | None = None
+
+        def _scan(page: BoardThreadPage) -> None:
+            nonlocal found
+            for post in page.posts:
+                if uid is not None and post.author_mc_id != uid:
+                    continue
+                if not (post.content or "").startswith(marker):
+                    continue
+                if found is None or post.post_id > found:
+                    found = post.post_id
+
+        _scan(newest)
+        limit = max_pages or self.MAX_PAGES_PER_POLL
+        page_number = newest.last_page - 1
+        walked = 1
+        while found is None and page_number >= 1 and walked < limit:
+            html = await self._client.fetch_page(f"{base_path}?page={page_number}")
+            _scan(parse_board_thread_page(html))
+            page_number -= 1
+            walked += 1
+        return found
+
+    async def create_post_get_id(self, thread_id: int, content: str) -> int | None:
+        """Post a reply and return its new post id (found by matching the
+        first line back on the thread), or None."""
+        if not await self.post_reply(thread_id, content):
+            return None
+        body = content if content.startswith(REPLY_MARKER) else f"{REPLY_MARKER} {content}"
+        marker = body.splitlines()[0][:60] if body else REPLY_MARKER
+        return await self.find_bot_post(thread_id, marker)
+
+    async def edit_post(self, post_id: int, content: str) -> bool:
+        """Edit one of our posts in place (Rails ``_method=patch``)."""
+        try:
+            html = await self._client.fetch_page(f"/alliance_posts/{post_id}/edit")
+        except ParseError:
+            return False
+        soup = BeautifulSoup(html, "lxml")
+        form = None
+        for candidate in soup.find_all("form"):
+            action = str(candidate.get("action") or "")
+            if "/alliance_posts" in action or candidate.find(
+                "textarea", attrs={"name": "alliance_post[content]"}
+            ):
+                form = candidate
+                break
+        if form is None:
+            log.warning("Edit form for post %s not found", post_id)
+            return False
+        token_el = form.find("input", attrs={"name": "authenticity_token"})
+        action = form.get("action") or f"/alliance_posts/{post_id}"
+        body = content if content.startswith(REPLY_MARKER) else f"{REPLY_MARKER} {content}"
+        data = {
+            "utf8": "✓",
+            "_method": "patch",
+            "alliance_post[content]": body[:4000],
+            "commit": "Save",
+        }
+        if token_el is not None and token_el.get("value"):
+            data["authenticity_token"] = token_el.get("value")
+        status, _, _ = await self._client.post_form(
+            action, data,
+            referer=self._client.url(f"/alliance_posts/{post_id}/edit"),
+        )
+        if status >= 400:
+            log.warning("Editing post %s failed with HTTP %s", post_id, status)
+            return False
+        return True
+
+    async def delete_post(self, thread_id: int, post_id: int) -> bool:
+        """Delete one of our posts (Rails ``_method=delete``)."""
+        page = await self.fetch_latest_page(thread_id)
+        data = {"utf8": "✓", "_method": "delete", "commit": "Delete"}
+        if page.reply_token:
+            data["authenticity_token"] = page.reply_token
+        status, _, _ = await self._client.post_form(
+            f"/alliance_posts/{post_id}", data,
+            referer=self._client.url(f"/alliance_threads/{thread_id}"),
+        )
+        if status >= 400:
+            log.warning("Deleting post %s failed with HTTP %s", post_id, status)
             return False
         return True

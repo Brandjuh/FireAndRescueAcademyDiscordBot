@@ -220,15 +220,50 @@ class MissionScheduler:
     def _cursor_key(self, thread_id: int) -> str:
         return f"mission_board_last_post:{thread_id}"
 
-    def _guide_key(self, thread_id: int) -> str:
-        return f"mission_board_guide_posted:{thread_id}"
+    def _guide_id_key(self, thread_id: int) -> str:
+        return f"mission_board_guide_id:{thread_id}"
+
+    def _guide_hash_key(self, thread_id: int) -> str:
+        return f"mission_board_guide_hash:{thread_id}"
+
+    async def _ensure_guide(self, thread_id: int, default_kind: str) -> None:
+        """Keep exactly one how-to-request guide post on the board: find our
+        existing one and EDIT it in place, else create it — never duplicate.
+
+        This is an informational forum post (not a game action), so it is
+        maintained even in dry-run — only gated by ``reply_to_board``. A
+        content hash means we only touch the board when the text changes."""
+        if not self.cfg.automation.reply_to_board:
+            return
+        import hashlib
+
+        desired = _board_guide(default_kind, self._auto.min_contribution_rate)
+        digest = hashlib.sha1(desired.encode("utf-8")).hexdigest()[:12]
+        marker = _guide_marker(default_kind)
+        try:
+            stored = await self.state.get(self._guide_id_key(thread_id))
+            if stored and await self.state.get(self._guide_hash_key(thread_id)) == digest:
+                return  # a guide with this exact text is already up
+            if stored:
+                if await self.board.edit_post(int(stored), desired):
+                    await self.state.set(self._guide_hash_key(thread_id), digest)
+                    return
+                await self.state.delete(self._guide_id_key(thread_id))  # stale id
+            existing = await self.board.find_bot_post(thread_id, marker)
+            if existing is not None:
+                if await self.board.edit_post(existing, desired):
+                    await self.state.set(self._guide_id_key(thread_id), str(existing))
+                    await self.state.set(self._guide_hash_key(thread_id), digest)
+                return
+            new_id = await self.board.create_post_get_id(thread_id, desired)
+            if new_id is not None:
+                await self.state.set(self._guide_id_key(thread_id), str(new_id))
+                await self.state.set(self._guide_hash_key(thread_id), digest)
+        except MissionChiefError as exc:
+            log.warning("mission: could not maintain guide on %s: %s", thread_id, exc)
 
     async def _scan_board(self, thread_id: int, default_kind: str) -> int:
-        # Post the how-to-request guide once per board (best-effort; suppressed
-        # in dry-run like every board reply).
-        if not await self.state.get(self._guide_key(thread_id)):
-            await self._reply_to(thread_id, _board_guide(default_kind, self._auto.min_contribution_rate))
-            await self.state.set(self._guide_key(thread_id), "1")
+        await self._ensure_guide(thread_id, default_kind)
 
         raw = await self.state.get(self._cursor_key(thread_id))
         last_seen = int(raw) if raw else None
@@ -824,6 +859,14 @@ class MissionScheduler:
 
 class _SavedMissionNotFound(Exception):
     """The named saved mission wasn't present in the form's dropdown."""
+
+
+def _guide_marker(default_kind: str) -> str:
+    """The leading text that identifies our guide post (so it's found and
+    edited, never duplicated). Matches the first line of ``_board_guide``."""
+    if default_kind == "event":
+        return "[FRA] 📋 How to request an ALLIANCE EVENT"
+    return "[FRA] 📋 How to request a LARGE SCALE ALLIANCE MISSION"
 
 
 def _board_guide(default_kind: str, min_rate: float) -> str:

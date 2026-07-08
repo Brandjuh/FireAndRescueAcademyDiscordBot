@@ -660,6 +660,41 @@ class FakeBoard:
         self.replies.append((int(thread_id), content))
         return True
 
+    # Guide maintenance stubs (find-or-edit): default to "no existing guide,
+    # create succeeds" so the board-scan tests don't touch a real board.
+    async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+        return None
+
+    async def create_post_get_id(self, thread_id, content):
+        return 1
+
+    async def edit_post(self, post_id, content):
+        return True
+
+    async def delete_post(self, thread_id, post_id):
+        return True
+
+
+class GuideBoard(FakeBoard):
+    """Tracks guide find/create/edit calls to test the find-or-edit rule."""
+
+    def __init__(self, *, existing=None, current_user_id=999):
+        super().__init__([], current_user_id=current_user_id)
+        self._existing = existing
+        self.created: list[tuple[int, str]] = []
+        self.edited: list[tuple[int, str]] = []
+
+    async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+        return self._existing
+
+    async def create_post_get_id(self, thread_id, content):
+        self.created.append((int(thread_id), content))
+        return 55
+
+    async def edit_post(self, post_id, content):
+        self.edited.append((int(post_id), content))
+        return True
+
 
 def _post(pid, content, *, author="Bob", mc_id=7):
     return SimpleNamespace(
@@ -668,9 +703,11 @@ def _post(pid, content, *, author="Bob", mc_id=7):
 
 
 async def _prime_board(sched, thread_id):
-    # Skip baseline + guide so the scan enqueues immediately.
+    # Skip baseline + guide so the scan enqueues immediately. Recording an
+    # existing guide id makes _ensure_guide edit-in-place (a no-op via the
+    # FakeBoard stub) instead of creating.
     await sched.state.set(f"mission_board_last_post:{thread_id}", "100")
-    await sched.state.set(f"mission_board_guide_posted:{thread_id}", "1")
+    await sched.state.set(f"mission_board_guide_id:{thread_id}", "1")
 
 
 async def test_board_scan_bare_location_enqueues_event(db):
@@ -708,7 +745,7 @@ async def test_board_scan_clarifies_bad_field(db):
 
 async def test_board_scan_skips_own_and_baseline(db):
     sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
-    await sched.state.set("mission_board_guide_posted:15307", "1")
+    await sched.state.set("mission_board_guide_id:15307", "1")
     # First scan is a baseline (no cursor yet): records the cursor, enqueues nothing.
     sched.board = FakeBoard([_post(50, "Chicago")])
     assert await sched._scan_board(15307, "large") == 0
@@ -725,3 +762,53 @@ async def test_request_boards_dedup_and_gating(db):
     # Nothing enabled -> no boards scanned.
     off = _scheduler(_cfg(events_enabled=False, board_enabled=False), FakeClient(), db)
     assert off._request_boards() == []
+
+
+# -- guide: find-or-edit, never duplicate -----------------------------------
+
+async def test_ensure_guide_creates_then_skips_unchanged(db):
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    board = GuideBoard(existing=None)
+    sched.board = board
+    await sched._ensure_guide(15307, "large")
+    assert len(board.created) == 1                     # first time: created once
+    assert board.created[0][1].startswith("[FRA] 📋 How to request a LARGE")
+    assert await sched.state.get("mission_board_guide_id:15307") == "55"
+    # Same content next poll: no duplicate, no needless edit.
+    await sched._ensure_guide(15307, "large")
+    assert len(board.created) == 1
+    assert board.edited == []
+
+
+async def test_ensure_guide_edits_existing_instead_of_duplicating(db):
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    board = GuideBoard(existing=88)                     # a guide already on the board
+    sched.board = board
+    await sched._ensure_guide(15303, "event")
+    assert board.created == []                          # found it -> edit, never create
+    assert board.edited and board.edited[0][0] == 88
+    assert await sched.state.get("mission_board_guide_id:15303") == "88"
+
+
+async def test_ensure_guide_reedits_when_text_changes(db):
+    sched = _scheduler(_cfg(dry_run=True, min_rate=5.0), FakeClient(), db)
+    board = GuideBoard(existing=None)
+    sched.board = board
+    await sched._ensure_guide(15307, "large")
+    assert len(board.created) == 1
+    # A different contribution threshold changes the guide text -> re-edit the
+    # stored post (not a new one).
+    sched._auto.min_contribution_rate = 10.0
+    await sched._ensure_guide(15307, "large")
+    assert len(board.created) == 1                      # still no duplicate
+    assert board.edited and board.edited[-1][0] == 55
+
+
+async def test_ensure_guide_suppressed_when_replies_off(db):
+    cfg = _cfg(dry_run=True)
+    cfg.automation.reply_to_board = False
+    sched = _scheduler(cfg, FakeClient(), db)
+    board = GuideBoard(existing=None)
+    sched.board = board
+    await sched._ensure_guide(15307, "large")
+    assert board.created == [] and board.edited == []
