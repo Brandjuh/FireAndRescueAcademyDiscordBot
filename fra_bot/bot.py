@@ -291,19 +291,19 @@ class FRABot(commands.Bot):
                 name="board-buildings",
                 initial_delay_seconds=210.0,
             )
-        if automation.events.enabled:
-            sched.add_interval_job(
-                self._guarded(self.events.poll, "board-events"),
-                minutes=automation.events.interval,
-                name="board-events",
-                initial_delay_seconds=270.0,
-            )
-        if automation.mission.enabled:
+        # The unified mission scheduler handles BOTH request boards — the
+        # events board (kind=event) and the mission board (kind=large) — plus
+        # the Discord queue and the rotation. Run it when any of those is on.
+        if (
+            automation.mission.enabled
+            or automation.mission.board_enabled
+            or automation.events.enabled
+        ):
             sched.add_interval_job(
                 self._guarded(self.missions_service.poll, "missions"),
                 minutes=automation.mission.interval,
                 name="missions",
-                initial_delay_seconds=330.0,
+                initial_delay_seconds=270.0,
             )
         # Safety net: release requests/missions stranded in 'processing' (an
         # action interrupted while the bot kept running). The startup sweep

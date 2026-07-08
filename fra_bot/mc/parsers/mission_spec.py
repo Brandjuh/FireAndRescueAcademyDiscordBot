@@ -271,3 +271,131 @@ def parse_mission_spec(content: str) -> MissionSpec | None:
         call_volume=call_volume or "45",
     )
     return spec.validate()
+
+
+# ---------------------------------------------------------------------------
+# Dedicated-board intake: a member just posts a location, no trigger word.
+# ---------------------------------------------------------------------------
+
+# On an EVENT request board, unspecified footprint uses these defaults.
+EVENT_BOARD_DEFAULTS = {"area": "large", "shape": "circle", "call_volume": "30"}
+
+# A line is "structured" (a key: value refinement) if it starts with one of
+# these keys — such a line is never treated as the location.
+_STRUCTURED_LINE_RE = re.compile(
+    r"^\s*(kind|event|event_?type|preset|type|type_?id|saved|saved_?mission|"
+    r"custom|units|params|requirements|name|caption|title|area|shape|"
+    r"call\s*volume|volume|call|schedule[d]?|location|where|address|loc)\s*[:=]",
+    re.IGNORECASE,
+)
+# A leading label to strip off the location line itself.
+_LOCATION_LABEL_RE = re.compile(
+    r"^\s*(event|events|mission|missions|alliance\s+event|large\s+scale\s+"
+    r"(?:alliance\s+)?mission|own\s+mission|location|request|loc|where)\s*[:\-]\s*",
+    re.IGNORECASE,
+)
+
+
+def _plain_location_line(content: str) -> str:
+    """First line that isn't a key:value refinement, minus any leading label."""
+    for line in (content or "").splitlines():
+        line = line.strip()
+        if not line or _STRUCTURED_LINE_RE.match(line):
+            continue
+        return _LOCATION_LABEL_RE.sub("", line).strip()
+    return ""
+
+
+def parse_board_request(
+    content: str, *, default_kind: str = "large"
+) -> MissionSpec | None:
+    """Parse a *dedicated request board* post into a :class:`MissionSpec`.
+
+    Unlike :func:`parse_mission_spec`, no trigger word is required — a bare
+    location line ("New York City") is the request. ``default_kind`` sets the
+    kind for that board (event vs large); optional ``key: value`` lines refine
+    it (kind / event / preset / saved / custom / name / area / shape / call /
+    schedule). On an event board, unspecified footprint uses the alliance's
+    defaults (large / circle / 30s).
+
+    Returns ``None`` for an empty/bot post; raises :class:`MissionSpecError`
+    when the post clearly asks for something but a field is invalid (the
+    caller replies asking the member to clarify).
+    """
+    raw = (content or "").strip()
+    # Skip our own posts: the reply marker "[FRA]" and guide markers "[FRA-…]".
+    if not raw or raw.startswith("[FRA"):
+        return None
+
+    kind_match = _KEY_RE["kind"].search(content)
+    kind = (kind_match.group(1).lower() if kind_match else default_kind)
+
+    # Location: explicit "location:" line, else a maps link, else the first
+    # plain (non-refinement) line.
+    loc_match = _KEY_RE["location"].search(content)
+    if loc_match:
+        location = loc_match.group(1).strip()
+    else:
+        links = find_maps_links(content)
+        location = links[0] if links else _plain_location_line(content)
+    if not location:
+        return None
+
+    saved_match = _KEY_RE["saved"].search(content)
+    custom_match = _KEY_RE["custom"].search(content)
+    name_match = _KEY_RE["name"].search(content)
+    preset_match = _KEY_RE["preset"].search(content)
+    recurring = _RECURRING_RE.search(content) is not None
+
+    source = "preset"
+    custom: CustomMission | None = None
+    saved_name: str | None = None
+    if saved_match:
+        source = "saved"
+        saved_name = saved_match.group(1).strip()
+    elif custom_match:
+        source = "custom"
+        try:
+            values = parse_custom_values(custom_match.group(1))
+        except CustomMissionError as exc:
+            raise MissionSpecError(str(exc)) from exc
+        caption = (name_match.group(1).strip() if name_match else "") or location
+        custom = CustomMission(caption=caption, values=values)
+
+    event_type_id: int | None = None
+    event_random = False
+    area = shape = call_volume = None
+    if kind == "event":
+        from .events import resolve_event_type
+
+        event_match = _KEY_RE["event"].search(content)
+        try:
+            event_type_id, event_random = resolve_event_type(
+                event_match.group(1) if event_match else ""
+            )
+        except ValueError as exc:
+            raise MissionSpecError(str(exc)) from exc
+        area_match = _KEY_RE["area"].search(content)
+        shape_match = _KEY_RE["shape"].search(content)
+        volume_match = _KEY_RE["call_volume"].search(content)
+        area = area_match.group(1) if area_match else EVENT_BOARD_DEFAULTS["area"]
+        shape = shape_match.group(1) if shape_match else EVENT_BOARD_DEFAULTS["shape"]
+        call_volume = (
+            volume_match.group(1) if volume_match else EVENT_BOARD_DEFAULTS["call_volume"]
+        )
+
+    spec = MissionSpec(
+        location_text=location,
+        kind=kind,
+        source=source,
+        preset_type_id=int(preset_match.group(1)) if preset_match else None,
+        custom=custom,
+        saved_name=saved_name,
+        recurring=recurring,
+        event_type_id=event_type_id,
+        event_random=event_random,
+        area=area or "large",
+        shape=shape or "circle",
+        call_volume=call_volume or "30",
+    )
+    return spec.validate()

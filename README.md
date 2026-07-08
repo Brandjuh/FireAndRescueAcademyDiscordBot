@@ -258,13 +258,21 @@ One system handles every mission/event request. A request has four choices:
 Requests arrive three ways:
 
 * the **/mission** slash command (with `kind` / `schedule` / `preset` /
-  `saved` / `custom` options), or the button on the panel posted by
+  `saved` / `custom` / event options), or the button on the panel posted by
   `!fra missionpanel` (channel set by `automation.mission.panel_channel_id`);
-* a structured board post on `automation.mission.thread_id`, e.g.
-  `own mission: Grand Rapids` / `name: Big fire` /
-  `custom: need_lf=25 need_elw1=6` / `recurring`, or
-  `large scale mission: Amsterdam` / `saved: Wildfire`
-  (only when `automation.mission.board_enabled`).
+* a **board post** — just a location, no command word needed. Each request
+  board has a default kind: the **events board** (`automation.events.thread_id`,
+  enabled by `automation.events.enabled`) starts an alliance **event**; the
+  **mission board** (`automation.mission.thread_id`, enabled by
+  `automation.mission.board_enabled`) starts a **large scale mission**. A
+  member just posts e.g. `New York City`, `Amsterdam, Netherlands`, or a maps
+  link. Optional refinement lines fine-tune it — events: `event: Storm`,
+  `area: large`, `shape: circle`, `call: 30`; missions: `custom: need_lf=25
+  need_elw1=6`, `saved: <name>`, `name: <caption>`; either: `schedule:
+  recurring`. The bot maintains a how-to-request guide post on each board,
+  confirms accepted requests, and asks for clarification when a post can't be
+  used. Event posts with no refinements default to a random type at
+  Large / Circle / 30s.
 
 The **rotation list** is an admin-managed set of locations the bot starts
 automatically and keeps cycling forever — one per free slot, oldest-started

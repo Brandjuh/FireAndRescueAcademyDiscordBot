@@ -14,9 +14,43 @@ from fra_bot.mc.parsers.mission_spec import (
     MissionSpec,
     MissionSpecError,
     is_mission_post,
+    parse_board_request,
     parse_mission_spec,
 )
 from fra_bot.services.missions import MissionScheduler
+
+
+# --------------------------------------------------------------------------
+# Dedicated-board intake: a bare location is the request (no trigger word)
+# --------------------------------------------------------------------------
+
+def test_board_request_bare_location_per_kind():
+    m = parse_board_request("New York City", default_kind="large")
+    assert m.kind == "large" and m.source == "preset" and m.location_text == "New York City"
+    e = parse_board_request("New York City", default_kind="event")
+    # event board defaults: random type, large / circle / 30s
+    assert e.kind == "event" and e.event_random
+    assert (e.area, e.shape, e.call_volume) == ("large", "circle", "30")
+
+
+def test_board_request_refinements_and_label():
+    e = parse_board_request("Amsterdam\nevent: Storm\narea: small\ncall: 45", default_kind="event")
+    assert e.event_type_id == 0 and e.area == "small" and e.call_volume == "45"
+    m = parse_board_request(
+        "Berlin\ncustom: need_lf=25 need_elw1=6\nname: Big fire\nrecurring", default_kind="large"
+    )
+    assert m.source == "custom" and m.recurring and m.custom.values["need_lf"] == 25
+    assert parse_board_request("Location: Grand Rapids", default_kind="large").location_text == "Grand Rapids"
+
+
+def test_board_request_ignores_bot_and_empty():
+    assert parse_board_request("[FRA] got it — …", default_kind="large") is None
+    assert parse_board_request("   ", default_kind="event") is None
+
+
+def test_board_request_clarifies_bad_field():
+    with pytest.raises(MissionSpecError):
+        parse_board_request("NYC\nevent: Volcano", default_kind="event")
 
 
 # --------------------------------------------------------------------------
@@ -260,14 +294,18 @@ class FakeGeo:
         return self.result
 
 
-def _cfg(*, dry_run=True, min_rate=5.0):
+def _cfg(*, dry_run=True, min_rate=5.0, events_enabled=False, board_enabled=False):
     return SimpleNamespace(
         automation=SimpleNamespace(
             dry_run=dry_run,
             reply_to_board=True,
             mission=SimpleNamespace(
-                enabled=True, board_enabled=False, thread_id=15293,
+                enabled=True, board_enabled=board_enabled, thread_id=15307,
                 interval=5, panel_channel_id=0, min_contribution_rate=min_rate,
+            ),
+            events=SimpleNamespace(
+                enabled=events_enabled, thread_id=15303, interval=5,
+                min_contribution_rate=min_rate,
             ),
         ),
     )
@@ -592,3 +630,88 @@ async def test_coin_mission_custom_posts_fields_and_coins(db):
     assert body["mission_position[mission_type_id]"] == "-1"
     assert body[value_field_name("need_lf")] == "25"
     assert body["mission_position[coins]"] == "1"
+
+
+# -- dedicated request boards (bare-location intake) ------------------------
+
+class FakeBoard:
+    """Minimal BoardClient stand-in for the scheduler's board scan."""
+
+    def __init__(self, posts, *, current_user_id=999):
+        self._posts = posts
+        self._page = SimpleNamespace(current_user_id=current_user_id)
+        self.replies: list[tuple[int, str]] = []
+
+    async def fetch_new_posts(self, thread_id, last_seen):
+        fresh = [p for p in self._posts if p.post_id > (last_seen or 0)]
+        return self._page, fresh
+
+    async def post_reply(self, thread_id, content):
+        self.replies.append((int(thread_id), content))
+        return True
+
+
+def _post(pid, content, *, author="Bob", mc_id=7):
+    return SimpleNamespace(
+        post_id=pid, author_mc_id=mc_id, author_name=author, content=content
+    )
+
+
+async def _prime_board(sched, thread_id):
+    # Skip baseline + guide so the scan enqueues immediately.
+    await sched.state.set(f"mission_board_last_post:{thread_id}", "100")
+    await sched.state.set(f"mission_board_guide_posted:{thread_id}", "1")
+
+
+async def test_board_scan_bare_location_enqueues_event(db):
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    await _prime_board(sched, 15303)
+    sched.board = FakeBoard([_post(101, "New York City")])
+    created = await sched._scan_board(15303, "event")
+    assert created == 1
+    row = (await sched.missions.recent())[0]
+    assert row["kind"] == "event" and row["mission_source"] == "preset"
+    assert row["event_random"] == 1 and row["area"] == "large" and row["call_volume"] == "30"
+    assert row["location_text"] == "New York City"
+    assert row["board_thread_id"] == 15303
+
+
+async def test_board_scan_bare_location_enqueues_large(db):
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    await _prime_board(sched, 15307)
+    sched.board = FakeBoard([_post(101, "New York City")])
+    created = await sched._scan_board(15307, "large")
+    assert created == 1
+    row = (await sched.missions.recent())[0]
+    assert row["kind"] == "large" and row["mission_source"] == "preset"
+
+
+async def test_board_scan_clarifies_bad_field(db):
+    sched = _scheduler(_cfg(dry_run=False), FakeClient(), db)  # live so replies post
+    await _prime_board(sched, 15303)
+    board = FakeBoard([_post(101, "NYC\nevent: Volcano")])
+    sched.board = board
+    created = await sched._scan_board(15303, "event")
+    assert created == 0
+    assert any("couldn't use" in c for _, c in board.replies)
+
+
+async def test_board_scan_skips_own_and_baseline(db):
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    await sched.state.set("mission_board_guide_posted:15307", "1")
+    # First scan is a baseline (no cursor yet): records the cursor, enqueues nothing.
+    sched.board = FakeBoard([_post(50, "Chicago")])
+    assert await sched._scan_board(15307, "large") == 0
+    assert await sched.missions.open_count() == 0
+    # The bot's own [FRA] post is never treated as a request.
+    sched.board = FakeBoard([_post(60, "[FRA] got it — large · preset at Chicago")])
+    assert await sched._scan_board(15307, "large") == 0
+
+
+async def test_request_boards_dedup_and_gating(db):
+    sched = _scheduler(_cfg(events_enabled=True, board_enabled=True), FakeClient(), db)
+    boards = sched._request_boards()
+    assert (15303, "event") in boards and (15307, "large") in boards
+    # Nothing enabled -> no boards scanned.
+    off = _scheduler(_cfg(events_enabled=False, board_enabled=False), FakeClient(), db)
+    assert off._request_boards() == []

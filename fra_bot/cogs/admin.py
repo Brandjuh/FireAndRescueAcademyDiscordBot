@@ -196,7 +196,9 @@ class AdminCog(commands.Cog):
             "backfill": (self.bot.treasury_sync.backfill_step, "expenses-backfill"),
             "trainings": (self.bot.trainings.poll, "board-trainings"),
             "buildings": (self.bot.buildings.poll, "board-buildings"),
-            "events": (self.bot.events.poll, "board-events"),
+            # Events + missions are one engine now (the events board and the
+            # mission board are both scanned by the mission scheduler).
+            "events": (self.bot.missions_service.poll, "missions"),
             "missions": (self.bot.missions_service.poll, "missions"),
         }
         entry = jobs.get(scraper.lower())
