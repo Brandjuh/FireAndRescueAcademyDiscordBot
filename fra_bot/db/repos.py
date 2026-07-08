@@ -1478,6 +1478,43 @@ class BoardDeletionRepo:
         return row["n"] if row else 0
 
 
+class RemindersRepo:
+    """Training-finished reminders for Discord-sourced requests."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def add(
+        self,
+        *,
+        discord_user_id: int,
+        channel_id: int | None,
+        training: str,
+        due_at: str,
+        request_id: int | None = None,
+    ) -> int:
+        return await self._db.execute_returning_id(
+            "INSERT INTO training_reminders "
+            "(discord_user_id, channel_id, training, due_at, request_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (discord_user_id, channel_id, training, due_at, request_id, utcnow_iso()),
+        )
+
+    async def due(self, *, limit: int = 25) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM training_reminders "
+            "WHERE posted_at IS NULL AND due_at <= ? ORDER BY due_at ASC LIMIT ?",
+            (utcnow_iso(), limit),
+        ) as cur:
+            return await cur.fetchall()
+
+    async def mark_posted(self, reminder_id: int) -> None:
+        await self._db.execute(
+            "UPDATE training_reminders SET posted_at = ? WHERE id = ?",
+            (utcnow_iso(), reminder_id),
+        )
+
+
 def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
     """(daily, monthly) period keys for the current New York game day."""
     from zoneinfo import ZoneInfo

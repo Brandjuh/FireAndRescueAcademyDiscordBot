@@ -80,6 +80,7 @@ def _service(db, dry_run):
         BoardDeletionRepo,
         BoardRepo,
         MembersRepo,
+        RemindersRepo,
         RunsRepo,
         StateRepo,
     )
@@ -99,6 +100,7 @@ def _service(db, dry_run):
     svc.runs = RunsRepo(db)
     svc.state = StateRepo(db)
     svc.deletions = BoardDeletionRepo(db)
+    svc.reminders = RemindersRepo(db)
     svc._auto = cfg.automation.training
     return svc, client
 
@@ -224,6 +226,76 @@ async def test_execute_live_posts_education_form(db):
     assert client.posts[0][0] == "/buildings/4951748/education"
     row = await repo.get(rid)
     assert row["status"] == "done"
+
+
+# -- Discord-sourced requests (thread_id = 0) --------------------------------
+
+async def test_reply_for_skips_discord_source(db):
+    svc, _ = _service(db, dry_run=False)
+    svc.cfg.automation.reply_to_board = True
+    sent: list[str] = []
+
+    class _Recorder:
+        async def post_reply(self, thread_id, content):
+            sent.append(content)
+            return True
+
+    svc.board = _Recorder()
+    await svc.reply_for({"thread_id": 5935}, "to the board")
+    await svc.reply_for({"thread_id": 0}, "never to the board")
+    assert sent == ["to the board"]
+
+
+async def test_discord_training_request_schedules_reminder(db):
+    """A Discord request (thread 0) with remind=True runs the normal open
+    flow and leaves a reminder due when the course should finish; the
+    Discord flags survive the payload rewrite."""
+    import datetime as dt
+
+    svc, _ = _service(db, dry_run=True)
+    rid = await svc.requests.create(
+        kind="training", thread_id=0, post_id=999,
+        requester_name="Alice", requester_mc_id=None,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat", "duration": 3}],
+            "ambiguous": [],
+            "discord_user_id": 42, "channel_id": 7, "remind": True,
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+
+    row = await svc.requests.get(rid)
+    assert row["status"] == "done"
+    assert json.loads(row["payload"])["discord_user_id"] == 42   # flags kept
+    async with db.conn.execute("SELECT * FROM training_reminders") as cur:
+        reminders = await cur.fetchall()
+    assert len(reminders) == 1
+    r = reminders[0]
+    assert r["training"] == "HazMat" and r["discord_user_id"] == 42
+    soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)).isoformat()
+    assert r["due_at"] > soon                                    # ~3 days out
+
+
+async def test_reminders_repo_due_and_mark(db):
+    import datetime as dt
+
+    from fra_bot.db.repos import RemindersRepo
+
+    repo = RemindersRepo(db)
+    now = dt.datetime.now(dt.timezone.utc)
+    a = await repo.add(
+        discord_user_id=1, channel_id=2, training="X",
+        due_at=(now - dt.timedelta(hours=1)).isoformat(),
+    )
+    await repo.add(
+        discord_user_id=1, channel_id=2, training="Y",
+        due_at=(now + dt.timedelta(hours=1)).isoformat(),
+    )
+    due = await repo.due()
+    assert [r["training"] for r in due] == ["X"]                 # only the past one
+    await repo.mark_posted(a)
+    assert await repo.due() == []
 
 
 class _SeqBoard:

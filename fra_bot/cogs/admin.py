@@ -399,6 +399,15 @@ class AdminCog(commands.Cog):
 
     # -- custom "Own mission" scheduling --------------------------------
 
+    @fra.command(name="requestpanel", aliases=["requestspanel"])
+    async def request_panel(self, ctx: commands.Context) -> None:
+        """Post the training/building request panel in THIS channel."""
+        requests_cog = self.bot.get_cog("RequestsCog")
+        if requests_cog is None:
+            await ctx.send("Requests cog not loaded.")
+            return
+        await requests_cog.post_panel(ctx.channel)
+
     @fra.command(name="missionpanel")
     async def mission_panel(self, ctx: commands.Context) -> None:
         """Post the mission-request panel to the configured channel."""

@@ -224,7 +224,8 @@ class BuildingsService(BoardRequestService):
                 await self.requests.set_status(
                     request["id"], "failed", f"geocoding failed: {exc}"
                 )
-                await self.reply(
+                await self.reply_for(
+                    request,
                     f"@{requester}: could not resolve your location link "
                     f"({exc}). Please share a Google Maps pin."
                 )
@@ -249,7 +250,8 @@ class BuildingsService(BoardRequestService):
                     "refused: location is not a hospital or prison",
                     payload=json.dumps(payload),
                 )
-                await self.reply(
+                await self.reply_for(
+                    request,
                     f"@{requester}: that location "
                     f"({location.place_text or location.address or 'the pin'}) isn't a "
                     "hospital or a prison, so nothing was built. Only hospitals and "
@@ -258,14 +260,14 @@ class BuildingsService(BoardRequestService):
                 return
 
         await self._attempt_build(
-            request["id"], requester, building_type, location, payload, announce=announce
+            request, requester, building_type, location, payload, announce=announce
         )
 
     # ------------------------------------------------------------------
 
     async def _attempt_build(
         self,
-        request_id: int,
+        request,
         requester: str | None,
         building_type,
         location,
@@ -273,6 +275,7 @@ class BuildingsService(BoardRequestService):
         *,
         announce: bool = True,
     ) -> None:
+        request_id = request["id"]
         funds = await self._live_funds()
         if funds is None:
             await self.requests.set_status(
@@ -291,7 +294,8 @@ class BuildingsService(BoardRequestService):
                 payload=json.dumps(payload), announce=announce,
             )
             if announce:
-                await self.reply(
+                await self.reply_for(
+                    request,
                     f"@{requester}: your {building_type} request is on hold — alliance "
                     f"funds ({funds:,}) are below the {self._auto.min_alliance_funds:,} "
                     "safety floor. I'll build it once funds recover."
@@ -308,7 +312,8 @@ class BuildingsService(BoardRequestService):
                 f"{location.latitude:.5f},{location.longitude:.5f}",
                 payload=json.dumps(payload),
             )
-            await self.reply(
+            await self.reply_for(
+                request,
                 f"@{requester}: {building_type} request resolved to "
                 f"{location.address or 'the pin'} "
                 f"({location.latitude:.5f}, {location.longitude:.5f}). "
@@ -337,7 +342,8 @@ class BuildingsService(BoardRequestService):
                 f"built {building_type} #{result.building_id}",
                 payload=json.dumps(payload),
             )
-            await self.reply(
+            await self.reply_for(
+                request,
                 f"✅ {building_type.capitalize()} built for {requester} at "
                 f"{location.address or 'the pin'} — "
                 f"https://www.missionchief.com/buildings/{result.building_id}"
@@ -347,7 +353,8 @@ class BuildingsService(BoardRequestService):
                 request_id, "failed",
                 f"build failed: {result.detail}", payload=json.dumps(payload),
             )
-            await self.reply(
+            await self.reply_for(
+                request,
                 f"@{requester}: I couldn't build the {building_type} automatically "
                 f"({result.detail}). An admin will handle it."
             )
