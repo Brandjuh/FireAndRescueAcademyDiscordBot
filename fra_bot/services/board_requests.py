@@ -198,73 +198,94 @@ class BoardRequestService:
         run_id = await self.runs.start(f"board_{self.kind}")
         try:
             await self._ensure_guide()
-            last_seen = await self.board_repo.last_seen_post_id(self.thread_id)
-            # First contact records history without acting on it. An EMPTY
-            # thread records nothing, so a bare `last_seen is None` would stay
-            # baseline forever and silently swallow the first real request —
-            # remember explicitly that the baseline pass has happened.
-            baseline_key = f"board_baseline_done:{self.kind}:{self.thread_id}"
-            baseline = (
-                last_seen is None
-                and await self.state.get(baseline_key) is None
-            )
-            page, fresh_posts = await self.board.fetch_new_posts(
-                self.thread_id, last_seen
-            )
-
+            # The board scan must NEVER starve the queue: a broken/unreachable
+            # thread would otherwise abort the poll before _execute_ready(),
+            # leaving Discord-sourced (and previously detected) requests
+            # pending forever. Scan errors are recorded, the queue still runs.
             detected = 0
-            for post in sorted(fresh_posts, key=lambda p: p.post_id):
-                try:
-                    # One bad post must not abort the whole poll (which
-                    # would skip execution and leave the run unfinished).
-                    is_own = (
-                        page.current_user_id is not None
-                        and post.author_mc_id == page.current_user_id
-                    )
-                    is_bot_reply = post.content.startswith(REPLY_MARKER)
-
-                    request = None
-                    if not baseline and not is_own and not is_bot_reply:
-                        request = await self.parse_request(post)
-
-                    # Atomic: mark the post seen and (if it's a request)
-                    # create its 'pending' row together.
-                    _, request_id = await self.requests.record_post_and_request(
-                        self.thread_id,
-                        {
-                            "post_id": post.post_id,
-                            "author_name": post.author_name,
-                            "author_mc_id": post.author_mc_id,
-                            "raw_timestamp": post.raw_timestamp,
-                            "content": post.content,
-                        },
-                        self.kind,
-                        request,
-                    )
-                    if request_id is not None:
-                        detected += 1
-                except Exception:
-                    log.exception(
-                        "%s: error detecting post %s (left unrecorded, will retry)",
-                        self.kind, post.post_id,
-                    )
-
-            if baseline:
-                await self.state.set(baseline_key, "1")
-                log.info(
-                    "%s: thread %s baseline set (%d posts recorded, none processed)",
-                    self.kind, self.thread_id, len(fresh_posts),
+            fresh_count = 0
+            scan_error: str | None = None
+            try:
+                detected, fresh_count = await self._scan_board_posts()
+            except MissionChiefError as exc:
+                scan_error = str(exc)
+                log.warning(
+                    "%s: board scan of thread %s failed (%s) — still "
+                    "executing the queue", self.kind, self.thread_id, exc,
                 )
 
             executed = await self._execute_ready()
 
             await self.runs.finish(
-                run_id, status="success", pages=1,
-                rows_parsed=len(fresh_posts), rows_new=detected + executed,
+                run_id,
+                status="success" if scan_error is None else "partial",
+                pages=1, rows_parsed=fresh_count, rows_new=detected + executed,
+                message=scan_error,
             )
         except MissionChiefError as exc:
             await self.runs.finish(run_id, status="failed", message=str(exc))
             raise
+
+    async def _scan_board_posts(self) -> tuple[int, int]:
+        """Fetch + record new board posts. Returns (detected, fresh_count)."""
+        last_seen = await self.board_repo.last_seen_post_id(self.thread_id)
+        # First contact records history without acting on it. An EMPTY
+        # thread records nothing, so a bare `last_seen is None` would stay
+        # baseline forever and silently swallow the first real request —
+        # remember explicitly that the baseline pass has happened.
+        baseline_key = f"board_baseline_done:{self.kind}:{self.thread_id}"
+        baseline = (
+            last_seen is None
+            and await self.state.get(baseline_key) is None
+        )
+        page, fresh_posts = await self.board.fetch_new_posts(
+            self.thread_id, last_seen
+        )
+
+        detected = 0
+        for post in sorted(fresh_posts, key=lambda p: p.post_id):
+            try:
+                # One bad post must not abort the whole poll (which
+                # would skip execution and leave the run unfinished).
+                is_own = (
+                    page.current_user_id is not None
+                    and post.author_mc_id == page.current_user_id
+                )
+                is_bot_reply = post.content.startswith(REPLY_MARKER)
+
+                request = None
+                if not baseline and not is_own and not is_bot_reply:
+                    request = await self.parse_request(post)
+
+                # Atomic: mark the post seen and (if it's a request)
+                # create its 'pending' row together.
+                _, request_id = await self.requests.record_post_and_request(
+                    self.thread_id,
+                    {
+                        "post_id": post.post_id,
+                        "author_name": post.author_name,
+                        "author_mc_id": post.author_mc_id,
+                        "raw_timestamp": post.raw_timestamp,
+                        "content": post.content,
+                    },
+                    self.kind,
+                    request,
+                )
+                if request_id is not None:
+                    detected += 1
+            except Exception:
+                log.exception(
+                    "%s: error detecting post %s (left unrecorded, will retry)",
+                    self.kind, post.post_id,
+                )
+
+        if baseline:
+            await self.state.set(baseline_key, "1")
+            log.info(
+                "%s: thread %s baseline set (%d posts recorded, none processed)",
+                self.kind, self.thread_id, len(fresh_posts),
+            )
+        return detected, len(fresh_posts)
 
     async def _execute_ready(self) -> int:
         """Execute all claimable (pending + due-waiting) requests."""

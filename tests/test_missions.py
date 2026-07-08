@@ -755,6 +755,25 @@ async def test_board_scan_skips_own_and_baseline(db):
     assert await sched._scan_board(15307, "large") == 0
 
 
+async def test_poll_advances_queue_even_when_board_is_broken(db):
+    """A broken request board must not starve the mission queue."""
+    from fra_bot.mc.errors import FetchError
+
+    cfg = _cfg(dry_run=True, events_enabled=True)
+    cfg.automation.reply_to_board = False              # skip guide upkeep
+    sched = _scheduler(cfg, FakeClient(), db)
+
+    class _BrokenBoard:
+        async def fetch_new_posts(self, thread_id, last_seen):
+            raise FetchError(f"/alliance_threads/{thread_id}", 403)
+
+    sched.board = _BrokenBoard()
+    mid = await _enqueue(sched)                        # a Discord request waits
+    await sched.poll()                                 # scan fails, queue runs
+    row = await sched.missions.get(mid)
+    assert row["status"] == "skipped"                  # dry-run: handled
+
+
 async def test_board_scan_empty_baseline_then_first_post_enqueues(db):
     """An EMPTY board's first scan sets the baseline too — the first real
     post afterwards must be enqueued, not swallowed as a second baseline."""

@@ -197,16 +197,31 @@ class MissionScheduler:
         return None
 
     async def poll(self) -> None:
-        """Scan the request board(s), then advance the queue/rotation."""
+        """Scan the request board(s), then advance the queue/rotation.
+
+        A broken board must never starve the queue: each board scan is
+        isolated, and the queue/rotation advance ALWAYS runs — otherwise a
+        single unreachable thread would leave Discord-sourced requests
+        pending forever."""
         run_id = await self.runs.start("missions")
         try:
             scanned = 0
+            scan_errors: list[str] = []
             for thread_id, default_kind in self._request_boards():
-                scanned += await self._scan_board(thread_id, default_kind)
+                try:
+                    scanned += await self._scan_board(thread_id, default_kind)
+                except MissionChiefError as exc:
+                    scan_errors.append(f"thread {thread_id}: {exc}")
+                    log.warning(
+                        "mission: board scan of thread %s failed (%s) — "
+                        "still advancing the queue", thread_id, exc,
+                    )
             executed = await self._advance()
             await self.runs.finish(
-                run_id, status="success", pages=1,
-                rows_parsed=scanned, rows_new=executed,
+                run_id,
+                status="success" if not scan_errors else "partial",
+                pages=1, rows_parsed=scanned, rows_new=executed,
+                message="; ".join(scan_errors) or None,
             )
         except MissionChiefError as exc:
             await self.runs.finish(run_id, status="failed", message=str(exc))

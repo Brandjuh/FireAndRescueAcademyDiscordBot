@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 
 from bs4 import BeautifulSoup
 
@@ -18,6 +19,23 @@ from .parsers.board import BoardThreadPage, parse_board_thread_page
 log = logging.getLogger(__name__)
 
 REPLY_MARKER = "[FRA]"
+
+
+def _normalize_marker_text(text: str) -> str:
+    """Reduce text to plain ASCII with single spaces, for marker matching.
+
+    The forum re-renders posts (emoji can become images and disappear from
+    the text, whitespace gets reflowed), so an exact prefix match on what we
+    POSTED will not reliably match what we READ BACK. Both sides are
+    normalized before comparing."""
+    text = re.sub(r"[^\x20-\x7E\n]", "", text or "")    # drop emoji/unicode
+    return re.sub(r"[ \t]+", " ", text).strip()
+
+
+def _marker_in(content: str, marker: str) -> bool:
+    """True when the normalized marker occurs in the normalized content."""
+    needle = _normalize_marker_text(marker)
+    return bool(needle) and needle in _normalize_marker_text(content)
 
 
 def guide_now() -> float:
@@ -123,10 +141,13 @@ class BoardClient:
     async def find_bot_post(
         self, thread_id: int, marker: str, *, max_pages: int | None = None
     ) -> int | None:
-        """Newest post authored by us whose content starts with ``marker``.
+        """Newest post authored by us whose content carries ``marker``.
 
         Used to locate an existing guide post so it can be EDITED instead of
-        duplicated. Walks back from the last page up to ``max_pages``."""
+        duplicated. Matching is a normalized SUBSTRING check (like the old
+        bot), not a prefix check: the forum may re-render emoji/whitespace,
+        so both sides are reduced to plain ASCII before comparing. Walks back
+        from the last page up to ``max_pages``."""
         base_path = f"/alliance_threads/{thread_id}"
         newest = await self.fetch_latest_page(thread_id)
         uid = newest.current_user_id
@@ -137,7 +158,7 @@ class BoardClient:
             for post in page.posts:
                 if uid is not None and post.author_mc_id != uid:
                     continue
-                if not (post.content or "").startswith(marker):
+                if not _marker_in(post.content, marker):
                     continue
                 if found is None or post.post_id > found:
                     found = post.post_id

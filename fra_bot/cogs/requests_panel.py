@@ -44,6 +44,15 @@ _DISCIPLINE_CHOICES = (
 _DISCIPLINE_LABEL = dict(_DISCIPLINE_CHOICES)
 
 
+async def _send(interaction: discord.Interaction, content: str) -> None:
+    """Ephemeral reply that works whether or not the interaction was
+    already acknowledged (deferred)."""
+    if interaction.response.is_done():
+        await interaction.followup.send(content, ephemeral=True)
+    else:
+        await interaction.response.send_message(content, ephemeral=True)
+
+
 class TrainingChooserView(discord.ui.View):
     """Ephemeral, per-click chooser: academy type → course → submit."""
 
@@ -124,9 +133,16 @@ class TrainingChooserView(discord.ui.View):
                 "Pick an academy type and a course first.", ephemeral=True
             )
             return
-        await self._cog.submit_training(
-            interaction, self.discipline, self.training, remind=self.remind
-        )
+        # Acknowledge within Discord's 3s window BEFORE doing any work, and
+        # surface failures — a swallowed exception here looks like a hang.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await self._cog.submit_training(
+                interaction, self.discipline, self.training, remind=self.remind
+            )
+        except Exception as exc:  # noqa: BLE001 — show the member what broke
+            log.exception("training request submit failed")
+            await _send(interaction, f"❌ Something went wrong: {exc}")
         self.stop()
 
 
@@ -142,7 +158,12 @@ class BuildingRequestModal(discord.ui.Modal, title="Request a building"):
         self._cog = cog
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self._cog.submit_building(interaction, str(self.link.value))
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await self._cog.submit_building(interaction, str(self.link.value))
+        except Exception as exc:  # noqa: BLE001 — show the member what broke
+            log.exception("building request submit failed")
+            await _send(interaction, f"❌ Something went wrong: {exc}")
 
 
 class RequestPanelView(discord.ui.View):
@@ -248,11 +269,11 @@ class RequestsCog(commands.Cog):
                 "⚠️ training automation is currently OFF — an admin must enable it"
             )
         note = ("\n" + " · ".join(notes)) if notes else ""
-        await interaction.response.send_message(
+        await _send(
+            interaction,
             f"✅ Request **#{rid}** queued — **{training}** "
             f"({_DISCIPLINE_LABEL.get(discipline, discipline)}). I'll open a "
             f"free class at the next pass (~5 min).{note}",
-            ephemeral=True,
         )
 
     async def submit_building(
@@ -262,10 +283,10 @@ class RequestsCog(commands.Cog):
             link, user_id=interaction.user.id, channel_id=interaction.channel_id
         )
         if payload is None:
-            await interaction.response.send_message(
+            await _send(
+                interaction,
                 "⚠️ That doesn't look like a Google Maps link. Copy the share "
                 "link of a real hospital or prison and try again.",
-                ephemeral=True,
             )
             return
         rid = await self.requests.create(
