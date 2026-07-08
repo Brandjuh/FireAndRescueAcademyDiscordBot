@@ -36,7 +36,9 @@ EVENT_KINDS = {
 
 _LAST_FREE_RE = re.compile(
     r"Last\s+free\s+mission[:\s]*"
-    r"([A-Za-z]{3},?\s+\d{1,2}\s+[A-Za-z]{3}\.?\s+\d{4}(?:\s+\d{1,2}:\d{2})?)",
+    r"([A-Za-z]{3},?\s+\d{1,2}\s+[A-Za-z]{3}\.?\s+\d{4}"
+    r"(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?"   # optional H:M[:S]
+    r"(?:\s+[+-]\d{4})?)",                # optional explicit tz offset
     re.IGNORECASE,
 )
 
@@ -69,8 +71,18 @@ def _parse_last_free(text: str, *, reference: dt.datetime | None = None) -> str 
     match = _LAST_FREE_RE.search(text)
     if not match:
         return None
-    raw = match.group(1).replace(",", "").replace(".", "")
-    for fmt in ("%a %d %b %Y %H:%M", "%a %d %b %Y"):
+    raw = match.group(1).replace(",", "").replace(".", "").strip()
+    # MissionChief prints the timestamp WITH an explicit timezone offset
+    # (e.g. "Mon 01 Jul 2024 12:00:00 +0000"); parse that as-is — assuming a
+    # timezone would be wrong by hours and skew the free-mission cooldown.
+    for fmt in ("%a %d %b %Y %H:%M:%S %z", "%a %d %b %Y %H:%M %z"):
+        try:
+            aware = dt.datetime.strptime(raw, fmt)
+            return aware.astimezone(UTC).isoformat(timespec="seconds")
+        except ValueError:
+            pass
+    # Fallback when no offset is shown: treat it as the NY game timezone.
+    for fmt in ("%a %d %b %Y %H:%M:%S", "%a %d %b %Y %H:%M", "%a %d %b %Y"):
         try:
             parsed = dt.datetime.strptime(raw, fmt)
             return parsed.replace(tzinfo=MC_TIMEZONE).astimezone(UTC).isoformat(
