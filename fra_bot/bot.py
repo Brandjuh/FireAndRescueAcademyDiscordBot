@@ -38,6 +38,18 @@ STALE_SWEEP_INTERVAL_MINUTES = 5
 BOARD_CLEANUP_INTERVAL_MINUTES = 10
 
 
+def _parse_hhmm(value: str, *, default: tuple[int, int] = (3, 0)) -> tuple[int, int]:
+    """Parse a ``"HH:MM"`` string into (hour, minute); fall back on garbage."""
+    try:
+        hour_s, minute_s = str(value).split(":", 1)
+        hour, minute = int(hour_s), int(minute_s)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+    except (ValueError, AttributeError):
+        pass
+    return default
+
+
 class FRABot(commands.Bot):
     def __init__(self, cfg: Config) -> None:
         intents = discord.Intents.default()
@@ -298,6 +310,17 @@ class FRABot(commands.Bot):
                 minutes=automation.building.interval,
                 name="board-buildings",
                 initial_delay_seconds=210.0,
+            )
+        # Daily worldwide auto-build: one hospital + one prison at a real OSM
+        # location. Scheduled even in dry-run (it reports what it would build);
+        # the build itself honours dry_run and the funds floor.
+        if automation.building.daily_build_enabled:
+            hour, minute = _parse_hhmm(automation.building.daily_build_time)
+            sched.add_daily_job(
+                self._guarded(self.buildings.daily_build, "daily-build"),
+                at=dt.time(hour, minute),
+                timezone=self.cfg.reports.timezone,
+                name="daily-build",
             )
         # The unified mission scheduler handles BOTH request boards — the
         # events board (kind=event) and the mission board (kind=large) — plus

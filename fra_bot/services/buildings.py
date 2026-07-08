@@ -14,8 +14,11 @@ Safety:
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
+import random
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 
@@ -23,7 +26,15 @@ from ..config import Config
 from ..db.database import Database
 from ..geo.geocoder import GeocodeError, Geocoder
 from ..geo.maps_links import find_maps_links
+from ..geo.overpass import (
+    OverpassClient,
+    OverpassError,
+    build_candidate_query,
+    parse_candidates,
+)
+from ..geo.world_locations import random_world_location
 from ..mc.browser_builder import BrowserBuilder, BrowserUnavailable
+from ..mc.buildings_api import nearest_duplicate, parse_api_buildings
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.board import BoardPost
@@ -33,6 +44,14 @@ from .board_requests import BoardRequestService
 log = logging.getLogger(__name__)
 
 KASSE_PATH = "/verband/kasse"
+API_BUILDINGS_PATH = "/api/buildings"
+
+# Daily auto-build tuning.
+AUTO_BUILD_TYPES = ("hospital", "prison")     # one of each, every day
+DUPLICATE_RADIUS_M = 250                      # skip a spot within this of a same-type building
+OVERPASS_BBOX_DELTA = 0.18                    # ~20 km box around a chosen city
+MAX_CITY_ATTEMPTS = 6                         # cities to try before giving up on a type
+DAILY_BUILD_STATE_KEY = "daily_build_last_date"
 
 # OSM feature types (amenity/…) that ARE the building — the strongest,
 # language-independent signal.
@@ -123,6 +142,8 @@ class BuildingsService(BoardRequestService):
         self._builder = BrowserBuilder(
             cfg.missionchief.base_url, self._playwright_cookies
         )
+        self._overpass = OverpassClient()
+        self._rng = random.Random()
 
     @property
     def thread_id(self) -> int:
@@ -374,3 +395,158 @@ class BuildingsService(BoardRequestService):
         mode = "DRY-RUN" if self.dry_run else "LIVE"
         lines.append(f"{icon} [{mode}] {detail}")
         return "\n".join(lines)
+
+    # -- daily worldwide auto-build -------------------------------------
+
+    async def daily_build(self, *, force: bool = False) -> list[str]:
+        """Build one hospital + one prison per day at real, deduped worldwide
+        locations. Returns a per-building summary (also logged).
+
+        Runs at most once per calendar day (in the reports timezone). Each
+        build is gated on the live alliance funds floor — if funds are below
+        it, that building is skipped until tomorrow (never dips the treasury).
+        Honours ``dry_run``: reports what it would build without submitting.
+        ``force`` bypasses the once-a-day guard (for a manual trigger)."""
+        if not self._auto.daily_build_enabled:
+            return []
+        today = dt.datetime.now(ZoneInfo(self.cfg.reports.timezone)).strftime("%Y-%m-%d")
+        if not force and await self.state.get(DAILY_BUILD_STATE_KEY) == today:
+            log.debug("daily build already ran for %s; skipping", today)
+            return []
+        # Claim the day up front so a restart can't double-build.
+        await self.state.set(DAILY_BUILD_STATE_KEY, today)
+
+        run_id = await self.runs.start("daily_build")
+        summary: list[str] = []
+        built = 0
+        try:
+            existing = await self._existing_buildings()
+            for building_type in AUTO_BUILD_TYPES:
+                line = await self._auto_build_one(building_type, existing)
+                summary.append(line)
+                if line.startswith("✅"):
+                    built += 1
+            await self.runs.finish(
+                run_id, status="success", rows_parsed=len(AUTO_BUILD_TYPES),
+                rows_new=built, message=" | ".join(summary)[:500],
+            )
+        except Exception as exc:  # noqa: BLE001 — a daily job must not crash the loop
+            log.exception("daily build failed: %s", exc)
+            await self.runs.finish(run_id, status="failed", message=str(exc))
+        for line in summary:
+            log.info("daily build: %s", line)
+        return summary
+
+    async def _auto_build_one(self, building_type: str, existing: list) -> str:
+        funds = await self._live_funds()
+        if funds is None:
+            return f"⏳ {building_type}: could not read alliance funds — skipped today"
+        if funds < self._auto.min_alliance_funds:
+            return (
+                f"⏳ {building_type}: alliance funds {funds:,} below floor "
+                f"{self._auto.min_alliance_funds:,} — skipped until tomorrow"
+            )
+
+        candidate = await self._find_osm_candidate(building_type, existing)
+        if candidate is None:
+            return (
+                f"❔ {building_type}: no fresh real location found this run "
+                "(all nearby ones already built, or Overpass unavailable)"
+            )
+
+        where = candidate.address or candidate.name
+        coords = f"{candidate.latitude:.5f},{candidate.longitude:.5f}"
+        if self.dry_run or not BrowserBuilder.available():
+            reason = "dry-run" if self.dry_run else "Playwright not installed"
+            return (
+                f"📝 {building_type}: [{reason}] would build '{candidate.name}' "
+                f"at {where} ({coords})"
+            )
+
+        try:
+            result = await self._builder.build(
+                building_type=building_type,
+                latitude=candidate.latitude,
+                longitude=candidate.longitude,
+                name=candidate.name,
+                address=candidate.address,
+            )
+        except BrowserUnavailable as exc:
+            return f"⚠️ {building_type}: {exc}"
+        if result.ok:
+            # Fold the new building into the in-memory list so a same-type
+            # second build this run won't land on top of it.
+            existing.append(
+                parse_api_buildings(
+                    [{
+                        "id": result.building_id,
+                        "building_type": {"hospital": 2, "prison": 10}[building_type],
+                        "latitude": candidate.latitude,
+                        "longitude": candidate.longitude,
+                    }]
+                )[0]
+            )
+            return (
+                f"✅ {building_type}: built '{candidate.name}' at {where} — "
+                f"https://www.missionchief.com/buildings/{result.building_id}"
+            )
+        return f"❌ {building_type}: build failed — {result.detail}"
+
+    async def _find_osm_candidate(self, building_type: str, existing: list):
+        """Pick a random worldwide city, ask Overpass for real facilities of
+        the type around it, drop ones within the dedup radius of an existing
+        same-type building, and return a random survivor. Retries other
+        cities. Returns an :class:`OsmCandidate` or None."""
+        for _ in range(MAX_CITY_ATTEMPTS):
+            city = random_world_location(self._rng)
+            try:
+                loc = await self._geocoder.search(city)
+            except GeocodeError as exc:
+                log.debug("daily build: geocode of %r failed (%s)", city, exc)
+                continue
+            south = max(-90.0, loc.latitude - OVERPASS_BBOX_DELTA)
+            north = min(90.0, loc.latitude + OVERPASS_BBOX_DELTA)
+            west = max(-180.0, loc.longitude - OVERPASS_BBOX_DELTA)
+            east = min(180.0, loc.longitude + OVERPASS_BBOX_DELTA)
+            if south >= north or west >= east:
+                continue
+            query = build_candidate_query(south, west, north, east, building_type)
+            try:
+                data = await self._overpass.fetch(query)
+            except OverpassError as exc:
+                log.warning("daily build: Overpass failed for %s (%s)", city, exc)
+                continue
+            fresh = [
+                c
+                for c in parse_candidates(data, want=building_type)
+                if nearest_duplicate(
+                    c.latitude, c.longitude, building_type, existing,
+                    radius_m=DUPLICATE_RADIUS_M,
+                ) is None
+            ]
+            if fresh:
+                chosen = self._rng.choice(fresh)
+                log.info(
+                    "daily build: chose %s '%s' near %s (%d candidates, %d fresh)",
+                    building_type, chosen.name, city,
+                    len(parse_candidates(data, want=building_type)), len(fresh),
+                )
+                return chosen
+        return None
+
+    async def _existing_buildings(self) -> list:
+        """Our current buildings (with coords) for the proximity dedup. An
+        empty list on failure — we'd rather build than block on a read error,
+        and the game still rejects an exact overlap."""
+        try:
+            raw = await self.client.fetch_page(API_BUILDINGS_PATH)
+        except MissionChiefError as exc:
+            log.warning("daily build: could not read %s (%s); dedup skipped",
+                        API_BUILDINGS_PATH, exc)
+            return []
+        try:
+            return parse_api_buildings(raw)
+        except (ValueError, TypeError) as exc:
+            log.warning("daily build: could not parse %s (%s); dedup skipped",
+                        API_BUILDINGS_PATH, exc)
+            return []
