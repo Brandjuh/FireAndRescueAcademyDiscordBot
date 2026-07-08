@@ -133,6 +133,51 @@ async def test_logs_backfill_resumes_from_cursor(db):
     assert await svc.backfill_step() is True
 
 
+class _AlwaysFailsClient:
+    def url(self, path):
+        return path
+
+    async def fetch_page(self, path, *, referer=None):
+        from fra_bot.mc.errors import MissionChiefError
+
+        raise MissionChiefError("boom")
+
+
+async def test_expenses_backfill_skips_a_persistently_failing_page(db):
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.mc.errors import MissionChiefError
+    from fra_bot.services.treasury_sync import (
+        BACKFILL_SKIP_AFTER,
+        STATE_BACKFILL_NEXT_PAGE,
+        TreasurySyncService,
+    )
+
+    cfg = SimpleNamespace(sync=SimpleNamespace(expenses_backfill_pages_per_chunk=5))
+    svc = TreasurySyncService(cfg, _AlwaysFailsClient(), db)
+    state = StateRepo(db)
+
+    # Below the threshold: the run fails and the cursor stays on page 1.
+    for _ in range(BACKFILL_SKIP_AFTER - 1):
+        with pytest.raises(MissionChiefError):
+            await svc.backfill_step()
+        assert await state.get(STATE_BACKFILL_NEXT_PAGE) in (None, "1")
+
+    # The threshold attempt skips page 1 so the walk can't wedge forever.
+    with pytest.raises(MissionChiefError):
+        await svc.backfill_step()
+    assert await state.get(STATE_BACKFILL_NEXT_PAGE) == "2"
+
+
+async def test_record_page_failure_resets_on_a_new_page(db):
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.backfill_guard import record_page_failure
+
+    state = StateRepo(db)
+    assert await record_page_failure(state, "k", 5) == 1
+    assert await record_page_failure(state, "k", 5) == 2
+    assert await record_page_failure(state, "k", 6) == 1  # new page resets
+
+
 async def _seed_roster(db, n):
     members = MembersRepo(db)
     run = await RunsRepo(db).start("members")
