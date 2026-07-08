@@ -104,17 +104,28 @@ automation:
     min_contribution_rate: 5.0
 
 geocoding:
-  # Address/place -> coordinates. Defaults to free OSM Nominatim (no key).
-  # Google Maps links never need a key (coords are read from the URL); this
-  # only affects looking up a plain address/place name.
+  # Turns a place name / address into coordinates. (Google Maps links never
+  # need this — the coordinates are read straight from the URL.)
   #
-  # To use your own quota, point base_url at a Nominatim-compatible provider
-  # and put the KEY in .env as GEOCODER_API_KEY (never here). Examples:
-  #   maps.co:    base_url: https://geocode.maps.co   api_key_param: api_key
-  #   LocationIQ: base_url: https://us1.locationiq.com/v1   api_key_param: key
-  base_url: https://nominatim.openstreetmap.org
+  # WHERE THE KEY GOES — this trips people up, so read it once:
+  #   * the API KEY goes ONLY in .env, as  GEOCODER_API_KEY=<your key>
+  #     (it is a secret; it is NEVER put in this file).
+  #   * here you only choose the PROVIDER (base_url) and the name of the query
+  #     parameter it expects the key in (api_key_param).
+  #
+  # This bot uses maps.co (free key, higher limits than Nominatim). Keep the
+  # two lines below AND set GEOCODER_API_KEY in .env — without the key maps.co
+  # returns HTTP 401.
+  base_url: https://geocode.maps.co
   api_key_param: api_key
-  # A real contact email is polite (and Nominatim's usage policy asks for it).
+  #
+  # Alternatives:
+  #   free OSM Nominatim (no key, ~1 req/s, stricter limits):
+  #     base_url: https://nominatim.openstreetmap.org
+  #   LocationIQ:
+  #     base_url: https://us1.locationiq.com/v1   api_key_param: key
+  #
+  # A real contact email is polite (Nominatim's usage policy asks for it).
   contact_email: ""
   # Minimum seconds between geocode requests (free tiers are ~1 req/s).
   min_interval_seconds: 1.1
