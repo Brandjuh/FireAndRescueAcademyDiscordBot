@@ -146,4 +146,6 @@ class ReportingCog(commands.Cog):
             return fired_at.weekday() == sched.weekday
         if sched.cadence == "monthly":
             return fired_at.day == sched.day
+        if sched.cadence == "yearly":
+            return fired_at.month == sched.month and fired_at.day == sched.day
         return False

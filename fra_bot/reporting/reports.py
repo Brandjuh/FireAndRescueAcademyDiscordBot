@@ -165,8 +165,8 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
         periods=("today", "week", "month", "prev-month"),
     ))
     registry.register(Report(
-        "credits", "Top earned-credit gainers", credits_report,
-        periods=("today", "week", "month"),
+        "credits", "Top earned-credit gainers (top earners)", credits_report,
+        periods=("today", "yesterday", "week", "month", "prev-month", "year", "prev-year"),
     ))
     registry.register(Report(
         "treasury", "Alliance funds and expenses", treasury_report,

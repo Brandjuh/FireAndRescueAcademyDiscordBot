@@ -123,27 +123,37 @@ reports:
   # Scheduled reports. Each entry renders a registered report to a channel
   # on the given cadence, shortly after the daily reset. Run `!fra report
   # list` in Discord to see the available report names and their periods.
-  #   report:     registered report name (e.g. members, treasury, income-daily)
-  #   period:     today | yesterday | week | month | prev-month | all
-  #   cadence:    daily | weekly | monthly
+  #   report:     registered report name (e.g. credits, members, treasury)
+  #   period:     today | yesterday | week | month | prev-month | year | prev-year | all
+  #   cadence:    daily | weekly | monthly | yearly
   #   channel_id: Discord channel to post in
   #   weekday:    for weekly cadence, 0=Monday … 6=Sunday
-  #   day:        for monthly cadence, day-of-month to fire on
+  #   day:        for monthly/yearly cadence, day-of-month to fire on
+  #   month:      for yearly cadence, month to fire in (1=January)
+  #
+  # Example below: daily/weekly/monthly/yearly top-10 EARNERS (credits earned
+  # in the period). Longer periods fill in as member snapshots accumulate.
   scheduled: []
-    # - report: income-daily
-    #   period: today
+    # - report: credits          # daily top earners
+    #   period: yesterday
     #   cadence: daily
-    #   channel_id: 123456789012345678
-    # - report: members
+    #   channel_id: 1524076847267053619
+    # - report: credits          # weekly top earners (posted Monday)
     #   period: week
     #   cadence: weekly
-    #   weekday: 0            # Monday
-    #   channel_id: 123456789012345678
-    # - report: treasury
+    #   weekday: 0
+    #   channel_id: 1524076847267053619
+    # - report: credits          # monthly top earners (posted on the 1st)
     #   period: prev-month
     #   cadence: monthly
     #   day: 1
-    #   channel_id: 123456789012345678
+    #   channel_id: 1524076847267053619
+    # - report: credits          # yearly top earners (posted Jan 1)
+    #   period: prev-year
+    #   cadence: yearly
+    #   month: 1
+    #   day: 1
+    #   channel_id: 1524076847267053619
 
 logging:
   level: INFO
