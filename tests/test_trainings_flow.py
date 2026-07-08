@@ -104,12 +104,13 @@ def _service(db, dry_run):
 
 
 class _GuideBoard:
-    """Records guide find/create/edit calls to test find-or-edit."""
+    """Records guide find/create/edit/delete calls to test find-or-edit."""
 
     def __init__(self, *, existing=None):
         self.existing = existing
         self.created: list[tuple[int, str]] = []
         self.edited: list[tuple[int, str]] = []
+        self.deleted: list[tuple[int, int]] = []
 
     async def find_bot_post(self, thread_id, marker, *, max_pages=None):
         return self.existing
@@ -120,6 +121,10 @@ class _GuideBoard:
 
     async def edit_post(self, post_id, content):
         self.edited.append((int(post_id), content))
+        return True
+
+    async def delete_post(self, thread_id, post_id):
+        self.deleted.append((int(thread_id), int(post_id)))
         return True
 
 
@@ -297,6 +302,34 @@ async def test_training_guide_content_has_availability_and_timestamp(db):
     assert "Last updated:" in desired
     # The fake academy (fire, id 4951748) has 2 free classrooms.
     assert "🚒 Fire: 2" in desired
+
+
+async def test_force_guide_creates_and_reports(db):
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    board = _GuideBoard(existing=None)
+    svc.board = board
+    line = await svc.force_guide()
+    assert line.startswith("✅") and "#77" in line
+    assert len(board.created) == 1 and board.deleted == []
+
+
+async def test_force_guide_repost_deletes_then_recreates(db):
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    board = _GuideBoard(existing=None)
+    svc.board = board
+    await svc.state.set(svc._guide_id_key(), "55")     # old guide, buried
+    line = await svc.force_guide(repost=True)
+    assert board.deleted == [(5935, 55)]               # old one removed
+    assert len(board.created) == 1                     # fresh one at the bottom
+    assert line.startswith("✅") and "#77" in line
+
+
+async def test_force_guide_reports_replies_off(db):
+    svc, _ = _service(db, dry_run=True)                # reply_to_board=False
+    line = await svc.force_guide()
+    assert "reply_to_board is off" in line
 
 
 async def test_training_guide_skips_availability_fetch_when_throttled(db):

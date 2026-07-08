@@ -195,3 +195,24 @@ def test_detect_building_type_osm_and_rejects():
     assert detect_building_type("Downtown Clinic", None, "hospital") == "hospital"
     # Inactive sites are refused even when named like one.
     assert detect_building_type("Old Prison Museum", None) is None
+
+
+async def test_edit_post_returns_false_when_post_is_gone():
+    """A stale guide id (post deleted from the board) must degrade to False —
+    ensure_guide_post then forgets the id and re-creates — never raise and
+    wedge guide maintenance forever."""
+    from fra_bot.mc.board import BoardClient
+    from fra_bot.mc.errors import FetchError
+
+    class GoneClient:
+        def url(self, path):
+            return path
+
+        async def fetch_page(self, path, *, referer=None):
+            raise FetchError(path, 404)
+
+        async def post_form(self, path, data, **kwargs):
+            raise AssertionError("must not POST when the edit page is gone")
+
+    board = BoardClient(GoneClient())
+    assert await board.edit_post(12345, "new text") is False

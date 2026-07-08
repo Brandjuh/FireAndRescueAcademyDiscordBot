@@ -163,7 +163,7 @@ def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", alliance_json="[]"
     )
     svc._auto = SimpleNamespace(
         daily_build_enabled=enabled, min_alliance_funds=min_funds,
-        daily_build_time="03:00",
+        daily_build_time="03:00", thread_id=15304,
     )
     svc.client = FakeClient(funds=funds, api_json=api_json, alliance_json=alliance_json)
     svc.state = StateRepo(db)
@@ -173,6 +173,35 @@ def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", alliance_json="[]"
     svc._builder = FakeBuilder()
     svc._rng = random.Random(seed)
     return svc
+
+
+async def test_buildings_board_guide_defined_and_posts(db):
+    from fra_bot.services.buildings import GUIDE_MARKER, BuildingsService, _building_guide
+
+    assert BuildingsService.guide_marker == GUIDE_MARKER
+    text = _building_guide(2_000_000)
+    assert text.startswith(GUIDE_MARKER)
+    assert "Google Maps" in text and "2,000,000" in text
+
+    class _GuideBoard:
+        def __init__(self):
+            self.created = []
+
+        async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+            return None
+
+        async def create_post_get_id(self, thread_id, content):
+            self.created.append((int(thread_id), content))
+            return 88
+
+    svc = _svc(db)
+    svc.cfg.automation.reply_to_board = True
+    svc.board = _GuideBoard()
+    line = await svc.force_guide()
+    assert line.startswith("✅") and "#88" in line
+    assert svc.board.created[0][0] == 15304
+    assert svc.board.created[0][1].startswith(GUIDE_MARKER)
+    assert "Last updated:" in svc.board.created[0][1]
 
 
 async def test_daily_build_disabled_is_noop(db):

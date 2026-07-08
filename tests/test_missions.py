@@ -838,6 +838,19 @@ async def test_ensure_guide_reedits_when_text_changes(db):
     assert board.edited and board.edited[-1][0] == 55
 
 
+async def test_force_guide_missions_creates_and_reports(db):
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    board = GuideBoard(existing=None)
+    sched.board = board
+    line = await sched.force_guide(15307, "large")
+    assert line.startswith("✅") and "#55" in line
+    assert len(board.created) == 1
+    # A second force bypasses the throttle and edits the stored post.
+    line = await sched.force_guide(15307, "large")
+    assert line.startswith("✅")
+    assert board.edited and board.edited[-1][0] == 55
+
+
 async def test_ensure_guide_suppressed_when_replies_off(db):
     cfg = _cfg(dry_run=True)
     cfg.automation.reply_to_board = False

@@ -129,8 +129,37 @@ def detect_building_type(
     return None
 
 
+GUIDE_MARKER = "[FRA] 📋 How to request a BUILDING"
+
+
+def _building_guide(min_funds: int) -> str:
+    """The how-to-request post for the building board. Starts with
+    :data:`GUIDE_MARKER` so it's never re-parsed as a request; the base
+    appends a "last updated" line."""
+    return "\n".join([
+        GUIDE_MARKER,
+        "",
+        "[b]How to request[/b]",
+        "Post a Google Maps link to a REAL hospital or prison, on its own line.",
+        "I work out which it is from the pin and build it for the alliance.",
+        "",
+        "[b]Copy an example and change the link[/b]",
+        "https://maps.app.goo.gl/xxxxx",
+        "https://www.google.com/maps/place/…",
+        "",
+        "[b]Good to know[/b]",
+        "- Only hospitals and prisons are built automatically.",
+        "- The pin must be an actual hospital or prison — clinics, doctors,",
+        "  police stations, courthouses and museums are refused.",
+        f"- Nothing is built while alliance funds are below {min_funds:,} "
+        "credits; the request waits until funds recover.",
+        "- One link per post.",
+    ])
+
+
 class BuildingsService(BoardRequestService):
     kind = "building"
+    guide_marker = GUIDE_MARKER
 
     def __init__(
         self,
@@ -151,6 +180,9 @@ class BuildingsService(BoardRequestService):
     @property
     def thread_id(self) -> int:
         return self._auto.thread_id
+
+    def guide_body(self) -> str:
+        return _building_guide(self._auto.min_alliance_funds)
 
     def _playwright_cookies(self) -> list[dict]:
         cookies = []
