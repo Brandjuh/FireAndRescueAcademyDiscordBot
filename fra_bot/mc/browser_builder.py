@@ -7,7 +7,10 @@ page rather than reverse-engineering the POST. The flow mirrors a human:
    is revealed by the page's own change handler;
 2. set the name and **move the map marker**, which is what fills the
    hidden lat/lng and reverse-geocodes the read-only address (just writing
-   the hidden fields leaves the address blank — the known gotcha);
+   the hidden fields leaves the address blank — the known gotcha). If the
+   game returns no address for the pin (an unmappable spot), the build is
+   **refused** with that reason rather than creating an addressless
+   building — locations are worldwide, so this is the real failure signal;
 3. click the type's **"Build as Alliance Building"** button, whose jQuery
    handler sets ``build_as_alliance=1`` and submits. Coins are never
    spent: ``build_with_coins`` stays 0 and a coin-labelled button is
@@ -231,19 +234,33 @@ class BrowserBuilder:
                 if not res.get("ok"):
                     return BuildResult(False, None, res.get("error", "could not set position"))
 
-                # Best-effort: wait for the reverse-geocoded address to land.
+                # Wait for the game's own pin->address lookup (/reverse_address)
+                # to land. Speed isn't a concern, so give worldwide locations a
+                # fair chance before deciding it can't be resolved.
                 try:
                     await page.wait_for_function(
                         "() => { const a = document.querySelector('#building_address');"
-                        " return a && a.value && a.value.length > 0; }",
-                        timeout=8000,
+                        " return a && a.value && a.value.trim().length > 0; }",
+                        timeout=15000,
                     )
-                except Exception:  # noqa: BLE001 - address is optional; proceed
+                except Exception:  # noqa: BLE001 - handled by the empty check below
                     pass
-                resolved_address = await page.evaluate(
+                resolved_address = (await page.evaluate(
                     "() => { const a = document.querySelector('#building_address');"
                     " return a ? a.value : ''; }"
-                )
+                ) or "").strip()
+
+                # No address means MissionChief couldn't place this pin (an
+                # unresolvable spot). Refuse and say so, rather than build an
+                # addressless building.
+                if not resolved_address:
+                    return BuildResult(
+                        False, None,
+                        f"MissionChief couldn't resolve an address for "
+                        f"{latitude:.5f},{longitude:.5f}, so nothing was built. "
+                        "The pin may be in an unmappable spot (open water, "
+                        "no nearby road) — try a pin closer to the building.",
+                    )
 
                 # 3. Free-only guard: the alliance button must not spend coins.
                 info = await page.evaluate(_ALLIANCE_BTN_INFO_SCRIPT, type_id)
@@ -257,8 +274,7 @@ class BrowserBuilder:
                     # Everything is set up correctly; stop short of submitting.
                     return BuildResult(
                         True, None,
-                        f"dry-run OK — would click '{label}'; "
-                        f"map address resolved to '{resolved_address or '(empty)'}'",
+                        f"dry-run OK — would click '{label}'; address '{resolved_address}'",
                     )
 
                 building_id = None
