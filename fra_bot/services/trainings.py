@@ -12,7 +12,6 @@ signup window, mirroring the alliance's existing policy.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 
@@ -68,19 +67,19 @@ class TrainingsService(BoardRequestService):
     def guide_body(self) -> str:
         return _training_guide(self._auto.min_contribution_rate)
 
-    async def guide_content(self, now_epoch: float) -> tuple[str, str] | None:
+    async def guide_content(self, now_epoch: float) -> str:
         """Static guide + a live "free classrooms per academy type" block +
-        the last-updated line. Only the static part feeds the signature, so
-        availability refreshes on the throttle (hourly), not every poll."""
+        the last-updated line. Expensive (walks the academy pages) — the base
+        only invokes this once the guide throttle has decided to write, never
+        on the quiet polls in between."""
         from ..mc.board import guide_updated_line
 
-        static = self.guide_body()
-        signature = hashlib.sha1(static.encode("utf-8")).hexdigest()[:12]
         availability = await self._collect_availability()
-        desired = "\n".join(
-            [static, "", _availability_block(availability), "", guide_updated_line(now_epoch)]
-        )
-        return desired, signature
+        return "\n".join([
+            self.guide_body(), "",
+            _availability_block(availability), "",
+            guide_updated_line(now_epoch),
+        ])
 
     async def _collect_availability(self) -> dict[str, int] | None:
         """Free classrooms per discipline across all alliance academies.

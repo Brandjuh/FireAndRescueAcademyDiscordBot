@@ -91,18 +91,13 @@ class BoardRequestService:
         (e.g. availability) override :meth:`guide_content` instead."""
         return None
 
-    async def guide_content(self, now_epoch: float) -> tuple[str, str] | None:
-        """Return ``(full_post_text, stable_signature)`` or ``None`` to skip.
-
-        The signature covers only the stable instructions, so live bits (the
-        "last updated" line, availability) can refresh on the throttle without
-        counting as a content change. Default: the static ``guide_body`` plus a
-        last-updated line."""
-        body = self.guide_body()
-        if not body:
-            return None
-        signature = hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
-        return f"{body}\n\n{guide_updated_line(now_epoch)}", signature
+    async def guide_content(self, now_epoch: float) -> str:
+        """The FULL guide post: stable body plus volatile bits (timestamp,
+        availability, …). May be expensive — it is only invoked once the
+        throttle in :func:`ensure_guide_post` has decided a write will happen,
+        never on the quiet polls in between. The refresh throttle keys off the
+        stable ``guide_body`` alone."""
+        return f"{self.guide_body()}\n\n{guide_updated_line(now_epoch)}"
 
     async def parse_request(self, post: BoardPost) -> dict | None:
         """Decide if *post* is a request of our kind. NO side effects.
@@ -143,18 +138,22 @@ class BoardRequestService:
         freshen the "last updated" line and any live sections)."""
         if not self.cfg.automation.reply_to_board or not self.guide_marker:
             return
-        now = guide_now()
-        content = await self.guide_content(now)
-        if content is None:
+        body = self.guide_body()
+        if not body:
             return
-        desired, signature = content
+        # The throttle keys off the cheap stable text; the full post (which
+        # may need many rate-limited fetches, e.g. classroom availability) is
+        # only built lazily when a write is actually going to happen.
+        signature = hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
+        now = guide_now()
         try:
             await ensure_guide_post(
                 self.board, self.state, self.thread_id,
                 id_key=self._guide_id_key(), hash_key=self._guide_hash_key(),
                 refreshed_key=self._guide_refreshed_key(),
-                marker=self.guide_marker, desired=desired, signature=signature,
-                now_epoch=now,
+                marker=self.guide_marker,
+                desired=lambda: self.guide_content(now),
+                signature=signature, now_epoch=now,
             )
         except MissionChiefError as exc:
             log.warning(
