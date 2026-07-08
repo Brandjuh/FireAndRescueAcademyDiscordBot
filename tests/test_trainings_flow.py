@@ -76,7 +76,7 @@ ACADEMY_PAGE = (
 def _service(db, dry_run):
     svc = TrainingsService.__new__(TrainingsService)
     # minimal init without the real client wiring
-    from fra_bot.db.repos import BoardRepo, MembersRepo, RunsRepo
+    from fra_bot.db.repos import BoardRepo, MembersRepo, RunsRepo, StateRepo
     from fra_bot.mc.board import BoardClient
 
     cfg = _cfg(dry_run)
@@ -91,8 +91,29 @@ def _service(db, dry_run):
     svc.requests = AutomationRepo(db)
     svc.members = MembersRepo(db)
     svc.runs = RunsRepo(db)
+    svc.state = StateRepo(db)
     svc._auto = cfg.automation.training
     return svc, client
+
+
+class _GuideBoard:
+    """Records guide find/create/edit calls to test find-or-edit."""
+
+    def __init__(self, *, existing=None):
+        self.existing = existing
+        self.created: list[tuple[int, str]] = []
+        self.edited: list[tuple[int, str]] = []
+
+    async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+        return self.existing
+
+    async def create_post_get_id(self, thread_id, content):
+        self.created.append((int(thread_id), content))
+        return 77
+
+    async def edit_post(self, post_id, content):
+        self.edited.append((int(post_id), content))
+        return True
 
 
 async def test_parse_request_detects_training(db):
@@ -165,3 +186,40 @@ async def test_execute_live_posts_education_form(db):
     assert client.posts[0][0] == "/buildings/4951748/education"
     row = await repo.get(rid)
     assert row["status"] == "done"
+
+
+# -- board guide: find-or-edit, never duplicate -----------------------------
+
+async def test_training_guide_created_then_skipped(db):
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    board = _GuideBoard(existing=None)
+    svc.board = board
+    await svc._ensure_guide()
+    assert len(board.created) == 1                     # first time: created once
+    assert board.created[0][1].startswith("[FRA] 📋 How to request a TRAINING")
+    assert "HazMat" in board.created[0][1]             # lists the catalog
+    assert await svc.state.get(svc._guide_id_key()) == "77"
+    # Same content next poll: no duplicate, no needless edit.
+    await svc._ensure_guide()
+    assert len(board.created) == 1
+    assert board.edited == []
+
+
+async def test_training_guide_edits_existing_instead_of_duplicating(db):
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    board = _GuideBoard(existing=91)                   # a guide already on the board
+    svc.board = board
+    await svc._ensure_guide()
+    assert board.created == []                         # found it -> edit, never create
+    assert board.edited and board.edited[0][0] == 91
+    assert await svc.state.get(svc._guide_id_key()) == "91"
+
+
+async def test_training_guide_suppressed_when_replies_off(db):
+    svc, _ = _service(db, dry_run=True)                # cfg default: reply_to_board=False
+    board = _GuideBoard(existing=None)
+    svc.board = board
+    await svc._ensure_guide()
+    assert board.created == [] and board.edited == []

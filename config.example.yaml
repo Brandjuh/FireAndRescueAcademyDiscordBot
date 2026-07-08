@@ -67,10 +67,12 @@ automation:
     thread_id: 5935           # /alliance_threads/<id> with training requests
     interval: 5               # poll interval in minutes
     min_contribution_rate: 5.0
-    # Preferred academy building ids per discipline (checked first).
-    preferred_academies:
-      fire: 4951748
-      police: 4951746
+    # OPTIONAL. The bot already finds every academy of the right discipline
+    # from the alliance building list and, if one has no free classroom, moves
+    # on to the next — you do NOT need to list academies here. This is only a
+    # hint to try a specific building first (and a fallback if the building
+    # list can't be read). Leave it empty ({}) to let the bot pick any.
+    preferred_academies: {}
   building:
     enabled: false            # master switch for hospital/prison builds
     thread_id: 6165

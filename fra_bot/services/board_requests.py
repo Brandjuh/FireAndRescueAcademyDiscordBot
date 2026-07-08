@@ -28,8 +28,8 @@ import aiosqlite
 
 from ..config import Config
 from ..db.database import Database
-from ..db.repos import AutomationRepo, BoardRepo, MembersRepo, RunsRepo
-from ..mc.board import REPLY_MARKER, BoardClient
+from ..db.repos import AutomationRepo, BoardRepo, MembersRepo, RunsRepo, StateRepo
+from ..mc.board import REPLY_MARKER, BoardClient, ensure_guide_post
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.board import BoardPost
@@ -53,12 +53,22 @@ class BoardRequestService:
         self.requests = AutomationRepo(db)
         self.members = MembersRepo(db)
         self.runs = RunsRepo(db)
+        self.state = StateRepo(db)
 
     # -- to be provided by subclasses -----------------------------------
 
     @property
     def thread_id(self) -> int:
         raise NotImplementedError
+
+    #: First line marker of this service's how-to-request guide post. Leave
+    #: ``None`` to disable guide maintenance for the service.
+    guide_marker: str | None = None
+
+    def guide_body(self) -> str | None:
+        """The full how-to-request guide text (first line starts with
+        :attr:`guide_marker`). Return ``None`` to skip posting a guide."""
+        return None
 
     async def parse_request(self, post: BoardPost) -> dict | None:
         """Decide if *post* is a request of our kind. NO side effects.
@@ -82,9 +92,37 @@ class BoardRequestService:
     def dry_run(self) -> bool:
         return self.cfg.automation.dry_run
 
+    def _guide_id_key(self) -> str:
+        return f"board_guide_id:{self.kind}:{self.thread_id}"
+
+    def _guide_hash_key(self) -> str:
+        return f"board_guide_hash:{self.kind}:{self.thread_id}"
+
+    async def _ensure_guide(self) -> None:
+        """Maintain this board's how-to-request guide (find-or-edit, never
+        duplicate). Gated only by ``reply_to_board`` — a guide is an
+        informational forum post, so it's kept current even in dry-run."""
+        if not self.cfg.automation.reply_to_board or not self.guide_marker:
+            return
+        desired = self.guide_body()
+        if not desired:
+            return
+        try:
+            await ensure_guide_post(
+                self.board, self.state, self.thread_id,
+                id_key=self._guide_id_key(), hash_key=self._guide_hash_key(),
+                marker=self.guide_marker, desired=desired,
+            )
+        except MissionChiefError as exc:
+            log.warning(
+                "%s: could not maintain guide on %s: %s",
+                self.kind, self.thread_id, exc,
+            )
+
     async def poll(self) -> None:
         run_id = await self.runs.start(f"board_{self.kind}")
         try:
+            await self._ensure_guide()
             last_seen = await self.board_repo.last_seen_post_id(self.thread_id)
             baseline = last_seen is None
             page, fresh_posts = await self.board.fetch_new_posts(
