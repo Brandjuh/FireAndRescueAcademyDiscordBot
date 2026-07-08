@@ -1,15 +1,22 @@
 """Build alliance buildings via Playwright browser emulation.
 
-MissionChief's ``/buildings/new`` form is JS-driven (the building-type
-<select> fires scripts, the map marker is set programmatically, and the
-correct "Build as alliance building (credits)" submit button is chosen
-by live DOM context). Reverse-engineering the exact Rails POST is
-fragile, so we drive the real form — exactly what the reference cog did.
+MissionChief's ``/buildings/new`` form is JS-driven, so we drive the real
+page rather than reverse-engineering the POST. The flow mirrors a human:
 
-Playwright is an OPTIONAL dependency. If it isn't installed, this module
-raises :class:`BrowserUnavailable` and the building service degrades to
-reporting the resolved location for a human to build manually. That
-keeps the bot working on a minimal Raspberry Pi install.
+1. pick the building type — its ``#detail_<id>`` block (with the buttons)
+   is revealed by the page's own change handler;
+2. set the name and **move the map marker**, which is what fills the
+   hidden lat/lng and reverse-geocodes the read-only address (just writing
+   the hidden fields leaves the address blank — the known gotcha);
+3. click the type's **"Build as Alliance Building"** button, whose jQuery
+   handler sets ``build_as_alliance=1`` and submits. Coins are never
+   spent: ``build_with_coins`` stays 0 and a coin-labelled button is
+   refused.
+
+Playwright is an OPTIONAL dependency. Without it this module raises
+:class:`BrowserUnavailable` and the building service degrades to reporting
+the resolved location for a human to build manually, keeping the bot
+working on a minimal Raspberry Pi install.
 """
 
 from __future__ import annotations
@@ -22,61 +29,70 @@ log = logging.getLogger(__name__)
 BUILDING_TYPE_IDS = {"hospital": "2", "prison": "10"}
 NAME_LIMIT = 40
 
-# Fill the form but do NOT submit; return the index of the alliance
-# credits submit button.
-_PREPARE_SCRIPT = """
-(config) => {
-    const form = document.querySelector('#new_building')
-        || document.querySelector('form[action*="/buildings"]');
-    if (!form) return {ok: false, error: 'building form not found'};
-
-    const setSelect = (name, value) => {
-        const el = form.querySelector(`[name="${name}"]`);
-        if (!el) return false;
-        el.value = value;
-        el.dispatchEvent(new Event('input', {bubbles: true}));
-        el.dispatchEvent(new Event('change', {bubbles: true}));
-        return el.value === value;
-    };
-    const setValue = (name, value) => {
-        const el = form.querySelector(`[name="${name}"]`);
-        if (el) { el.value = value; el.dispatchEvent(new Event('input', {bubbles: true})); }
-    };
-
-    if (!setSelect('building[building_type]', config.typeId))
-        return {ok: false, error: 'could not set building type'};
-    setValue('building[name]', config.name);
-    setValue('building[latitude]', config.lat);
-    setValue('building[longitude]', config.lng);
-    setValue('building[address]', config.address || '');
-    const coins = form.querySelector('[name="build_with_coins"]');
-    if (coins) coins.value = '0';
-    const asAlliance = form.querySelector('[name="build_as_alliance"]');
-    if (asAlliance) asAlliance.value = '1';
-
-    const buttons = Array.from(form.querySelectorAll('button, input[type=submit]'));
-    let index = -1;
-    buttons.forEach((btn, i) => {
-        const text = (btn.innerText || btn.value || '').toLowerCase();
-        const context = (btn.closest('div, form') || {}).innerText || '';
-        const allianceCtx = context.toLowerCase().includes('alliance');
-        const visible = btn.offsetParent !== null && !btn.disabled;
-        if (index === -1 && visible && text.includes('build')
-            && text.includes('credit') && !text.includes('coin')) {
-            index = i;
-        }
-    });
-    return {ok: index >= 0, index, error: index >= 0 ? null : 'alliance submit button not found'};
+# 1. Select the building type — dispatches 'change', which the page's own
+#    JS uses to reveal that type's #detail_<id> block (with its buttons).
+_SELECT_TYPE_SCRIPT = """
+(typeId) => {
+    const sel = document.querySelector('#building_building_type');
+    if (!sel) return {ok: false, error: 'building type select not found'};
+    sel.value = String(typeId);
+    sel.dispatchEvent(new Event('change', {bubbles: true}));
+    return {ok: sel.value === String(typeId),
+            error: sel.value === String(typeId) ? null : 'type option not available'};
 }
 """
 
-_CLICK_SCRIPT = """
-(index) => {
-    const form = document.querySelector('#new_building')
-        || document.querySelector('form[action*="/buildings"]');
-    const buttons = Array.from(form.querySelectorAll('button, input[type=submit]'));
-    buttons[index].click();
-    return true;
+# 2. Set the name and drive the map marker to the target, exactly like a
+#    real pin drop: the page fills the hidden lat/lng and reverse-geocodes
+#    the (readonly) address via /reverse_address. Just writing the hidden
+#    fields isn't enough — that was the address problem.
+_SET_POSITION_SCRIPT = """
+(cfg) => {
+    const nameEl = document.querySelector('[name="building[name]"]');
+    if (nameEl) nameEl.value = cfg.name;
+    const coins = document.querySelector('#build_with_coins');
+    if (coins) coins.value = '0';
+    try {
+        if (typeof building_new_marker !== 'undefined' && building_new_marker) {
+            if (typeof building_new_marker.setLatLng === 'function') {        // Leaflet
+                building_new_marker.setLatLng([cfg.lat, cfg.lng]);
+            } else if (typeof mapkit !== 'undefined') {                       // Apple MapKit
+                building_new_marker.coordinate = new mapkit.Coordinate(cfg.lat, cfg.lng);
+            }
+        }
+        const latEl = document.querySelector('#building_latitude');
+        const lngEl = document.querySelector('#building_longitude');
+        if (latEl) latEl.value = cfg.lat;
+        if (lngEl) lngEl.value = cfg.lng;
+        if (typeof updateAddress === 'function') updateAddress();  // fills the address
+        return {ok: !!(latEl && lngEl), error: (latEl && lngEl) ? null : 'lat/lng fields not found'};
+    } catch (e) {
+        return {ok: false, error: String(e)};
+    }
+}
+"""
+
+# 3a. Inspect the alliance build button for this type WITHOUT clicking, so
+#     we can enforce the free-only (no-coins) guard before submitting.
+_ALLIANCE_BTN_INFO_SCRIPT = """
+(typeId) => {
+    const detail = document.querySelector('#detail_' + typeId);
+    if (!detail) return {found: false, error: 'no build detail for this type'};
+    const btn = detail.querySelector('.alliance_activate');
+    if (!btn) return {found: false, error: 'no "Build as Alliance Building" button'};
+    return {found: true, label: (btn.value || btn.innerText || '').trim()};
+}
+"""
+
+# 3b. Click it. The page's jQuery handler sets build_as_alliance=1 and the
+#     button (type=submit) posts the form.
+_CLICK_ALLIANCE_SCRIPT = """
+(typeId) => {
+    const detail = document.querySelector('#detail_' + typeId);
+    const btn = detail && detail.querySelector('.alliance_activate');
+    if (!btn) return {ok: false, error: 'alliance button vanished'};
+    btn.click();
+    return {ok: true};
 }
 """
 
@@ -180,9 +196,8 @@ class BrowserBuilder:
         config = {
             "typeId": type_id,
             "name": _clean_name(name, building_type),
-            "lat": f"{latitude:.7f}",
-            "lng": f"{longitude:.7f}",
-            "address": address or "",
+            "lat": float(latitude),
+            "lng": float(longitude),
         }
         cookies = self._cookie_provider()
 
@@ -201,18 +216,43 @@ class BrowserBuilder:
                 if await page.query_selector("input[type='password']") is not None:
                     return BuildResult(False, None, "MissionChief session is not logged in")
 
-                prepared = await page.evaluate(_PREPARE_SCRIPT, config)
-                if not prepared.get("ok"):
-                    return BuildResult(False, None, prepared.get("error", "form prep failed"))
+                # 1. Building type (reveals its #detail_<id> block).
+                res = await page.evaluate(_SELECT_TYPE_SCRIPT, type_id)
+                if not res.get("ok"):
+                    return BuildResult(False, None, res.get("error", "could not select type"))
+
+                # 2. Name + pin position (drives the map so the address fills).
+                res = await page.evaluate(_SET_POSITION_SCRIPT, config)
+                if not res.get("ok"):
+                    return BuildResult(False, None, res.get("error", "could not set position"))
+
+                # Best-effort: wait for the reverse-geocoded address to land.
+                try:
+                    await page.wait_for_function(
+                        "() => { const a = document.querySelector('#building_address');"
+                        " return a && a.value && a.value.length > 0; }",
+                        timeout=8000,
+                    )
+                except Exception:  # noqa: BLE001 - address is optional; proceed
+                    pass
+
+                # 3. Free-only guard: the alliance button must not spend coins.
+                info = await page.evaluate(_ALLIANCE_BTN_INFO_SCRIPT, type_id)
+                if not info.get("found"):
+                    return BuildResult(False, None, info.get("error", "no alliance build button"))
+                if "coin" in (info.get("label") or "").lower():
+                    return BuildResult(False, None, "refusing to build: button would spend coins")
 
                 building_id = None
                 try:
                     async with page.expect_response(
                         lambda r: "/buildings" in r.url and r.request.method == "POST",
                         timeout=30000,
-                    ) as info:
-                        await page.evaluate(_CLICK_SCRIPT, prepared["index"])
-                    response = await info.value
+                    ) as resp_info:
+                        clicked = await page.evaluate(_CLICK_ALLIANCE_SCRIPT, type_id)
+                        if not clicked.get("ok"):
+                            return BuildResult(False, None, clicked.get("error", "click failed"))
+                    response = await resp_info.value
                     import re
 
                     match = re.search(r"/buildings/(\d+)", response.url) or re.search(
