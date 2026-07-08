@@ -41,6 +41,28 @@ async def test_state_repo_roundtrip(db):
     assert await state.get("k") is None
 
 
+async def test_applications_received_counts_accepted_and_denied(db):
+    logs = LogsRepo(db)
+    now = "2026-07-07T12:00:00+00:00"
+    for sig, action in (
+        ("a1", "added_to_alliance"),
+        ("a2", "added_to_alliance"),
+        ("d1", "application_denied"),
+        ("c1", "contributed_to_alliance"),  # not an application outcome
+        ("l1", "left_alliance"),
+    ):
+        await db.execute(
+            "INSERT INTO alliance_logs (signature, occurrence_index, raw_timestamp, "
+            "action_key, description, scraped_at) VALUES (?, 1, ?, ?, ?, ?)",
+            (sig, now, action, "x", now),
+        )
+    result = await logs.applications_received()
+    assert result.get("added_to_alliance") == 2
+    assert result.get("application_denied") == 1
+    assert "contributed_to_alliance" not in result
+    assert "left_alliance" not in result
+
+
 def _member(mc_id, name, role="Member", credits=100, rate=5.0):
     return {
         "mc_user_id": mc_id,

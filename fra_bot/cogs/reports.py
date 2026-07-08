@@ -1,7 +1,7 @@
 """Income reports: daily and monthly top-10 contributors.
 
 MissionChief resets the income lists at midnight America/New_York. The
-treasury sync captures a final snapshot at 23:52 NY, keyed by NY game
+treasury sync captures a final snapshot at 23:55 NY, keyed by NY game
 day / month, so shortly after midnight this cog reads the *completed*
 period's snapshot — the reset race of the old bot cannot occur because
 post-reset scrapes land under the NEW period key.
