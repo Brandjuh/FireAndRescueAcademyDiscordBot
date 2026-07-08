@@ -212,6 +212,7 @@ Requires Discord administrator permission or a role listed in
 |---|---|
 | `!fra status` | Data counts, backfill progress, circuit breaker, recent sync runs |
 | `!fra sync <members\|applications\|logs\|treasury\|expenses\|backfill>` | Run a sync now |
+| `!fra synccommands [global]` | Re-sync the slash commands with Discord (guild by default; rate-limited to once/10 min) |
 | `!fra balance` | Latest known alliance funds |
 | `!fra top10 [daily\|monthly]` | Current income top-10 |
 | `!fra report list` | List every registered report and its periods |

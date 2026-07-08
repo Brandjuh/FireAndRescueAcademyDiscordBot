@@ -216,6 +216,47 @@ class AdminCog(commands.Cog):
                 self.bot.presence.mark_done(job_name)
         await message.edit(content=f"✅ `{scraper}` sync finished.")
 
+    @fra.command(name="synccommands", aliases=["syncslash", "synccmds"])
+    @commands.cooldown(1, 600, commands.BucketType.guild)
+    async def sync_commands(self, ctx: commands.Context, scope: str = "guild") -> None:
+        """Re-sync the slash (application) commands with Discord.
+
+        The bot already syncs on startup, so after `!fra update` the new
+        commands appear on their own. Use this only when Discord is still
+        showing a stale command (e.g. old parameters).
+
+        `!fra synccommands` — sync to this guild (appears within seconds).
+        `!fra synccommands global` — sync globally (can take up to ~1 hour).
+
+        Rate-limited to once per 10 minutes: Discord throttles command syncs
+        hard, so it must not be run repeatedly.
+        """
+        scope = scope.lower().strip()
+        tree = self.bot.tree
+        try:
+            if scope == "global":
+                synced = await tree.sync()
+                where = "globally (can take up to ~1h to appear)"
+            else:
+                guild_id = self.bot.cfg.discord.guild_id
+                if not guild_id:
+                    ctx.command.reset_cooldown(ctx)
+                    await ctx.send(
+                        "No `discord.guild_id` configured — use "
+                        "`!fra synccommands global` instead."
+                    )
+                    return
+                guild = discord.Object(id=guild_id)
+                tree.copy_global_to(guild=guild)
+                synced = await tree.sync(guild=guild)
+                where = f"to guild `{guild_id}` (appears within seconds)"
+        except discord.HTTPException as exc:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send(f"❌ Command sync failed: {exc}")
+            return
+        names = ", ".join(sorted(c.name for c in synced)) or "none"
+        await ctx.send(f"✅ Synced {len(synced)} command(s) {where}.\nCommands: {names}")
+
     @fra.command(name="balance")
     async def balance(self, ctx: commands.Context) -> None:
         """Latest known alliance funds."""
