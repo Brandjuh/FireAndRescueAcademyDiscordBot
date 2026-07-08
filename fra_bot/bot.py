@@ -18,6 +18,7 @@ from .geo.geocoder import Geocoder
 from .presence import PresenceManager
 from .mc.client import MissionChiefClient
 from .services.applications_sync import ApplicationsSyncService
+from .services.board_cleanup import BoardCleanupService
 from .services.buildings import BuildingsService
 from .services.events import EventsService
 from .services.logs_sync import LogsSyncService
@@ -33,6 +34,8 @@ log = logging.getLogger(__name__)
 # under this), and the sweep runs every STALE_SWEEP_INTERVAL_MINUTES.
 STALE_PROCESSING_MINUTES = 15
 STALE_SWEEP_INTERVAL_MINUTES = 5
+# The 12h board tidy-up checks for due deletions this often (live mode only).
+BOARD_CLEANUP_INTERVAL_MINUTES = 10
 
 
 class FRABot(commands.Bot):
@@ -91,6 +94,8 @@ class FRABot(commands.Bot):
         self.missions_service = MissionScheduler(
             cfg, self.mc, self.db, self.geocoder, start_lock=self._large_mission_lock
         )
+        # The 12h board tidy-up: removes handled request posts (live only).
+        self.board_cleanup = BoardCleanupService(cfg, self.mc, self.db)
 
         self._jobs_started = False
 
@@ -318,6 +323,16 @@ class FRABot(commands.Bot):
             name="stale-sweep",
             initial_delay_seconds=120.0,
         )
+        # The 12h board tidy-up: delete handled request posts. Destructive and
+        # board-facing, so live mode only — in dry-run the other bot owns the
+        # board and nothing is ever scheduled for deletion anyway.
+        if not automation.dry_run:
+            sched.add_interval_job(
+                self._guarded(self.board_cleanup.sweep, "board-cleanup"),
+                minutes=BOARD_CLEANUP_INTERVAL_MINUTES,
+                name="board-cleanup",
+                initial_delay_seconds=330.0,
+            )
         log.info(
             "Background jobs scheduled (automation: dry_run=%s, training=%s, "
             "building=%s, events=%s, mission=%s)",

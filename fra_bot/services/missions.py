@@ -31,7 +31,14 @@ import aiosqlite
 
 from ..config import Config
 from ..db.database import Database, utcnow_iso
-from ..db.repos import MembersRepo, MissionsRepo, RotationRepo, RunsRepo, StateRepo
+from ..db.repos import (
+    BoardDeletionRepo,
+    MembersRepo,
+    MissionsRepo,
+    RotationRepo,
+    RunsRepo,
+    StateRepo,
+)
 from ..geo.geocoder import GeocodeError, Geocoder
 from ..geo.maps_links import find_maps_links
 from ..mc.board import REPLY_MARKER, BoardClient, ensure_guide_post
@@ -58,8 +65,12 @@ from ..mc.parsers.mission_spec import (
     MissionSpecError,
     parse_board_request,
 )
+from .board_cleanup import deletion_due_at
 
 log = logging.getLogger(__name__)
+
+# A board request is done with the board once it reaches one of these.
+_TERMINAL_STATUSES = frozenset({"done", "failed", "skipped"})
 
 # Give up on a mission after this many transient-error retries (condition
 # waits for the cooldown don't count).
@@ -97,6 +108,7 @@ class MissionScheduler:
         self.members = MembersRepo(db)
         self.runs = RunsRepo(db)
         self.state = StateRepo(db)
+        self.deletions = BoardDeletionRepo(db)
         self.board = BoardClient(client)
         self._auto = cfg.automation.mission
         # Shared with EventsService: both start large missions on the same
@@ -357,6 +369,7 @@ class MissionScheduler:
                         mission["id"], "failed",
                         f"gave up after {mission['attempts']} failed attempts",
                     )
+                    await self._schedule_cleanup(mission["id"])
                 continue
             if not await self.missions.claim(mission["id"]):
                 continue  # another poll won the claim
@@ -376,8 +389,28 @@ class MissionScheduler:
                     await self.missions.set_status(
                         mission["id"], "failed", "internal error while processing",
                     )
+            await self._schedule_cleanup(mission["id"])
             return 1
         return 0
+
+    async def _schedule_cleanup(self, mission_id: int) -> None:
+        """When a board request is done with (terminal state), queue its
+        original post for the 12h board tidy-up — live mode only."""
+        if self.dry_run:
+            return
+        mission = await self.missions.get(mission_id)
+        if mission is None or mission["source"] != "board":
+            return
+        if mission["status"] not in _TERMINAL_STATUSES:
+            return
+        thread_id = mission["board_thread_id"]
+        post_id = mission["board_post_id"]
+        if not thread_id or not post_id:
+            return
+        await self.deletions.schedule(
+            int(thread_id), int(post_id),
+            due_at=deletion_due_at(), reason="handled mission request",
+        )
 
     async def _execute(self, mission: aiosqlite.Row, *, announce: bool) -> None:
         requester = mission["requester_name"] or "member"

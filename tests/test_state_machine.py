@@ -123,10 +123,17 @@ class _CapService:
     kind = "event"
 
     def __init__(self, db):
+        from types import SimpleNamespace
+
+        from fra_bot.db.repos import BoardDeletionRepo
         from fra_bot.services.board_requests import BoardRequestService
         self._svc = BoardRequestService.__new__(BoardRequestService)
         self._svc.kind = "event"
         self._svc.requests = AutomationRepo(db)
+        self._svc.deletions = BoardDeletionRepo(db)
+        # dry-run: the terminal-cleanup hook is a no-op, keeping this focused
+        # on the attempts cap.
+        self._svc.cfg = SimpleNamespace(automation=SimpleNamespace(dry_run=True))
         self.executed = 0
 
         async def execute(request, *, announce):

@@ -28,11 +28,19 @@ import aiosqlite
 
 from ..config import Config
 from ..db.database import Database
-from ..db.repos import AutomationRepo, BoardRepo, MembersRepo, RunsRepo, StateRepo
+from ..db.repos import (
+    AutomationRepo,
+    BoardDeletionRepo,
+    BoardRepo,
+    MembersRepo,
+    RunsRepo,
+    StateRepo,
+)
 from ..mc.board import REPLY_MARKER, BoardClient, ensure_guide_post
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.board import BoardPost
+from .board_cleanup import deletion_due_at
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +48,9 @@ log = logging.getLogger(__name__)
 # waits (funds/cooldown) don't bump ``attempts``, so they wait as long as
 # needed and are not affected by this cap.
 MAX_ATTEMPTS = 12
+
+# A request is done with the board once it reaches one of these.
+_TERMINAL_STATUSES = frozenset({"done", "failed", "skipped"})
 
 
 class BoardRequestService:
@@ -54,6 +65,7 @@ class BoardRequestService:
         self.members = MembersRepo(db)
         self.runs = RunsRepo(db)
         self.state = StateRepo(db)
+        self.deletions = BoardDeletionRepo(db)
 
     # -- to be provided by subclasses -----------------------------------
 
@@ -196,6 +208,7 @@ class BoardRequestService:
                         request["id"], "failed",
                         f"gave up after {request['attempts']} failed attempts",
                     )
+                    await self._schedule_cleanup(request["id"])
                 continue
             if not await self.requests.claim(request["id"]):
                 continue  # another poll won the claim
@@ -224,7 +237,23 @@ class BoardRequestService:
                     await self.requests.set_status(
                         request["id"], "failed", "internal error while processing",
                     )
+            await self._schedule_cleanup(request["id"])
         return executed
+
+    async def _schedule_cleanup(self, request_id: int) -> None:
+        """Queue a handled request's original post for the 12h board tidy-up
+        once it reaches a terminal state — live mode only."""
+        if self.dry_run:
+            return
+        request = await self.requests.get(request_id)
+        if request is None or request["status"] not in _TERMINAL_STATUSES:
+            return
+        if not request["post_id"]:
+            return
+        await self.deletions.schedule(
+            int(request["thread_id"] or self.thread_id), int(request["post_id"]),
+            due_at=deletion_due_at(), reason=f"handled {self.kind} request",
+        )
 
     # -- helpers for subclasses -----------------------------------------
 

@@ -195,6 +195,8 @@ class BoardClient:
             f"/alliance_posts/{post_id}", data,
             referer=self._client.url(f"/alliance_threads/{thread_id}"),
         )
+        if status in (404, 410):
+            return True  # already gone — the desired end state
         if status >= 400:
             log.warning("Deleting post %s failed with HTTP %s", post_id, status)
             return False
