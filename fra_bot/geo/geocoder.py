@@ -45,6 +45,12 @@ class GeocodeResult:
     longitude: float
     address: str | None
     source: str  # url | nominatim_search | nominatim_reverse
+    # The place NAME the member pointed at (from the maps link / search
+    # query), kept separately from the reverse-geocoded street address.
+    place_text: str | None = None
+    # The OSM feature type at the location (e.g. "hospital", "prison",
+    # "clinic") — the authoritative signal for classifying the place.
+    place_type: str | None = None
 
 
 class Geocoder:
@@ -103,9 +109,11 @@ class Geocoder:
 
         location = parse_maps_url(expanded)
         if location.has_coordinates:
-            address = None
+            address, place_type = None, None
             try:
-                address = await self.reverse(location.latitude, location.longitude)
+                address, place_type = await self.reverse(
+                    location.latitude, location.longitude
+                )
             except GeocodeError as exc:
                 log.warning("Reverse geocode failed for %s: %s", url, exc)
             return GeocodeResult(
@@ -113,6 +121,8 @@ class Geocoder:
                 longitude=location.longitude,
                 address=address or location.place_text,
                 source="url",
+                place_text=location.place_text,
+                place_type=place_type,
             )
 
         if location.place_text:
@@ -147,27 +157,35 @@ class Geocoder:
             longitude=float(data[0]["lon"]),
             address=data[0].get("display_name"),
             source="nominatim_search",
+            place_text=query,
+            place_type=data[0].get("type"),
         )
         await self._cache_set("search", query, result)
         return result
 
-    async def reverse(self, latitude: float, longitude: float) -> str | None:
+    async def reverse(
+        self, latitude: float, longitude: float
+    ) -> tuple[str | None, str | None]:
+        """Return (address, OSM feature type) for a coordinate."""
         key = f"{latitude:.5f},{longitude:.5f}"
         cached = await self._cache_get("reverse", key)
         if cached is not None:
-            return cached.get("address")
+            return cached.get("address"), cached.get("place_type")
 
         data = await self._nominatim(
             "/reverse",
             {"lat": str(latitude), "lon": str(longitude), "format": "jsonv2"},
         )
         address = data.get("display_name") if isinstance(data, dict) else None
+        place_type = data.get("type") if isinstance(data, dict) else None
         await self._cache_set(
             "reverse",
             key,
-            GeocodeResult(latitude, longitude, address, "nominatim_reverse"),
+            GeocodeResult(
+                latitude, longitude, address, "nominatim_reverse", place_type=place_type
+            ),
         )
-        return address
+        return address, place_type
 
     def _geocode_url(self, path: str, params: dict[str, str]) -> str:
         """Build the request URL, injecting the API key when configured."""
@@ -214,6 +232,8 @@ class Geocoder:
                     "longitude": result.longitude,
                     "address": result.address,
                     "source": result.source,
+                    "place_text": result.place_text,
+                    "place_type": result.place_type,
                 }
             ),
         )

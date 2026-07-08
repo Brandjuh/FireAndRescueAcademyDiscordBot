@@ -34,21 +34,77 @@ log = logging.getLogger(__name__)
 
 KASSE_PATH = "/verband/kasse"
 
-_HOSPITAL_TERMS = ("hospital", "medical center", "medical centre", "clinic", "ziekenhuis")
-_PRISON_TERMS = ("prison", "jail", "correctional", "penitentiary", "detention", "gevangenis")
+# OSM feature types (amenity/…) that ARE the building — the strongest,
+# language-independent signal.
+_HOSPITAL_OSM_TYPES = ("hospital",)
+_PRISON_OSM_TYPES = ("prison", "jail")
+
+# Name/address hints (secondary signal). Substring match, so "hospitalier"
+# and "ziekenhuis" are covered.
+_HOSPITAL_TERMS = ("hospital", "hospitalier", "hopital", "medical center",
+                   "medical centre", "ziekenhuis")
+_PRISON_TERMS = ("prison", "jail", "correctional", "penitentiary",
+                 "detention", "remand", "gevangenis")
+
+# Look-alikes that must NOT be built (unless the OSM tag confirms the type).
+_HOSPITAL_REJECT = ("clinic", "clinique", "kliniek", "doctor", "physician",
+                    "pharmacy", "apotheek", "urgent care", "medical office",
+                    "veterin", "dental")
+_PRISON_REJECT = ("courthouse", "court house", "police station",
+                  "police department", "sheriff", "law office", "probation")
+
+# Not an operating facility at all.
+_INACTIVE_TERMS = ("museum", "memorial", "historic", "former ", "abandoned",
+                   "ruins", "monument")
 
 
-def detect_building_type(address: str | None, place_text: str | None) -> str | None:
-    haystack = " ".join(t for t in (address, place_text) if t).lower()
-    if not haystack:
+def _has_any(text: str, terms) -> bool:
+    return any(term in text for term in terms)
+
+
+def detect_building_type(
+    address: str | None,
+    place_text: str | None = None,
+    place_type: str | None = None,
+) -> str | None:
+    """Classify a location as ``'hospital'`` / ``'prison'`` / ``None``.
+
+    The OSM feature type (``place_type``, e.g. amenity=hospital/prison) is
+    the strongest, language-independent signal; the place name/address is a
+    weaker one; and clinic/police/inactive terms veto a false match unless
+    the OSM tag confirms the type. Scored so conflicting signals resolve to
+    ``None`` (refused) rather than guessing. Built fresh, mirroring the
+    approach the reference bot converged on.
+    """
+    text = " ".join(t for t in (place_text, address) if t).lower()
+    osm = (place_type or "").lower()
+    if not text.strip() and not osm:
         return None
-    has_hospital = any(term in haystack for term in _HOSPITAL_TERMS)
-    has_prison = any(term in haystack for term in _PRISON_TERMS)
-    if has_hospital and not has_prison:
+    if _has_any(text, _INACTIVE_TERMS):
+        return None
+
+    hospital_osm = osm in _HOSPITAL_OSM_TYPES
+    prison_osm = osm in _PRISON_OSM_TYPES
+    hospital_score = (3 if hospital_osm else 0) + (2 if _has_any(text, _HOSPITAL_TERMS) else 0)
+    prison_score = (3 if prison_osm else 0) + (2 if _has_any(text, _PRISON_TERMS) else 0)
+
+    # A look-alike name kills the score unless the OSM tag confirms the type.
+    if _has_any(text, _HOSPITAL_REJECT) and not hospital_osm:
+        hospital_score = 0
+    if _has_any(text, _PRISON_REJECT) and not prison_osm:
+        prison_score = 0
+
+    if hospital_score and prison_score:
+        if hospital_score > prison_score:
+            return "hospital"
+        if prison_score > hospital_score:
+            return "prison"
+        return None  # conflicting signals — refuse
+    if hospital_score:
         return "hospital"
-    if has_prison and not has_hospital:
+    if prison_score:
         return "prison"
-    return None  # ambiguous or neither
+    return None
 
 
 class BuildingsService(BoardRequestService):
@@ -118,7 +174,9 @@ class BuildingsService(BoardRequestService):
                 )
                 return
 
-            building_type = detect_building_type(location.address, None)
+            building_type = detect_building_type(
+                location.address, location.place_text, location.place_type
+            )
             payload.update(
                 {
                     "latitude": location.latitude,
@@ -128,15 +186,18 @@ class BuildingsService(BoardRequestService):
                 }
             )
             if building_type is None:
+                # Members just drop a maps pin; only hospitals and prisons are
+                # auto-built. Anything else is refused (not an error).
                 await self.requests.set_status(
-                    request["id"], "failed",
-                    "could not tell hospital from prison at this location",
+                    request["id"], "skipped",
+                    "refused: location is not a hospital or prison",
                     payload=json.dumps(payload),
                 )
                 await self.reply(
-                    f"@{requester}: I resolved the location "
-                    f"({location.address or 'unknown address'}) but couldn't tell "
-                    "whether it's a hospital or a prison. Please mention which one."
+                    f"@{requester}: that location "
+                    f"({location.place_text or location.address or 'the pin'}) isn't a "
+                    "hospital or a prison, so nothing was built. Only hospitals and "
+                    "prisons are built automatically."
                 )
                 return
 
@@ -266,11 +327,13 @@ class BuildingsService(BoardRequestService):
             f"({location.latitude:.5f}, {location.longitude:.5f})"
         ]
         if building_type is None:
-            building_type = detect_building_type(location.address, None)
+            building_type = detect_building_type(
+                location.address, location.place_text, location.place_type
+            )
             if building_type is None:
                 lines.append(
-                    "❌ Couldn't tell hospital from prison at this address — "
-                    "say which: `!fra testbuild hospital <location>`."
+                    "🚫 Refused — not a hospital or prison. Only those are auto-built. "
+                    "(Force it with `!fra testbuild hospital <location>`.)"
                 )
                 return "\n".join(lines)
             lines.append(f"🏗️ Detected type: **{building_type}**")

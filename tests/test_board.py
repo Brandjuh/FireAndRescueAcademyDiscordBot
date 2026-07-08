@@ -182,3 +182,16 @@ def test_detect_building_type():
     assert detect_building_type("Prison Hospital Wing", None) is None
     # Auto-detect for !fra testbuild: French "Hospitalier" contains "hospital".
     assert detect_building_type("Centre Hospitalier de Beaune, France", None) == "hospital"
+
+
+def test_detect_building_type_osm_and_rejects():
+    # The OSM feature type is authoritative even for a generic street.
+    assert detect_building_type("12 Main St", None, "hospital") == "hospital"
+    assert detect_building_type("5 Rue de la Prison", None, "prison") == "prison"
+    # Look-alikes are refused by name...
+    assert detect_building_type("Downtown Clinic", None) is None
+    assert detect_building_type("Central Police Station", None) is None
+    # ...unless the OSM tag confirms the real type.
+    assert detect_building_type("Downtown Clinic", None, "hospital") == "hospital"
+    # Inactive sites are refused even when named like one.
+    assert detect_building_type("Old Prison Museum", None) is None
