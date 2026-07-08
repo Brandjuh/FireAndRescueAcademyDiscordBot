@@ -315,9 +315,19 @@ class MissionScheduler:
             try:
                 resolved = await self._resolve(mission["location_text"] or "")
             except GeocodeError as exc:
-                await self.missions.set_status(
-                    mission["id"], "failed", f"geocoding failed: {exc}",
-                )
+                # Transient (network/rate-limit/5xx) → keep the request and
+                # retry; permanent (bad API key, place not found) → fail with
+                # the actionable message so it shows up in !fra missions.
+                if getattr(exc, "transient", False) and mission["attempts"] < MAX_ATTEMPTS:
+                    await self.missions.set_status(
+                        mission["id"], "waiting",
+                        f"geocoding failed ({exc}); will retry",
+                        bump_attempts=True, announce=False,
+                    )
+                else:
+                    await self.missions.set_status(
+                        mission["id"], "failed", f"geocoding failed: {exc}",
+                    )
                 return
             lat, lng, address = resolved.latitude, resolved.longitude, resolved.address or ""
             await self.missions.set_status(
@@ -490,9 +500,18 @@ class MissionScheduler:
         latitude: float,
         longitude: float,
         address: str,
+        allow_coins: bool = False,
+        dry: bool | None = None,
     ) -> StartOutcome:
         """Load the form, honour the cooldown + free-only guard, then submit
-        the right body for the request's kind/source. Never spends coins."""
+        the right body for the request's kind/source.
+
+        Normally NEVER spends coins. ``allow_coins`` (owner-only paid path)
+        lifts the free-only guard and the cooldown wait and sets coins=1.
+        ``dry`` overrides the global dry-run for this one call (the paid
+        command previews unless the owner confirms), else the global switch
+        applies."""
+        effective_dry = self.dry_run if dry is None else dry
         new_path = EVENT_KINDS[kind]["new_path"]
         try:
             html = await self.client.fetch_page(f"{new_path}?tlat={latitude}&tlng={longitude}")
@@ -500,15 +519,17 @@ class MissionScheduler:
             return StartOutcome("form_error", f"could not load mission form ({exc}); will retry")
         form = parse_event_form(html)
 
-        eligible_at = next_free_at(kind, form.last_free_at)
-        if eligible_at and eligible_at > utcnow_iso():
-            return StartOutcome(
-                "waiting", f"next free mission at {eligible_at}; queued",
-                eligible_at=eligible_at,
-            )
+        # Coins ignore the free cooldown; only the free path must wait.
+        if not allow_coins:
+            eligible_at = next_free_at(kind, form.last_free_at)
+            if eligible_at and eligible_at > utcnow_iso():
+                return StartOutcome(
+                    "waiting", f"next free mission at {eligible_at}; queued",
+                    eligible_at=eligible_at,
+                )
         if form.action is None or form.authenticity_token is None:
             return StartOutcome("form_error", "mission form incomplete; will retry")
-        if not is_free_submit(form):
+        if not allow_coins and not is_free_submit(form):
             return StartOutcome("refused", "refusing to start: form would spend coins")
 
         # Build the right body.
@@ -520,12 +541,15 @@ class MissionScheduler:
             )
         except _SavedMissionNotFound as exc:
             return StartOutcome("not_found", str(exc))
+        if allow_coins:
+            body = _with_coins(body)
 
-        if self.dry_run:
+        if effective_dry:
             what = self._describe(kind, source, preset_type_id, caption, custom_values, saved_name)
+            paid = "(PAID — ~10 coins) " if allow_coins else ""
             return StartOutcome(
                 "dry_run",
-                f"dry-run: would start {what} at {latitude:.5f},{longitude:.5f}",
+                f"dry-run: would start {paid}{what} at {latitude:.5f},{longitude:.5f}",
             )
 
         free_before = form.last_free_at
@@ -545,6 +569,16 @@ class MissionScheduler:
                 http_status=status,
             )
 
+        # A paid start does NOT consume the free-mission cooldown, so the
+        # cooldown-advance check can't confirm it — report success on the
+        # accepted POST and leave verification to the owner in-game.
+        if allow_coins:
+            return StartOutcome(
+                "started",
+                f"paid {kind} started at {latitude:.5f},{longitude:.5f} "
+                f"(coins spent — verify in game)",
+            )
+
         verified = await self._verify_started(new_path, latitude, longitude, free_before)
         if verified is False:
             return StartOutcome(
@@ -557,6 +591,31 @@ class MissionScheduler:
             f"{kind} started at {latitude:.5f},{longitude:.5f}{note}",
             verified=verified,
         )
+
+    async def run_coin_mission(self, spec, *, confirm: bool) -> StartOutcome:
+        """Owner-only paid start: geocode the location and start immediately
+        using coins (no free-cooldown wait). Previews unless ``confirm`` is
+        set. Returns the :class:`StartOutcome` for the caller to render."""
+        try:
+            resolved = await self._resolve(spec.location_text)
+        except GeocodeError as exc:
+            return StartOutcome("not_found", f"could not locate '{spec.location_text}': {exc}")
+        lat, lng = resolved.latitude, resolved.longitude
+        address = resolved.address or spec.location_text
+        async with self._start_lock:
+            outcome = await self._perform_start(
+                kind=spec.kind,
+                source=spec.source,
+                preset_type_id=spec.preset_type_id,
+                caption=spec.custom.caption if spec.custom else spec.saved_name,
+                custom_values=spec.custom.values if spec.custom else {},
+                saved_name=spec.saved_name,
+                latitude=lat, longitude=lng, address=address,
+                allow_coins=True,
+                dry=not confirm,  # preview unless the owner confirmed
+            )
+        outcome.detail = f"{outcome.detail} — {address}"
+        return outcome
 
     def _build_body(
         self, form, html, *, kind, source, preset_type_id, caption,
@@ -658,6 +717,16 @@ class MissionScheduler:
 
 class _SavedMissionNotFound(Exception):
     """The named saved mission wasn't present in the form's dropdown."""
+
+
+def _with_coins(body: list[tuple[str, str]], *, count: int = 1) -> list[tuple[str, str]]:
+    """Flip a free-mission body into a PAID one: set coins=1 (the game's
+    'yes, spend coins' flag, as the start button does) and the mission count.
+    Used only by the owner-gated paid path."""
+    merged = dict(body)
+    merged["mission_position[coins]"] = "1"
+    merged["mission_position[amount]"] = str(max(1, count))
+    return list(merged.items())
 
 
 def _values_json(spec: MissionSpec) -> str | None:

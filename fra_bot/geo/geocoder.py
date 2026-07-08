@@ -36,7 +36,14 @@ _MIN_INTERVAL = 1.1  # Nominatim policy: max 1 req/s
 
 
 class GeocodeError(RuntimeError):
-    pass
+    """A geocoding lookup failed. ``transient`` marks errors worth retrying
+    (network blips, rate limits, 5xx); auth (401/403) and 'not found' are
+    permanent until config/input changes."""
+
+    def __init__(self, message: str, *, status: int | None = None, transient: bool = False) -> None:
+        super().__init__(message)
+        self.status = status
+        self.transient = transient
 
 
 @dataclass(frozen=True)
@@ -202,13 +209,26 @@ class Geocoder:
                 await asyncio.sleep(wait)
             self._last_request = time.monotonic()
         url = self._geocode_url(path, params)
+        host = urllib.parse.urlparse(self._base_url).netloc or self._base_url
         try:
             async with self._session.get(url) as resp:
                 if resp.status != 200:
-                    raise GeocodeError(f"Nominatim HTTP {resp.status} for {path}")
+                    hint = ""
+                    if resp.status in (401, 403):
+                        hint = (
+                            " — the geocoding provider rejected the request; "
+                            "check GEOCODER_API_KEY in .env (and geocoding.base_url)"
+                        )
+                    raise GeocodeError(
+                        f"geocoder {host} returned HTTP {resp.status} for {path}{hint}",
+                        status=resp.status,
+                        transient=resp.status in (429, 500, 502, 503, 504),
+                    )
                 return await resp.json()
         except aiohttp.ClientError as exc:
-            raise GeocodeError(f"Nominatim request failed: {exc}") from exc
+            raise GeocodeError(
+                f"geocoder {host} request failed: {exc}", transient=True
+            ) from exc
 
     # ------------------------------------------------------------------
     # Cache (scraper_state keyspace: geocode/<kind>/<key>)

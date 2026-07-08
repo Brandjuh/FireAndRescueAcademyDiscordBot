@@ -1147,6 +1147,21 @@ class MissionsRepo:
         )
         return n == 1
 
+    async def delete(self, mission_id: int) -> bool:
+        """Hard-delete a mission row (any status). Returns True if removed."""
+        n = await self._db.execute(
+            "DELETE FROM scheduled_missions WHERE id = ?", (mission_id,)
+        )
+        return n == 1
+
+    async def delete_terminal(self) -> int:
+        """Remove all finished missions (done/failed/skipped/cancelled) — a
+        tidy-up that leaves open (pending/waiting/processing) ones alone."""
+        return await self._db.execute(
+            "DELETE FROM scheduled_missions "
+            "WHERE status IN ('done', 'failed', 'skipped', 'cancelled')"
+        )
+
     async def get(self, mission_id: int) -> aiosqlite.Row | None:
         async with self._db.conn.execute(
             "SELECT * FROM scheduled_missions WHERE id = ?", (mission_id,)
