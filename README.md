@@ -221,6 +221,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra missionpanel` | Post the "Request a mission" panel to the configured channel |
 | `!fra missions [limit]` | List recent scheduled missions and their status |
 | `!fra cancelmission <id>` | Cancel a not-yet-started scheduled mission |
+| `!fra dump <path> [rendered]` | Upload a MissionChief page's HTML for inspection (CSRF tokens redacted; `rendered` runs it through Playwright) |
 | `!fra update` | Pull the latest code, install deps and restart the bot |
 | `!fra restart` | Restart the bot to reload `config.yaml` / `.env` (no code update) |
 
