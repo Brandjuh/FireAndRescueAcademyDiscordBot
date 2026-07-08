@@ -41,6 +41,14 @@ def test_parse_extension_offers_sorted_and_priced():
     assert offers[2].ext_id == 9 and offers[2].price == 200000
 
 
+def test_parse_price_ignores_leading_counts():
+    # A count before the price must never be mistaken FOR the price — that
+    # would understate the funds check and bypass the large-prison guard.
+    html = '<a href="/buildings/42/extension/credits/4">2 Cells — 100,000 Credits</a>'
+    offers = parse_extension_offers(html, 42)
+    assert offers[0].price == 100_000
+
+
 def test_classify_alliance_buildings():
     html = """
     <table>
@@ -199,3 +207,31 @@ async def test_action_cap_truncates(db):
     report = await svc.upgrade_all(execute=True, max_actions=1)
     assert report.actions == 1
     assert report.truncated is True
+
+
+async def test_level_upgrade_verified_against_refetched_page(db):
+    # The happy path must report the REAL before/after levels.
+    client = FakeClient()
+    svc = _svc(db, client, dry_run=False)
+    report = await svc.upgrade_all(execute=True)
+    assert report.levels_raised == 1
+    assert any("raised level 5 → 20" in line for line in report.lines)
+
+
+async def test_level_upgrade_that_does_not_stick_is_reported(db):
+    # MissionChief answers a refused upgrade with a 200 re-render; the level
+    # is verified on the re-fetch, so an unchanged level must NOT count.
+    client = FakeClient()
+    orig_fetch = client.fetch_page
+
+    async def fetch(path, *, referer=None):
+        if "expand_do/credits" in path:
+            client.gets.append(path)
+            return "<html>looks ok but nothing happened</html>"  # no page swap
+        return await orig_fetch(path, referer=referer)
+
+    client.fetch_page = fetch
+    svc = _svc(db, client, dry_run=False)
+    report = await svc.upgrade_all(execute=True)
+    assert report.levels_raised == 0                    # did not take
+    assert any("did not take" in line for line in report.lines)

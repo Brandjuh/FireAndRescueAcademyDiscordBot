@@ -158,6 +158,32 @@ async def test_execute_dry_run_reaches_done_without_posting(db):
     assert client.posts == []  # dry-run performed NO education POST
 
 
+async def test_busy_retry_is_bounded_with_backoff(db):
+    """A request that can't proceed (no academy of that discipline) must
+    retry with a bumped attempt count and a future next_attempt_at — so
+    MAX_ATTEMPTS eventually ends it instead of re-walking the academy list
+    on every poll forever."""
+    svc, _ = _service(db, dry_run=True)   # list only contains a FIRE academy
+    repo = svc.requests
+    rid = await repo.create(
+        kind="training", thread_id=5935, post_id=2,
+        requester_name="Alice", requester_mc_id=42,
+        payload=json.dumps({
+            "trainings": [{"discipline": "police", "name": "SWAT", "duration": 5}],
+            "ambiguous": [],
+        }),
+    )
+    await repo.claim(rid)
+    await svc.execute_request(await repo.get(rid), announce=True)
+
+    row = await repo.get(rid)
+    assert row["status"] == "waiting"
+    assert row["attempts"] == 1                        # bumped -> cap reachable
+    assert row["next_attempt_at"] is not None          # backed off, not next poll
+    import datetime as dt
+    assert row["next_attempt_at"] > dt.datetime.now(dt.timezone.utc).isoformat()
+
+
 async def test_execute_live_posts_education_form(db):
     # A verified academy page whose classroom count drops after the POST.
     after_page = ACADEMY_PAGE.replace(
@@ -193,6 +219,37 @@ async def test_execute_live_posts_education_form(db):
     assert client.posts[0][0] == "/buildings/4951748/education"
     row = await repo.get(rid)
     assert row["status"] == "done"
+
+
+class _SeqBoard:
+    """Board stub whose posts can be appended between polls."""
+
+    def __init__(self):
+        self.posts = []
+        self._page = SimpleNamespace(current_user_id=999)
+
+    async def fetch_new_posts(self, thread_id, last_seen):
+        fresh = [p for p in self.posts if p.post_id > (last_seen or 0)]
+        return self._page, fresh
+
+
+async def test_first_post_on_initially_empty_thread_is_processed(db):
+    """An empty thread's first poll is the baseline; the FIRST real post that
+    arrives later must be processed — not swallowed as baseline again."""
+    svc, _ = _service(db, dry_run=True)
+    board = _SeqBoard()
+    svc.board = board
+
+    await svc.poll()                                   # empty thread: baseline
+    board.posts.append(SimpleNamespace(
+        post_id=101, author_name="Bob", author_mc_id=7,
+        raw_timestamp="t", content="HazMat please",
+    ))
+    await svc.poll()                                   # first real post
+
+    rows = await svc.requests.recent()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "done"                 # processed (dry-run)
 
 
 # -- board guide: find-or-edit, never duplicate -----------------------------
