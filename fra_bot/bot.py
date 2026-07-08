@@ -19,6 +19,7 @@ from .presence import PresenceManager
 from .mc.client import MissionChiefClient
 from .services.applications_sync import ApplicationsSyncService
 from .services.board_cleanup import BoardCleanupService
+from .services.building_upgrade import BuildingUpgradeService
 from .services.buildings import BuildingsService
 from .services.events import EventsService
 from .services.logs_sync import LogsSyncService
@@ -108,6 +109,8 @@ class FRABot(commands.Bot):
         )
         # The 12h board tidy-up: removes handled request posts (live only).
         self.board_cleanup = BoardCleanupService(cfg, self.mc, self.db)
+        # On-command alliance hospital/prison level + extension upgrades.
+        self.building_upgrade = BuildingUpgradeService(cfg, self.mc, self.db)
 
         self._jobs_started = False
 
