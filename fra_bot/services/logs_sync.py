@@ -19,6 +19,7 @@ from ..db.repos import LogsRepo, RunsRepo, StateRepo
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError, ParseError
 from ..mc.parsers.logs import parse_logs_page
+from .backfill_guard import record_page_failure
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,10 @@ STATE_INITIALIZED = "logs_initialized"
 
 STATE_BACKFILL_DONE = "logs_backfill_done"
 STATE_BACKFILL_NEXT_PAGE = "logs_backfill_next_page"
+STATE_BACKFILL_PAGE_FAIL = "logs_backfill_page_fail"  # "page:count"
+# Skip a page that keeps failing to fetch so one bad page can't wedge the
+# whole backfill (transient errors clear well before this).
+BACKFILL_SKIP_AFTER = 5
 
 
 class LogsSyncService:
@@ -119,7 +124,23 @@ class LogsSyncService:
 
         try:
             for _ in range(chunk_size):
-                html = await self._client.fetch_page(f"{LOGS_PATH}?page={next_page}")
+                try:
+                    html = await self._client.fetch_page(f"{LOGS_PATH}?page={next_page}")
+                except MissionChiefError as exc:
+                    fails = await record_page_failure(
+                        self._state, STATE_BACKFILL_PAGE_FAIL, next_page
+                    )
+                    if fails < BACKFILL_SKIP_AFTER:
+                        raise  # outer handler fails the run; retry next poll
+                    log.error(
+                        "Log backfill: skipping page %d after %d consecutive "
+                        "failures (%s)", next_page, fails, exc,
+                    )
+                    next_page += 1
+                    await self._state.set(STATE_BACKFILL_NEXT_PAGE, str(next_page))
+                    await self._state.delete(STATE_BACKFILL_PAGE_FAIL)
+                    continue
+                await self._state.delete(STATE_BACKFILL_PAGE_FAIL)
                 pages_fetched += 1
                 page = parse_logs_page(html)
 

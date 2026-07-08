@@ -33,6 +33,7 @@ from ..mc.parsers.treasury import (
     parse_total_funds,
 )
 from .anchor import count_overlap
+from .backfill_guard import record_page_failure
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,13 @@ KASSE_PATH = "/verband/kasse"
 
 STATE_BACKFILL_DONE = "expenses_backfill_done"
 STATE_BACKFILL_NEXT_PAGE = "expenses_backfill_next_page"
+STATE_BACKFILL_PAGE_FAIL = "expenses_backfill_page_fail"  # "page:count"
+
+# Skip a single page that keeps failing to fetch so one bad page can't
+# wedge the whole multi-thousand-page backfill forever. Transient errors
+# clear well before this; a page that fails this many polls in a row is
+# almost certainly a deterministic problem on that page.
+BACKFILL_SKIP_AFTER = 5
 
 ANCHOR_TAIL_SIZE = 60
 MAX_INCREMENTAL_PAGES = 40
@@ -117,7 +125,23 @@ class TreasurySyncService:
         try:
             for _ in range(chunk_size):
                 path = KASSE_PATH if next_page == 1 else f"{KASSE_PATH}?page={next_page}"
-                html = await self._client.fetch_page(path)
+                try:
+                    html = await self._client.fetch_page(path)
+                except MissionChiefError as exc:
+                    fails = await record_page_failure(
+                        self._state, STATE_BACKFILL_PAGE_FAIL, next_page
+                    )
+                    if fails < BACKFILL_SKIP_AFTER:
+                        raise  # outer handler fails the run; retry next poll
+                    log.error(
+                        "Expenses backfill: skipping page %d after %d consecutive "
+                        "failures (%s)", next_page, fails, exc,
+                    )
+                    next_page += 1
+                    await self._state.set(STATE_BACKFILL_NEXT_PAGE, str(next_page))
+                    await self._state.delete(STATE_BACKFILL_PAGE_FAIL)
+                    continue
+                await self._state.delete(STATE_BACKFILL_PAGE_FAIL)
                 pages_fetched += 1
                 page = parse_expenses_page(html)
 
