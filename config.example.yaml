@@ -15,6 +15,10 @@ missionchief:
   cookie_path: data/cookies.json
   # Human-like pacing between requests to MissionChief (seconds).
   # Every request waits a random delay in [min_delay, max_delay].
+  # WARNING: keep max_delay small (<= ~12). The average delay caps the bot's
+  # total throughput for EVERYTHING (syncs, board polls, guides, requests);
+  # e.g. max_delay 60 -> ~2 requests/min, which is less than the background
+  # jobs alone need — the queue then grows forever and the bot appears hung.
   min_delay: 4.0
   max_delay: 9.0
   # Hard safety cap: never exceed this many requests per minute.

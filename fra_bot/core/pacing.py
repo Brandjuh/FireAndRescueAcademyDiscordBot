@@ -55,13 +55,28 @@ class HumanPacer:
         self._next_allowed = 0.0
         self._failures: deque[float] = deque()
         self._circuit_open_until = 0.0
+        self._waiting = 0
 
     @property
     def circuit_open(self) -> bool:
         return time.monotonic() < self._circuit_open_until
 
+    @property
+    def backlog(self) -> int:
+        """How many requests are currently queued for their turn. A number
+        that keeps growing means demand exceeds the configured pacing
+        (min_delay/max_delay) — the bot is choking on its own politeness."""
+        return self._waiting
+
     async def wait_turn(self) -> None:
         """Block until it's polite to send the next request."""
+        self._waiting += 1
+        try:
+            await self._wait_turn_inner()
+        finally:
+            self._waiting -= 1
+
+    async def _wait_turn_inner(self) -> None:
         async with self._lock:
             now = time.monotonic()
             if now < self._circuit_open_until:

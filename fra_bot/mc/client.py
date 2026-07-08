@@ -74,6 +74,11 @@ class MissionChiefClient:
         self._session: aiohttp.ClientSession | None = None
         self._login_lock = asyncio.Lock()
 
+    @property
+    def pacer_backlog(self) -> int:
+        """Requests currently waiting for their pacing turn (congestion gauge)."""
+        return self._pacer.backlog
+
     # ------------------------------------------------------------------
     # Session plumbing
     # ------------------------------------------------------------------
