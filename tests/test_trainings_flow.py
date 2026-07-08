@@ -233,14 +233,48 @@ async def test_training_guide_suppressed_when_replies_off(db):
 
 
 async def test_training_guide_content_has_availability_and_timestamp(db):
-    import hashlib
-
     svc, _ = _service(db, dry_run=True)
-    desired, signature = await svc.guide_content(now_epoch=1000.0)
+    desired = await svc.guide_content(now_epoch=1000.0)
     assert desired.startswith("[FRA] 📋 How to request a TRAINING")
     assert "[b]Free classrooms right now[/b]" in desired
     assert "Last updated:" in desired
     # The fake academy (fire, id 4951748) has 2 free classrooms.
     assert "🚒 Fire: 2" in desired
-    # Signature covers only the stable instructions, not the live sections.
-    assert signature == hashlib.sha1(svc.guide_body().encode("utf-8")).hexdigest()[:12]
+
+
+async def test_training_guide_skips_availability_fetch_when_throttled(db):
+    """The expensive availability walk must NOT run on quiet polls: with the
+    guide up-to-date and inside the refresh window, _ensure_guide returns
+    before guide_content is ever built."""
+    import hashlib
+
+    from fra_bot.mc.board import guide_now
+
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    board = _GuideBoard(existing=None)
+    svc.board = board
+    calls = {"n": 0}
+    orig = svc._collect_availability
+
+    async def counting():
+        calls["n"] += 1
+        return await orig()
+
+    svc._collect_availability = counting
+
+    # Prime state: guide exists, signature current, refreshed just now.
+    signature = hashlib.sha1(svc.guide_body().encode("utf-8")).hexdigest()[:12]
+    await svc.state.set(svc._guide_id_key(), "77")
+    await svc.state.set(svc._guide_hash_key(), signature)
+    await svc.state.set(svc._guide_refreshed_key(), repr(guide_now()))
+
+    await svc._ensure_guide()
+    assert calls["n"] == 0                              # nothing fetched
+    assert board.edited == [] and board.created == []   # nothing written
+
+    # Push the last refresh outside the window -> now it builds + edits once.
+    await svc.state.set(svc._guide_refreshed_key(), repr(guide_now() - 7200))
+    await svc._ensure_guide()
+    assert calls["n"] == 1
+    assert board.edited and board.edited[0][0] == 77

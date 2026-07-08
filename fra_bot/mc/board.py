@@ -227,7 +227,7 @@ async def ensure_guide_post(
     hash_key: str,
     refreshed_key: str,
     marker: str,
-    desired: str,
+    desired,
     signature: str,
     now_epoch: float,
     min_refresh_seconds: float = 3600.0,
@@ -243,10 +243,25 @@ async def ensure_guide_post(
     poll. ``state`` (a :class:`StateRepo`) remembers the post id, the stable
     signature and when it was last refreshed.
 
+    ``desired`` may be a plain string, or an (async) zero-arg callable that is
+    invoked ONLY once a write is actually going to happen — so building
+    expensive live content (e.g. classroom availability, which costs many
+    rate-limited page fetches) is skipped entirely on the throttled polls.
+
     This is an informational forum post (not a game action), so callers
     maintain it even in dry-run. Board errors propagate as
     :class:`MissionChiefError` for the caller to catch.
     """
+    resolved: str | None = desired if isinstance(desired, str) else None
+
+    async def _content() -> str:
+        nonlocal resolved
+        if resolved is None:
+            value = desired()
+            if hasattr(value, "__await__"):
+                value = await value
+            resolved = str(value)
+        return resolved
 
     async def _record(post_id: int) -> None:
         await state.set(id_key, str(post_id))
@@ -263,15 +278,15 @@ async def ensure_guide_post(
             last_refreshed = 0.0
         if same_signature and (now_epoch - last_refreshed) < min_refresh_seconds:
             return  # unchanged and refreshed recently — leave it be
-        if await board.edit_post(int(stored), desired):
+        if await board.edit_post(int(stored), await _content()):
             await _record(int(stored))
             return
         await state.delete(id_key)  # stale id — fall through and re-find
     existing = await board.find_bot_post(thread_id, marker)
     if existing is not None:
-        if await board.edit_post(existing, desired):
+        if await board.edit_post(existing, await _content()):
             await _record(existing)
         return
-    new_id = await board.create_post_get_id(thread_id, desired)
+    new_id = await board.create_post_get_id(thread_id, await _content())
     if new_id is not None:
         await _record(new_id)
