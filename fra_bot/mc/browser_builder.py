@@ -7,10 +7,11 @@ page rather than reverse-engineering the POST. The flow mirrors a human:
    is revealed by the page's own change handler;
 2. set the name and **move the map marker**, which is what fills the
    hidden lat/lng and reverse-geocodes the read-only address (just writing
-   the hidden fields leaves the address blank — the known gotcha). If the
-   game returns no address for the pin (an unmappable spot), the build is
-   **refused** with that reason rather than creating an addressless
-   building — locations are worldwide, so this is the real failure signal;
+   the hidden fields leaves the address blank — the known gotcha). The
+   game's reverse_address is US-centric, so for a valid worldwide pin it
+   often returns nothing; when it does, we fall back to our own geocoded
+   address (the build runs on the coordinates). Only a location with no
+   address from *either* source is refused;
 3. click the type's **"Build as Alliance Building"** button, whose jQuery
    handler sets ``build_as_alliance=1`` and submits. Coins are never
    spent: ``build_with_coins`` stays 0 and a coin-labelled button is
@@ -235,32 +236,41 @@ class BrowserBuilder:
                     return BuildResult(False, None, res.get("error", "could not set position"))
 
                 # Wait for the game's own pin->address lookup (/reverse_address)
-                # to land. Speed isn't a concern, so give worldwide locations a
-                # fair chance before deciding it can't be resolved.
+                # to land. Speed isn't a concern, so give it a fair chance.
                 try:
                     await page.wait_for_function(
                         "() => { const a = document.querySelector('#building_address');"
                         " return a && a.value && a.value.trim().length > 0; }",
                         timeout=15000,
                     )
-                except Exception:  # noqa: BLE001 - handled by the empty check below
+                except Exception:  # noqa: BLE001 - fallback handles an empty field
                     pass
                 resolved_address = (await page.evaluate(
                     "() => { const a = document.querySelector('#building_address');"
                     " return a ? a.value : ''; }"
                 ) or "").strip()
 
-                # No address means MissionChief couldn't place this pin (an
-                # unresolvable spot). Refuse and say so, rather than build an
-                # addressless building.
+                # MissionChief's own reverse_address is US-centric and returns
+                # nothing for many valid worldwide spots. When it's empty, fall
+                # back to OUR geocoded address (the location is fine — the build
+                # runs on the coordinates) and fill the field so it isn't blank.
+                # Only refuse when there's no address from either source.
                 if not resolved_address:
-                    return BuildResult(
-                        False, None,
-                        f"MissionChief couldn't resolve an address for "
-                        f"{latitude:.5f},{longitude:.5f}, so nothing was built. "
-                        "The pin may be in an unmappable spot (open water, "
-                        "no nearby road) — try a pin closer to the building.",
-                    )
+                    fallback = (address or "").strip()
+                    if fallback:
+                        await page.evaluate(
+                            "(a) => { const el = document.querySelector('#building_address');"
+                            " if (el) el.value = a; }",
+                            fallback,
+                        )
+                        resolved_address = fallback
+                    else:
+                        return BuildResult(
+                            False, None,
+                            f"no address could be resolved for "
+                            f"{latitude:.5f},{longitude:.5f} (neither MissionChief "
+                            "nor the geocoder returned one), so nothing was built.",
+                        )
 
                 # 3. Free-only guard: the alliance button must not spend coins.
                 info = await page.evaluate(_ALLIANCE_BTN_INFO_SCRIPT, type_id)
