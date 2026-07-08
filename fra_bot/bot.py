@@ -103,17 +103,20 @@ class FRABot(commands.Bot):
             log.info("Marked %d interrupted scrape run(s) as failed", orphans)
         from .db.repos import AutomationRepo, MissionsRepo
 
-        stranded = await AutomationRepo(self.db).sweep_processing()
+        # In dry-run nothing real can have half-run, so re-queue an interrupted
+        # request instead of failing it with a scary "verify on MissionChief".
+        requeue = self.cfg.automation.dry_run
+        stranded = await AutomationRepo(self.db).sweep_processing(requeue=requeue)
         if stranded:
             log.warning(
-                "Flagged %d board request(s) interrupted mid-action for review",
-                stranded,
+                "%s %d board request(s) interrupted mid-action",
+                "Re-queued" if requeue else "Flagged", stranded,
             )
-        stranded_missions = await MissionsRepo(self.db).sweep_processing()
+        stranded_missions = await MissionsRepo(self.db).sweep_processing(requeue=requeue)
         if stranded_missions:
             log.warning(
-                "Flagged %d scheduled mission(s) interrupted mid-start for review",
-                stranded_missions,
+                "%s %d scheduled mission(s) interrupted mid-start",
+                "Re-queued" if requeue else "Flagged", stranded_missions,
             )
         await self.mc.start()
         await self.geocoder.start()
@@ -368,19 +371,24 @@ class FRABot(commands.Bot):
             dt.datetime.now(dt.timezone.utc)
             - dt.timedelta(minutes=STALE_PROCESSING_MINUTES)
         ).isoformat(timespec="seconds")
-        requests = await AutomationRepo(self.db).sweep_stale_processing(cutoff)
-        missions = await MissionsRepo(self.db).sweep_stale_processing(cutoff)
+        # Dry-run: re-queue rather than fail (nothing real can have half-run).
+        requeue = self.cfg.automation.dry_run
+        requests = await AutomationRepo(self.db).sweep_stale_processing(cutoff, requeue=requeue)
+        missions = await MissionsRepo(self.db).sweep_stale_processing(cutoff, requeue=requeue)
         if requests or missions:
-            log.warning(
-                "Stale-sweep released %d board request(s) and %d mission(s) "
-                "stuck in processing (>%dm)",
-                requests, missions, STALE_PROCESSING_MINUTES,
-            )
-            await self.notify_admin(
-                f"🧹 Released {requests + missions} request(s) stuck in "
-                f"processing for over {STALE_PROCESSING_MINUTES} min — please "
-                "verify nothing half-ran on MissionChief."
-            )
+            n = requests + missions
+            if requeue:
+                log.info("Stale-sweep re-queued %d dry-run request(s) stuck in processing", n)
+            else:
+                log.warning(
+                    "Stale-sweep released %d request(s) stuck in processing (>%dm)",
+                    n, STALE_PROCESSING_MINUTES,
+                )
+                await self.notify_admin(
+                    f"🧹 Released {n} request(s) stuck in processing for over "
+                    f"{STALE_PROCESSING_MINUTES} min — please verify nothing "
+                    "half-ran on MissionChief."
+                )
 
     # ------------------------------------------------------------------
     # Discord helpers
