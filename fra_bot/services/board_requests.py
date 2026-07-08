@@ -161,6 +161,39 @@ class BoardRequestService:
                 self.kind, self.thread_id, exc,
             )
 
+    async def force_guide(self, *, repost: bool = False) -> str:
+        """Sync this board's guide RIGHT NOW (bypassing the hourly throttle)
+        and report what happened — for the ``!fra guides`` command.
+
+        ``repost`` deletes the existing guide first and creates a fresh one,
+        so a guide buried under newer posts lands back at the bottom of the
+        thread where members actually see it."""
+        label = f"{self.kind} (thread {self.thread_id})"
+        if not self.guide_marker or not self.guide_body():
+            return f"➖ {label}: no guide defined"
+        if not self.cfg.automation.reply_to_board:
+            return f"➖ {label}: reply_to_board is off"
+        try:
+            if repost:
+                stored = await self.state.get(self._guide_id_key())
+                target = int(stored) if stored else await self.board.find_bot_post(
+                    self.thread_id, self.guide_marker
+                )
+                if target:
+                    await self.board.delete_post(self.thread_id, int(target))
+                await self.state.delete(self._guide_id_key())
+            # Clear the throttle + signature so _ensure_guide writes now.
+            await self.state.delete(self._guide_hash_key())
+            await self.state.delete(self._guide_refreshed_key())
+            await self._ensure_guide()
+        except MissionChiefError as exc:
+            return f"❌ {label}: {exc}"
+        post_id = await self.state.get(self._guide_id_key())
+        if post_id:
+            url = self.client.url(f"/alliance_threads/{self.thread_id}")
+            return f"✅ {label}: guide is post #{post_id} — {url}"
+        return f"❌ {label}: could not create or edit the guide (see the log)"
+
     async def poll(self) -> None:
         run_id = await self.runs.start(f"board_{self.kind}")
         try:

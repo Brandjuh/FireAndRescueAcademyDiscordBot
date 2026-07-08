@@ -274,6 +274,36 @@ class MissionScheduler:
         except MissionChiefError as exc:
             log.warning("mission: could not maintain guide on %s: %s", thread_id, exc)
 
+    async def force_guide(
+        self, thread_id: int, default_kind: str, *, repost: bool = False
+    ) -> str:
+        """Sync one request board's guide RIGHT NOW (bypassing the hourly
+        throttle) and report what happened — for ``!fra guides``. ``repost``
+        deletes the existing guide and creates a fresh one at the bottom of
+        the thread, where members actually see it."""
+        label = f"{default_kind} (thread {thread_id})"
+        if not self.cfg.automation.reply_to_board:
+            return f"➖ {label}: reply_to_board is off"
+        try:
+            if repost:
+                stored = await self.state.get(self._guide_id_key(thread_id))
+                target = int(stored) if stored else await self.board.find_bot_post(
+                    thread_id, _guide_marker(default_kind)
+                )
+                if target:
+                    await self.board.delete_post(thread_id, int(target))
+                await self.state.delete(self._guide_id_key(thread_id))
+            await self.state.delete(self._guide_hash_key(thread_id))
+            await self.state.delete(self._guide_refreshed_key(thread_id))
+            await self._ensure_guide(thread_id, default_kind)
+        except MissionChiefError as exc:
+            return f"❌ {label}: {exc}"
+        post_id = await self.state.get(self._guide_id_key(thread_id))
+        if post_id:
+            url = self.client.url(f"/alliance_threads/{thread_id}")
+            return f"✅ {label}: guide is post #{post_id} — {url}"
+        return f"❌ {label}: could not create or edit the guide (see the log)"
+
     async def _scan_board(self, thread_id: int, default_kind: str) -> int:
         await self._ensure_guide(thread_id, default_kind)
 

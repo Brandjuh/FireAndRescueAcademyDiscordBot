@@ -548,6 +548,57 @@ class AdminCog(commands.Cog):
         )
         await message.edit(content=f"{icon} {outcome.detail}{tail}"[:1900])
 
+    @fra.command(name="guides", aliases=["guidesync", "syncguides"])
+    async def guides(self, ctx: commands.Context, mode: str = "") -> None:
+        """Sync every board guide RIGHT NOW and report where each one is.
+
+        `!fra guides` creates/edits the guides in place. `!fra guides repost`
+        deletes each existing guide and posts a fresh one at the BOTTOM of its
+        thread — use this when a guide is buried under newer posts. Guides are
+        informational posts, so this works in dry-run too.
+        """
+        repost = mode.strip().lower() == "repost"
+        auto = self.bot.cfg.automation
+        message = await ctx.send(
+            "⏳ Syncing board guides… (MissionChief pacing applies — the "
+            "trainings guide fetches classroom availability, so give it a "
+            "few minutes)"
+        )
+        lines: list[str] = []
+
+        async def _report() -> None:
+            await message.edit(
+                content=("\n".join(lines) + "\n⏳ …")[:1990]
+            )
+
+        try:
+            if auto.training.enabled:
+                async with self.bot.job_lock("board-trainings"):
+                    lines.append(await self.bot.trainings.force_guide(repost=repost))
+                await _report()
+            if auto.building.enabled:
+                async with self.bot.job_lock("board-buildings"):
+                    lines.append(await self.bot.buildings.force_guide(repost=repost))
+                await _report()
+            boards = self.bot.missions_service._request_boards()
+            if boards:
+                async with self.bot.job_lock("missions"):
+                    for thread_id, kind in boards:
+                        lines.append(
+                            await self.bot.missions_service.force_guide(
+                                thread_id, kind, repost=repost
+                            )
+                        )
+        except Exception as exc:  # noqa: BLE001 — surface it to the admin
+            log.exception("guide sync failed")
+            lines.append(f"❌ guide sync aborted: {exc}")
+        if not lines:
+            lines.append(
+                "No boards enabled — turn on training/building/events/mission "
+                "board switches in config.yaml first."
+            )
+        await message.edit(content="\n".join(lines)[:1990])
+
     @fra.command(name="upgradebuildings", aliases=["upgradebuilding", "buildingupgrade"])
     async def upgrade_buildings(self, ctx: commands.Context, *, arg: str = "") -> None:
         """Level up + extend all alliance hospitals & prisons.

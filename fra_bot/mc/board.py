@@ -12,7 +12,7 @@ import logging
 from bs4 import BeautifulSoup
 
 from .client import MissionChiefClient
-from .errors import ParseError
+from .errors import MissionChiefError, ParseError
 from .parsers.board import BoardThreadPage, parse_board_thread_page
 
 log = logging.getLogger(__name__)
@@ -163,10 +163,15 @@ class BoardClient:
         return await self.find_bot_post(thread_id, marker)
 
     async def edit_post(self, post_id: int, content: str) -> bool:
-        """Edit one of our posts in place (Rails ``_method=patch``)."""
+        """Edit one of our posts in place (Rails ``_method=patch``).
+
+        Returns False (rather than raising) when the post can't be edited —
+        e.g. it was deleted, so its edit page 404s. Callers treat False as
+        "stale id: forget it and find/create the post again"."""
         try:
             html = await self._client.fetch_page(f"/alliance_posts/{post_id}/edit")
-        except ParseError:
+        except MissionChiefError as exc:
+            log.warning("Edit page for post %s unavailable (%s)", post_id, exc)
             return False
         soup = BeautifulSoup(html, "lxml")
         form = None
