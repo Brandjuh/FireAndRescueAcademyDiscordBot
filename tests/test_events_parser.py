@@ -33,6 +33,25 @@ def test_parse_event_form():
     assert form.last_free_at.startswith("2026-07-06T18:00")  # 14:00 EDT -> 18:00 UTC
 
 
+def test_last_free_uses_explicit_offset_when_present():
+    # MissionChief's real format carries seconds + a timezone offset; parse
+    # it exactly rather than assuming the NY game timezone.
+    html = EVENT_FORM_HTML.replace(
+        "Mon, 06 Jul 2026 14:00", "Mon, 06 Jul 2026 14:00:00 +0000"
+    )
+    form = parse_event_form(html)
+    # 14:00:00 +0000 IS 14:00 UTC — not shifted by the NY offset.
+    assert form.last_free_at == "2026-07-06T14:00:00+00:00"
+
+
+def test_last_free_offset_non_utc():
+    html = EVENT_FORM_HTML.replace(
+        "Mon, 06 Jul 2026 14:00", "Mon, 06 Jul 2026 09:00:00 -0500"
+    )
+    form = parse_event_form(html)
+    assert form.last_free_at == "2026-07-06T14:00:00+00:00"  # 09:00 -0500 = 14:00 UTC
+
+
 def test_is_free_submit():
     form = parse_event_form(EVENT_FORM_HTML)
     assert is_free_submit(form)
