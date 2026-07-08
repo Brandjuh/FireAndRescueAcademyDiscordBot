@@ -400,6 +400,33 @@ class AdminCog(commands.Cog):
                 "(not found, or already started/finished)."
             )
 
+    @fra.command(name="testbuild")
+    async def testbuild(
+        self, ctx: commands.Context, building_type: str, *, location: str
+    ) -> None:
+        """Test the building flow for a location without a board post.
+
+        `!fra testbuild hospital 350 5th Ave, New York` — in dry-run this
+        drives the real form (type, pin, address, alliance button) but does
+        NOT submit; with dry_run off it actually builds.
+        """
+        if building_type.lower() not in ("hospital", "prison"):
+            await ctx.send("Building type must be `hospital` or `prison`.")
+            return
+        await ctx.send(
+            f"⏳ Testing **{building_type.lower()}** build at `{location}`… "
+            "(browser start can take a moment)"
+        )
+        try:
+            result = await self.bot.buildings.test_build(
+                building_type.lower(), location
+            )
+        except Exception as exc:  # noqa: BLE001 - report, don't crash
+            log.exception("testbuild failed")
+            await ctx.send(f"❌ Test failed: {exc}")
+            return
+        await ctx.send(result[:1900])
+
     @fra.command(name="dump")
     async def dump(
         self, ctx: commands.Context, path: str, mode: str = "http"
