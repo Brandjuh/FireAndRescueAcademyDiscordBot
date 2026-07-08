@@ -70,6 +70,69 @@ def _members_cfg():
     return SimpleNamespace(missionchief=SimpleNamespace(alliance_id=1621))
 
 
+def _logs_html(entries):
+    rows = "".join(
+        f"<tr><td>{ts}</td><td><a href='/profile/1'>X</a></td>"
+        f"<td>{action}</td><td></td></tr>"
+        for ts, action in entries
+    )
+    return f'<table class="table"><tbody>{rows}</tbody></table>'
+
+
+async def test_logs_backfill_walks_history_and_suppresses_feed(db):
+    from fra_bot.db.repos import LogsRepo
+    from fra_bot.services.logs_sync import LogsSyncService
+
+    cfg = SimpleNamespace(sync=SimpleNamespace(logs_backfill_pages_per_chunk=10))
+    client = FakeClient(
+        {
+            "/alliance_logfiles?page=1": _logs_html(
+                [("06 Jul 14:23", "Alpha added to the alliance"),
+                 ("06 Jul 13:00", "Beta added to the alliance")]
+            ),
+            "/alliance_logfiles?page=2": _logs_html(
+                [("05 Jul 10:00", "Gamma added to the alliance")]
+            ),
+            "*": "<html><body></body></html>",  # page 3: past the end
+        }
+    )
+    svc = LogsSyncService(cfg, client, db)
+
+    done = await svc.backfill_step()
+
+    assert done is True
+    assert await svc.backfill_done() is True
+    logs = LogsRepo(db)
+    assert await logs.count() == 3
+    # Backfilled history must be marked posted, never queued for Discord.
+    assert await logs.pending_posts() == []
+
+
+async def test_logs_backfill_resumes_from_cursor(db):
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.logs_sync import (
+        STATE_BACKFILL_NEXT_PAGE,
+        LogsSyncService,
+    )
+
+    cfg = SimpleNamespace(sync=SimpleNamespace(logs_backfill_pages_per_chunk=1))
+    client = FakeClient(
+        {
+            "/alliance_logfiles?page=1": _logs_html([("06 Jul 14:23", "Alpha added to the alliance")]),
+            "/alliance_logfiles?page=2": _logs_html([("05 Jul 10:00", "Beta added to the alliance")]),
+            "*": "<html><body></body></html>",
+        }
+    )
+    svc = LogsSyncService(cfg, client, db)
+
+    # One page per chunk: first step processes page 1 and is not done.
+    assert await svc.backfill_step() is False
+    assert await StateRepo(db).get(STATE_BACKFILL_NEXT_PAGE) == "2"
+    # Next step processes page 2, then the empty page completes it.
+    assert await svc.backfill_step() is False
+    assert await svc.backfill_step() is True
+
+
 async def _seed_roster(db, n):
     members = MembersRepo(db)
     run = await RunsRepo(db).start("members")

@@ -68,7 +68,7 @@ class FRABot(commands.Bot):
 
         self.members_sync = MembersSyncService(cfg, self.mc, self.db)
         self.applications_sync = ApplicationsSyncService(self.mc, self.db)
-        self.logs_sync = LogsSyncService(self.mc, self.db)
+        self.logs_sync = LogsSyncService(cfg, self.mc, self.db)
         self.treasury_sync = TreasurySyncService(cfg, self.mc, self.db)
 
         # Phase 2 board automation.
@@ -233,6 +233,14 @@ class FRABot(commands.Bot):
             minutes=sync.expenses_backfill_interval,
             name="expenses-backfill",
             initial_delay_seconds=600.0,
+        )
+        # Full alliance-log history walk (no-ops once complete). Marks old
+        # rows already-posted so history never floods the feed.
+        sched.add_interval_job(
+            self._guarded(self.logs_sync.backfill_step, "logs-backfill"),
+            minutes=sync.logs_backfill_interval,
+            name="logs-backfill",
+            initial_delay_seconds=660.0,
         )
         sched.add_interval_job(
             self._guarded(

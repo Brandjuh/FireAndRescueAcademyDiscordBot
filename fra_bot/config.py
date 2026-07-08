@@ -49,6 +49,8 @@ class SyncConfig:
     expenses_interval: int
     expenses_backfill_pages_per_chunk: int
     expenses_backfill_interval: int
+    logs_backfill_pages_per_chunk: int
+    logs_backfill_interval: int
 
 
 @dataclass(frozen=True)
@@ -249,6 +251,12 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             ),
             expenses_backfill_interval=int(
                 _get(raw, "sync", "expenses_backfill_interval", default=15)
+            ),
+            logs_backfill_pages_per_chunk=int(
+                _get(raw, "sync", "logs_backfill_pages_per_chunk", default=20)
+            ),
+            logs_backfill_interval=int(
+                _get(raw, "sync", "logs_backfill_interval", default=15)
             ),
         ),
         discord=DiscordConfig(

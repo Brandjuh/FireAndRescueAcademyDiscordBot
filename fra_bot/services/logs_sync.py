@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 
+from ..config import Config
 from ..db.database import Database
 from ..db.repos import LogsRepo, RunsRepo, StateRepo
 from ..mc.client import MissionChiefClient
@@ -26,9 +27,13 @@ MAX_INCREMENTAL_PAGES = 10
 FIRST_RUN_PAGES = 25
 STATE_INITIALIZED = "logs_initialized"
 
+STATE_BACKFILL_DONE = "logs_backfill_done"
+STATE_BACKFILL_NEXT_PAGE = "logs_backfill_next_page"
+
 
 class LogsSyncService:
-    def __init__(self, client: MissionChiefClient, db: Database) -> None:
+    def __init__(self, cfg: Config, client: MissionChiefClient, db: Database) -> None:
+        self._cfg = cfg
         self._client = client
         self._logs = LogsRepo(db)
         self._runs = RunsRepo(db)
@@ -86,3 +91,73 @@ class LogsSyncService:
         if inserted:
             log.info("Logs sync: %d new rows over %d pages", inserted, pages_fetched)
         return inserted
+
+    # ------------------------------------------------------------------
+    # Full-history backfill (opt-in deep walk to the alliance's start)
+    # ------------------------------------------------------------------
+
+    async def backfill_done(self) -> bool:
+        return await self._state.get(STATE_BACKFILL_DONE) == "1"
+
+    async def backfill_step(self) -> bool:
+        """Process one chunk of the full log-history backfill.
+
+        Walks pages newest→oldest from a saved cursor, inserting each page's
+        rows (deduped by signature) and marking them already-posted so old
+        history never floods the feed. Returns True once the walk reaches
+        the last page. Resumable across restarts; the global pacer keeps it
+        gentle regardless of chunk size.
+        """
+        if await self.backfill_done():
+            return True
+
+        chunk_size = self._cfg.sync.logs_backfill_pages_per_chunk
+        next_page = int(await self._state.get(STATE_BACKFILL_NEXT_PAGE, "1"))
+        run_id = await self._runs.start("logs_backfill")
+        pages_fetched = 0
+        inserted_total = 0
+
+        try:
+            for _ in range(chunk_size):
+                html = await self._client.fetch_page(f"{LOGS_PATH}?page={next_page}")
+                pages_fetched += 1
+                page = parse_logs_page(html)
+
+                if next_page == 1 and not page.has_table:
+                    raise ParseError(
+                        "Logs page 1 has no table — layout change or not logged in"
+                    )
+                if not page.rows:
+                    # Walked past the last page: history is complete.
+                    await self._state.set(STATE_BACKFILL_DONE, "1")
+                    await self._state.delete(STATE_BACKFILL_NEXT_PAGE)
+                    await self._runs.finish(
+                        run_id, status="success", pages=pages_fetched,
+                        rows_new=inserted_total, message="log backfill complete",
+                    )
+                    log.info("Alliance log backfill COMPLETE (%d rows)", inserted_total)
+                    return True
+
+                # Oldest-first within the page; mark posted so nothing is
+                # re-announced. Cross-page duplicates are deduped by signature.
+                inserted_total += await self._logs.insert_batch(
+                    list(reversed(page.rows)), mark_posted=True
+                )
+                next_page += 1
+                await self._state.set(STATE_BACKFILL_NEXT_PAGE, str(next_page))
+        except MissionChiefError as exc:
+            await self._runs.finish(
+                run_id, status="failed", pages=pages_fetched,
+                rows_new=inserted_total, message=str(exc),
+            )
+            raise
+
+        await self._runs.finish(
+            run_id, status="success", pages=pages_fetched,
+            rows_new=inserted_total, message=f"log backfill at page {next_page}",
+        )
+        log.info(
+            "Alliance log backfill progress: next page %d (%d new this chunk)",
+            next_page, inserted_total,
+        )
+        return False
