@@ -146,8 +146,13 @@ def build_event_payload(
     latitude: float,
     longitude: float,
     address: str,
+    mission_type_id: int | None = None,
 ) -> list[tuple[str, str]]:
-    """Merge form fields with our coordinates + safe defaults."""
+    """Merge form fields with our coordinates + safe defaults.
+
+    ``mission_type_id`` optionally selects a specific preset (e.g. Major
+    fire = 41); when omitted the form's already-checked default is kept.
+    """
     merged = dict(form.fields)
     defaults = _LARGE_DEFAULTS if kind == "large" else _EVENT_DEFAULTS
     for key, value in defaults.items():
@@ -156,6 +161,8 @@ def build_event_payload(
     merged["mission_position[longitude]"] = f"{longitude:.6f}"
     merged["mission_position[address]"] = address
     merged["mission_position[coins]"] = "0"
+    if mission_type_id is not None:
+        merged["mission_position[mission_type_id]"] = str(mission_type_id)
 
     if kind == "event":
         # Event type radio is mirrored into mission_type_id.
@@ -165,41 +172,6 @@ def build_event_payload(
         if radio:
             merged["event_radio_group"] = radio
             merged["mission_position[mission_type_id]"] = radio
-
-    return [(key, value) for key, value in merged.items() if value != "" or key.endswith("]")]
-
-
-def build_custom_mission_payload(
-    form: EventForm,
-    *,
-    latitude: float,
-    longitude: float,
-    address: str,
-    mission_type_id: int | None,
-    poi_type: int,
-    size: int,
-    shape: str,
-    amount: int,
-) -> list[tuple[str, str]]:
-    """Large scale alliance mission body with member-supplied parameters.
-
-    Starts from the large-mission form defaults, then overrides the
-    position footprint with the caller's values. ``coins`` is always 0 —
-    the scheduler only ever starts free missions.
-    """
-    merged = dict(form.fields)
-    for key, value in _LARGE_DEFAULTS.items():
-        merged.setdefault(key, value)
-    merged["mission_position[latitude]"] = f"{latitude:.6f}"
-    merged["mission_position[longitude]"] = f"{longitude:.6f}"
-    merged["mission_position[address]"] = address
-    merged["mission_position[poi_type]"] = str(poi_type)
-    merged["mission_position[size]"] = str(size)
-    merged["mission_position[shape]"] = shape
-    merged["mission_position[amount]"] = str(amount)
-    merged["mission_position[coins]"] = "0"
-    if mission_type_id is not None:
-        merged["mission_position[mission_type_id]"] = str(mission_type_id)
 
     return [(key, value) for key, value in merged.items() if value != "" or key.endswith("]")]
 

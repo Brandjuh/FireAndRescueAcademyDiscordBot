@@ -1,5 +1,5 @@
-"""Tests for the custom "Own mission" feature: the board spec parser, the
-payload builder, the MissionsRepo queue and the scheduler's start logic."""
+"""The unified mission/event system: the board spec parser, the queue +
+rotation repos, and the scheduler's member-first / rotation / next-up logic."""
 
 from types import SimpleNamespace
 
@@ -7,120 +7,80 @@ import pytest
 import pytest_asyncio
 
 from fra_bot.db.database import Database
-from fra_bot.db.repos import MissionsRepo
+from fra_bot.db.repos import MissionsRepo, RotationRepo
 from fra_bot.geo.geocoder import GeocodeResult
-from fra_bot.mc.parsers.events import build_custom_mission_payload, parse_event_form
+from fra_bot.mc.parsers.missions_custom import value_field_name
 from fra_bot.mc.parsers.mission_spec import (
     MissionSpec,
     MissionSpecError,
+    is_mission_post,
     parse_mission_spec,
 )
 from fra_bot.services.missions import MissionScheduler
 
 
 # --------------------------------------------------------------------------
-# Board spec parsing
+# Board spec parsing (unified model)
 # --------------------------------------------------------------------------
 
-def test_parses_full_mission_post():
-    spec = parse_mission_spec(
-        "Own mission: 350 5th Ave, New York\n"
-        "type: 42\nsize: 3\namount: 4\npoi: 1\nshape: circle"
-    )
+def test_parse_preset_large_post():
+    spec = parse_mission_spec("large scale mission: 350 5th Ave, New York")
     assert spec is not None
+    assert spec.kind == "large" and spec.source == "preset"
     assert spec.location_text == "350 5th Ave, New York"
-    assert spec.mission_type_id == 42
-    assert spec.size == 3
-    assert spec.amount == 4
-    assert spec.poi_type == 1
+    assert not spec.recurring
+
+
+def test_parse_custom_post():
+    spec = parse_mission_spec(
+        "own mission: Grand Rapids\nname: Big fire\n"
+        "custom: need_lf=25 need_elw1=6 water_needed=15000\nrecurring"
+    )
+    assert spec.source == "custom" and spec.recurring
+    assert spec.custom.caption == "Big fire"
+    assert spec.custom.values == {"need_lf": 25, "need_elw1": 6, "water_needed": 15000}
+
+
+def test_parse_saved_post():
+    spec = parse_mission_spec("large scale mission: Amsterdam\nsaved: Wildfire")
+    assert spec.source == "saved" and spec.saved_name == "Wildfire"
+
+
+def test_parse_event_kind_post():
+    spec = parse_mission_spec("own mission: NYC\nkind: event")
+    assert spec.kind == "event" and spec.source == "preset"
+
+
+def test_custom_on_event_kind_rejected():
+    with pytest.raises(MissionSpecError):
+        parse_mission_spec("own mission: NYC\nkind: event\ncustom: need_lf=5")
 
 
 def test_non_mission_post_returns_none():
-    # A bare location (an *event* request on the shared thread) must NOT be
-    # picked up as a custom mission — no trigger word.
     assert parse_mission_spec("location: Amsterdam") is None
     assert parse_mission_spec("thanks everyone!") is None
 
 
-def test_events_yields_mission_posts():
-    # The events poller must NOT treat a custom-mission post as an event,
-    # otherwise the same post is started once as an event and once as a
-    # mission. is_mission_post fires even on an invalid mission post.
-    from fra_bot.mc.parsers.mission_spec import is_mission_post
-
-    assert is_mission_post("own mission: NYC\ntype: 5") is True
+def test_is_mission_post_ownership():
+    assert is_mission_post("own mission: NYC\ncustom: need_lf=5") is True
     assert is_mission_post("large scale mission: https://maps.google.com/?q=1,2") is True
     assert is_mission_post("location: Amsterdam") is False
-    assert is_mission_post("here's a cool https://maps.google.com/?q=1,2") is False
 
 
-def test_mission_post_without_location_raises():
-    with pytest.raises(MissionSpecError):
-        parse_mission_spec("own mission:\ntype: 5")
-
-
-def test_out_of_range_size_raises():
-    with pytest.raises(MissionSpecError):
-        parse_mission_spec("own mission: NYC\nsize: 999")
-
-
-def test_spec_defaults_and_validation():
+def test_spec_validation_and_describe():
     spec = MissionSpec(location_text="  NYC  ").validate()
-    assert spec.location_text == "NYC"
-    assert spec.mission_type_id is None
-    assert spec.size == 1 and spec.amount == 1 and spec.shape == "circle"
+    assert spec.location_text == "NYC" and spec.kind == "large"
+    assert "one-time" in spec.describe()
     with pytest.raises(MissionSpecError):
         MissionSpec(location_text="").validate()
     with pytest.raises(MissionSpecError):
-        MissionSpec(location_text="x", shape="triangle").validate()
+        MissionSpec(location_text="x", kind="bogus").validate()
+    with pytest.raises(MissionSpecError):
+        MissionSpec(location_text="x", source="saved").validate()  # no name
 
 
 # --------------------------------------------------------------------------
-# Payload builder
-# --------------------------------------------------------------------------
-
-_ELIGIBLE_FORM = """
-<html><body>
-Last free mission: Mon, 01 Jul 2019 12:00
-<form action="/missionAllianceCreate" method="post">
-<input type="hidden" name="authenticity_token" value="tok123">
-<input type="hidden" name="mission_position[latitude]" value="">
-<input type="hidden" name="mission_position[longitude]" value="">
-<input type="submit" value="Create mission">
-</form>
-</body></html>
-"""
-
-_STARTED_FORM = _ELIGIBLE_FORM.replace(
-    "Mon, 01 Jul 2019 12:00", "Wed, 01 Jan 2025 12:00"
-)
-
-_WAITING_FORM = _ELIGIBLE_FORM.replace(
-    "Mon, 01 Jul 2019 12:00", "Fri, 01 Jan 2100 12:00"
-)
-
-_COIN_FORM = _ELIGIBLE_FORM.replace(
-    'value="Create mission"', 'value="Create mission (5 coins)"'
-)
-
-
-def test_build_payload_injects_params_and_pins_coins():
-    form = parse_event_form(_ELIGIBLE_FORM)
-    body = build_custom_mission_payload(
-        form,
-        latitude=40.5, longitude=-73.9, address="NYC",
-        mission_type_id=42, poi_type=1, size=3, shape="circle", amount=4,
-    )
-    d = dict(body)
-    assert d["mission_position[latitude]"] == "40.500000"
-    assert d["mission_position[coins]"] == "0"
-    assert d["mission_position[size]"] == "3"
-    assert d["mission_position[amount]"] == "4"
-    assert d["mission_position[mission_type_id]"] == "42"
-
-
-# --------------------------------------------------------------------------
-# Repo queue
+# Repo: queue + rotation
 # --------------------------------------------------------------------------
 
 @pytest_asyncio.fixture
@@ -133,48 +93,109 @@ async def db(tmp_path):
 
 async def test_board_dedup_and_cancel(db):
     repo = MissionsRepo(db)
-    fields = {"mission_type_id": 1, "size": 1, "amount": 1, "shape": "circle", "location_text": "x"}
+    fields = {"kind": "large", "mission_source": "preset", "location_text": "x"}
     first = await repo.create_from_board(15293, 500, fields, requester_name="Bob", requester_mc_id=7)
     dup = await repo.create_from_board(15293, 500, fields, requester_name="Bob", requester_mc_id=7)
     assert first is not None and dup is None
     assert await repo.cancel(first) is True
-    # Cancelling again (now cancelled) is a no-op.
     assert await repo.cancel(first) is False
 
 
-async def test_sweep_processing_flags_stranded(db):
-    repo = MissionsRepo(db)
-    mid = await repo.create(source="discord", location_text="x")
-    await repo.claim(mid)  # -> processing
-    swept = await repo.sweep_processing()
-    assert swept == 1
-    row = await repo.get(mid)
-    assert row["status"] == "failed"
+async def test_rotation_cycle_is_fair(db):
+    rot = RotationRepo(db)
+    a = await rot.add(location_text="A", created_by="admin")
+    b = await rot.add(location_text="B", created_by="admin")
+    # Never-started, lowest id first.
+    assert (await rot.next_entry())["id"] == a
+    await rot.mark_started(a, latitude=1.0, longitude=2.0, address="A addr")
+    assert (await rot.next_entry())["id"] == b        # a now has a timestamp
+    await rot.mark_started(b, latitude=3.0, longitude=4.0, address="B addr")
+    assert (await rot.next_entry())["id"] == a        # back to a (older start)
+
+
+async def test_rotation_pause_and_remove(db):
+    rot = RotationRepo(db)
+    a = await rot.add(location_text="A", created_by="admin")
+    await rot.set_active(a, False)
+    assert await rot.next_entry() is None             # paused -> skipped
+    assert await rot.active_count() == 0
+    await rot.set_active(a, True)
+    assert (await rot.next_entry())["id"] == a
+    assert await rot.remove(a) is True
+    assert await rot.remove(a) is False
 
 
 # --------------------------------------------------------------------------
-# Scheduler start logic
+# Scheduler
 # --------------------------------------------------------------------------
+
+def _large_form(last_free="Mon, 01 Jul 2019 12:00", *, coins="0", saved=""):
+    return f"""
+    <html><body>
+    Last free mission: {last_free}
+    {saved}
+    <form action="/missionAllianceCreate" id="new_mission_position" method="post">
+      <input type="hidden" name="authenticity_token" value="tok"/>
+      <input type="radio" name="mission_position[mission_type_id]" value="41" checked/>
+      <input type="text" name="mission_position[mission_custom][caption]" value=""/>
+      <input type="number" name="{value_field_name('need_lf')}" value="0"/>
+      <input type="number" name="{value_field_name('need_elw1')}" value="0"/>
+      <input type="hidden" name="mission_position[latitude]" value=""/>
+      <input type="hidden" name="mission_position[longitude]" value=""/>
+      <input type="hidden" name="mission_position[coins]" value="{coins}"/>
+      <input type="submit" value="Start mission"/>
+    </form>
+    </body></html>
+    """
+
+
+_SAVED_ANCHOR = (
+    '<a class="mission_custom_saved_restore" '
+    "params='{\"caption\":\"Wildfire\",\"need_lf\":\"100\",\"need_brush_truck\":\"100\"}'>"
+    "Wildfire (Author1)</a>"
+)
+
+_ELIGIBLE = _large_form()
+_ELIGIBLE_SAVED = _large_form(saved=_SAVED_ANCHOR)
+_STARTED = _large_form("Wed, 01 Jan 2025 12:00")           # advanced cooldown
+_WAITING = _large_form("Fri, 01 Jan 2100 12:00")           # cooldown in the future
+_COIN = _large_form(coins="500")
+_EVENT_FORM = """
+<html><body>
+Last free mission: Mon, 01 Jul 2019 12:00
+<form action="/missionAllianceEventCreate" method="post">
+  <input type="hidden" name="authenticity_token" value="tok"/>
+  <input type="radio" name="mission_position[mission_type_id]" value="7" checked/>
+  <input type="hidden" name="mission_position[coins]" value="0"/>
+  <input type="submit" value="Start free mission"/>
+</form></body></html>
+"""
+
 
 class FakeClient:
-    def __init__(self, form_html, *, post_status=200):
-        self.form_html = form_html
+    def __init__(self, large_html=_ELIGIBLE, event_html=_EVENT_FORM, *, post_status=200):
+        self.large_html = large_html
+        self.event_html = event_html
         self.post_status = post_status
         self.posted = False
         self.post_calls = 0
+        self.posted_body = None
+        self.fetched: list[str] = []
 
     def url(self, path):
         return path
 
     async def fetch_page(self, path, *, referer=None):
-        # After a start, show an advanced cooldown so verification passes.
-        if self.posted:
-            return _STARTED_FORM
-        return self.form_html
+        self.fetched.append(path)
+        is_event = "Event" in path
+        if self.posted:  # verification fetch: show an advanced cooldown
+            return _STARTED
+        return self.event_html if is_event else self.large_html
 
     async def post_form(self, path, data, **kwargs):
         self.posted = True
         self.post_calls += 1
+        self.posted_body = dict(data)
         return (self.post_status, {}, "")
 
 
@@ -206,57 +227,180 @@ def _scheduler(cfg, client, db):
     return MissionScheduler(cfg, client, db, FakeGeo())
 
 
+async def _enqueue(sched, **kw):
+    kw.setdefault("source", "discord")
+    kw.setdefault("kind", "large")
+    kw.setdefault("mission_source", "preset")
+    kw.setdefault("location_text", "NYC")
+    return await sched.missions.create(**kw)
+
+
+# -- basic start paths ------------------------------------------------------
+
 async def test_dry_run_marks_skipped_and_resolves(db):
-    sched = _scheduler(_cfg(dry_run=True), FakeClient(_ELIGIBLE_FORM), db)
-    mid = await sched.missions.create(source="discord", location_text="NYC", size=2, amount=3)
-    await sched._process_queue()
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    mid = await _enqueue(sched)
+    await sched._advance()
     row = await sched.missions.get(mid)
     assert row["status"] == "skipped"
-    assert row["latitude"] == 40.5           # geocoded
+    assert row["latitude"] == 40.5
     assert "would start" in row["status_detail"]
 
 
 async def test_cooldown_queues_as_waiting(db):
-    sched = _scheduler(_cfg(dry_run=True), FakeClient(_WAITING_FORM), db)
-    mid = await sched.missions.create(source="discord", location_text="NYC")
-    await sched._process_queue()
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(_WAITING), db)
+    mid = await _enqueue(sched)
+    await sched._advance()
     row = await sched.missions.get(mid)
     assert row["status"] == "waiting"
     assert row["next_attempt_at"] is not None
 
 
 async def test_coin_form_refused(db):
-    sched = _scheduler(_cfg(dry_run=False), FakeClient(_COIN_FORM), db)
-    mid = await sched.missions.create(source="discord", location_text="NYC")
-    await sched._process_queue()
+    sched = _scheduler(_cfg(dry_run=False), FakeClient(_COIN), db)
+    mid = await _enqueue(sched)
+    await sched._advance()
     row = await sched.missions.get(mid)
     assert row["status"] == "failed"
     assert "coins" in row["status_detail"]
 
 
-async def test_live_start_verified_done(db):
-    client = FakeClient(_ELIGIBLE_FORM)
+async def test_live_preset_verified_done(db):
+    client = FakeClient(_ELIGIBLE)
     sched = _scheduler(_cfg(dry_run=False), client, db)
-    mid = await sched.missions.create(source="discord", location_text="NYC")
-    await sched._process_queue()
+    mid = await _enqueue(sched)
+    await sched._advance()
     row = await sched.missions.get(mid)
     assert client.post_calls == 1
     assert row["status"] == "done"
 
 
+# -- custom + saved ---------------------------------------------------------
+
+async def test_live_custom_posts_real_fields(db):
+    client = FakeClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    await _enqueue(
+        sched, mission_source="custom", caption="Big fire",
+        custom_values='{"need_lf": 25, "need_elw1": 6}',
+    )
+    await sched._advance()
+    body = client.posted_body
+    assert body["mission_position[mission_type_id]"] == "-1"
+    assert body["mission_position[mission_custom][caption]"] == "Big fire"
+    assert body[value_field_name("need_lf")] == "25"
+    assert body[value_field_name("need_elw1")] == "6"
+    assert body["mission_position[coins]"] == "0"
+
+
+async def test_live_saved_resolves_from_dropdown(db):
+    client = FakeClient(_ELIGIBLE_SAVED)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    await _enqueue(sched, mission_source="saved", saved_name="Wildfire")
+    await sched._advance()
+    body = client.posted_body
+    assert body["mission_position[mission_type_id]"] == "-1"
+    assert body["mission_position[mission_custom][caption]"] == "Wildfire"
+    assert body[value_field_name("need_lf")] == "100"
+    assert body[value_field_name("need_brush_truck")] == "100"
+
+
+async def test_saved_missing_from_dropdown_fails(db):
+    client = FakeClient(_ELIGIBLE)  # no saved anchors
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    mid = await _enqueue(sched, mission_source="saved", saved_name="Nope")
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "failed"
+    assert "not found" in row["status_detail"]
+    assert client.post_calls == 0  # never submitted
+
+
+async def test_event_kind_uses_event_path(db):
+    client = FakeClient(_ELIGIBLE, _EVENT_FORM)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    await _enqueue(sched, kind="event")
+    await sched._advance()
+    assert any("Event" in p for p in client.fetched)
+
+
+# -- contribution gate ------------------------------------------------------
+
 async def test_board_contribution_gate_skips(db):
-    # Seed a low-contribution member; a board request from them is skipped.
     await db.execute(
         "INSERT INTO members (mc_user_id, name, contribution_rate, is_active, "
         "first_seen_at, last_seen_at) VALUES (7, 'Bob', 1.0, 1, ?, ?)",
         ("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
     )
-    sched = _scheduler(_cfg(dry_run=True, min_rate=5.0), FakeClient(_ELIGIBLE_FORM), db)
+    sched = _scheduler(_cfg(dry_run=True, min_rate=5.0), FakeClient(), db)
     mid = await sched.missions.create_from_board(
-        15293, 700, {"size": 1, "amount": 1, "shape": "circle", "location_text": "NYC"},
+        15293, 700, {"kind": "large", "mission_source": "preset", "location_text": "NYC"},
         requester_name="Bob", requester_mc_id=7,
     )
-    await sched._process_queue()
+    await sched._advance()
     row = await sched.missions.get(mid)
     assert row["status"] == "skipped"
     assert "contribution" in row["status_detail"]
+
+
+# -- priority: member first, then rotation ----------------------------------
+
+async def test_member_request_served_before_rotation(db):
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    mid = await _enqueue(sched)                              # member request
+    rid = await sched.rotation.add(location_text="Rotation City", created_by="admin")
+
+    await sched._advance()                                  # serves the member
+    assert (await sched.missions.get(mid))["status"] == "skipped"
+    assert (await sched.rotation.get(rid))["last_started_at"] is None  # untouched
+
+    await sched._advance()                                  # queue empty -> rotation
+    assert (await sched.rotation.get(rid))["last_started_at"] is not None
+
+
+async def test_rotation_geocode_failure_deactivates(db):
+    class DeadGeo(FakeGeo):
+        async def search(self, query):
+            from fra_bot.geo.geocoder import GeocodeError
+            raise GeocodeError("no such place")
+
+    sched = MissionScheduler(_cfg(dry_run=True), FakeClient(), db, DeadGeo())
+    rid = await sched.rotation.add(location_text="Nowhere", created_by="admin")
+    handled = await sched._advance()
+    assert handled == 0
+    row = await sched.rotation.get(rid)
+    assert row["active"] == 0
+    assert "geocode failed" in (row["address"] or "")
+
+
+# -- recurring promotion + next-up ------------------------------------------
+
+async def test_recurring_request_promotes_to_rotation(db):
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    mid = await _enqueue(sched, recurring=1, location_text="Grand Rapids")
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "skipped"
+    assert row["rotation_id"] is not None                   # promoted + linked
+    entries = await sched.rotation.list_all()
+    assert len(entries) == 1
+    assert entries[0]["location_text"] == "Grand Rapids"
+    assert entries[0]["latitude"] == 40.5                   # cached resolved coords
+
+
+async def test_next_up_prefers_request_then_rotation(db):
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    rid = await sched.rotation.add(location_text="Rotation City", created_by="admin")
+    # With only a rotation entry, next_up is the rotation.
+    nxt = await sched.next_up()
+    assert nxt["origin"] == "rotation" and nxt["id"] == rid
+
+    mid = await _enqueue(sched, location_text="Member City")
+    nxt = await sched.next_up()
+    assert nxt["origin"] == "request" and nxt["id"] == mid
+    assert nxt["location"] in ("Member City", "Resolved NYC")
+
+
+async def test_next_up_none_when_empty(db):
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    assert await sched.next_up() is None

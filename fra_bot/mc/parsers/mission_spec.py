@@ -1,62 +1,72 @@
-"""The parameter set for a custom "Own mission" and how to read one from
-a board post.
+"""The unified mission/event request and how to read one from a board post.
 
-A custom mission is a large scale alliance mission whose parameters the
-member supplies in full: which mission type, the position footprint
-(poi type / size / shape / amount) and where. Coins are always pinned to
-0 — the scheduler starts free missions only, never paid ones.
+A single :class:`MissionSpec` describes everything a member can ask for:
 
-Two front-ends produce a :class:`MissionSpec`: the Discord panel/slash
-command (structured input) and a structured board post (parsed here).
-The board parser is deliberately strict — it only fires on an explicit
-``own mission:`` / ``large scale mission:`` marker so it never collides
-with the location-only *event* requests that share thread 15293.
+* **location** — free text ("Grand Rapids", "Wal Amsterdam") or a maps link,
+* **kind** — an alliance ``event`` or a ``large`` scale alliance mission,
+* **source** — a ``preset`` mission, a member-supplied ``custom`` Own mission,
+  or one picked from MissionChief's ``saved`` missions dropdown,
+* **schedule** — ``once`` (a one-off queue item) or ``recurring`` (added to
+  the admin rotation list so the bot keeps cycling it).
+
+Coins are never part of a request: the scheduler starts free missions only.
+
+Two front-ends build a spec: the Discord slash command / panel (structured
+input, see :mod:`fra_bot.cogs.missions`) and a structured board post (parsed
+here). The board parser is deliberately strict — it only fires on an explicit
+``own mission:`` / ``large scale mission:`` marker so it never collides with
+the bare-location *event* requests that share the board thread.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ...geo.maps_links import find_maps_links
+from .missions_custom import CustomMission, CustomMissionError, parse_custom_values
 
-# Reasonable guards so a typo can't request a 9999-wide mission field.
-MAX_SIZE = 20
-MAX_AMOUNT = 50
-VALID_SHAPES = ("circle", "polygon", "rectangle")
+KINDS = ("large", "event")
+SOURCES = ("preset", "custom", "saved")
+# The four selectable presets on /missionAllianceNew (Own mission is -1 and is
+# handled via ``source='custom'``, not as a preset).
+PRESET_TYPE_IDS = {41: "Major fire", 61: "Unannounced demonstration",
+                   62: "Pile-up", 112: "Bomb Explosion"}
 
-# A post is a custom-mission request only when it opens with one of these.
-# Horizontal-whitespace classes ([^\S\n]) keep each value on its own line so
-# a blank trigger line can't swallow the next parameter line as the location.
+# A post is a structured mission request only when it opens with one of these.
+# Horizontal-whitespace classes ([^\S\n]) keep each value on its own line so a
+# blank trigger line can't swallow the next parameter line as the location.
 _TRIGGER_RE = re.compile(
     r"(?:^|\n)[^\S\n]*(?:!mission|own\s+mission|custom\s+mission|"
     r"large\s+scale\s+(?:alliance\s+)?mission)[^\S\n]*[:\-][^\S\n]*(.*)",
     re.IGNORECASE,
 )
 
-# key: value lines for the individual parameters.
 _KEY_RE = {
-    "mission_type_id": re.compile(r"(?:^|\n)\s*(?:type|mission_?type|type_?id)\s*[:=]\s*(\d+)", re.IGNORECASE),
-    "poi_type": re.compile(r"(?:^|\n)\s*poi(?:_?type)?\s*[:=]\s*(\d+)", re.IGNORECASE),
-    "size": re.compile(r"(?:^|\n)\s*size\s*[:=]\s*(\d+)", re.IGNORECASE),
-    "amount": re.compile(r"(?:^|\n)\s*(?:amount|count|qty)\s*[:=]\s*(\d+)", re.IGNORECASE),
-    "shape": re.compile(r"(?:^|\n)\s*shape\s*[:=]\s*([A-Za-z]+)", re.IGNORECASE),
+    "kind": re.compile(r"(?:^|\n)\s*kind\s*[:=]\s*([A-Za-z]+)", re.IGNORECASE),
+    "preset": re.compile(r"(?:^|\n)\s*(?:type|mission_?type|type_?id|preset)\s*[:=]\s*(\d+)", re.IGNORECASE),
+    "saved": re.compile(r"(?:^|\n)\s*(?:saved|saved_?mission|preset_?name)\s*[:=]\s*(.+)", re.IGNORECASE),
+    "name": re.compile(r"(?:^|\n)\s*(?:name|caption|title)\s*[:=]\s*(.+)", re.IGNORECASE),
+    "custom": re.compile(r"(?:^|\n)\s*(?:custom|units|params|requirements)\s*[:=]\s*(.+)", re.IGNORECASE),
     "location": re.compile(
         r"(?:^|\n)[^\S\n]*(?:location|where|address|loc)[^\S\n]*[:=][^\S\n]*(.+)",
         re.IGNORECASE,
     ),
 }
+_RECURRING_RE = re.compile(
+    r"(?:^|\n)\s*(?:recurring|schedule[d]?|rotation|rotate|repeat)\b", re.IGNORECASE
+)
 
 
 class MissionSpecError(ValueError):
-    """A supplied mission parameter is missing or out of range."""
+    """A supplied request parameter is missing or out of range."""
 
 
 def is_mission_post(content: str) -> bool:
-    """True when a board post opens with a custom-mission trigger.
+    """True when a board post opens with a structured-mission trigger.
 
     Used by the *events* poller to yield ownership of these posts: a custom
-    mission and a location-only event both live on the same board thread, so
+    mission and a bare-location event both live on the same board thread, so
     without this a mission post (which usually carries a maps link) would be
     picked up by BOTH consumers and started twice."""
     return _TRIGGER_RE.search(content or "") is not None
@@ -65,44 +75,80 @@ def is_mission_post(content: str) -> bool:
 @dataclass
 class MissionSpec:
     location_text: str
-    mission_type_id: int | None = None
-    poi_type: int = 0
-    size: int = 1
-    shape: str = "circle"
-    amount: int = 1
+    kind: str = "large"
+    source: str = "preset"
+    preset_type_id: int | None = None
+    custom: CustomMission | None = None
+    saved_name: str | None = None
+    recurring: bool = False
 
     def validate(self) -> "MissionSpec":
-        """Clamp/validate member input; raise on anything unusable."""
-        if not (self.location_text or "").strip():
+        """Clamp/validate the request; raise on anything unusable."""
+        self.location_text = (self.location_text or "").strip()[:200]
+        if not self.location_text:
             raise MissionSpecError("a location is required")
-        self.location_text = self.location_text.strip()[:200]
-        if self.mission_type_id is not None and self.mission_type_id < 0:
-            raise MissionSpecError("mission type id must be positive")
-        if not (1 <= self.size <= MAX_SIZE):
-            raise MissionSpecError(f"size must be between 1 and {MAX_SIZE}")
-        if not (1 <= self.amount <= MAX_AMOUNT):
-            raise MissionSpecError(f"amount must be between 1 and {MAX_AMOUNT}")
-        if self.poi_type < 0:
-            raise MissionSpecError("poi type must be positive")
-        self.shape = (self.shape or "circle").lower()
-        if self.shape not in VALID_SHAPES:
-            raise MissionSpecError(f"shape must be one of {', '.join(VALID_SHAPES)}")
+
+        self.kind = (self.kind or "large").lower()
+        if self.kind not in KINDS:
+            raise MissionSpecError(f"kind must be one of {', '.join(KINDS)}")
+
+        self.source = (self.source or "preset").lower()
+        if self.source not in SOURCES:
+            raise MissionSpecError(f"source must be one of {', '.join(SOURCES)}")
+
+        # Own-mission data (custom / saved) exists only on the large scale
+        # form; events are always a preset free start.
+        if self.source in ("custom", "saved") and self.kind != "large":
+            raise MissionSpecError(
+                "custom and saved missions are large scale only — set kind to 'large'"
+            )
+
+        if self.source == "custom":
+            if self.custom is None:
+                raise MissionSpecError("custom mission data is required")
+            try:
+                self.custom = self.custom.clamped()
+            except CustomMissionError as exc:
+                raise MissionSpecError(str(exc)) from exc
+        else:
+            self.custom = None
+
+        if self.source == "saved":
+            self.saved_name = (self.saved_name or "").strip()
+            if not self.saved_name:
+                raise MissionSpecError("a saved-mission name is required")
+        else:
+            self.saved_name = None
+
+        if self.source == "preset" and self.preset_type_id is not None:
+            if self.kind != "large" or self.preset_type_id not in PRESET_TYPE_IDS:
+                # Unknown/irrelevant preset id: drop it and use the form default.
+                self.preset_type_id = None
+        else:
+            self.preset_type_id = None
+
         return self
 
-
-def _int(text: str, default: int) -> int:
-    try:
-        return int(text)
-    except (TypeError, ValueError):
-        return default
+    # Convenience for the queue/rotation storage layer.
+    def describe(self) -> str:
+        if self.source == "custom" and self.custom is not None:
+            body = f"custom '{self.custom.caption}' ({self.custom.summary()})"
+        elif self.source == "saved":
+            body = f"saved '{self.saved_name}'"
+        elif self.preset_type_id is not None:
+            body = f"preset {PRESET_TYPE_IDS.get(self.preset_type_id, self.preset_type_id)}"
+        else:
+            body = "preset"
+        sched = "recurring" if self.recurring else "one-time"
+        return f"{self.kind} · {body} · {sched}"
 
 
 def parse_mission_spec(content: str) -> MissionSpec | None:
     """Parse a structured board post into a :class:`MissionSpec`.
 
-    Side-effect free. Returns ``None`` when the post isn't a custom-mission
-    request; raises :class:`MissionSpecError` when it clearly is one but
-    the parameters are invalid.
+    Side-effect free. Returns ``None`` when the post isn't a structured
+    mission request; raises :class:`MissionSpecError` when it clearly is one
+    but the parameters are invalid.
     """
     trigger = _TRIGGER_RE.search(content or "")
     if not trigger:
@@ -118,19 +164,37 @@ def parse_mission_spec(content: str) -> MissionSpec | None:
     if not location:
         raise MissionSpecError("no location given")
 
-    def _grab(key: str, default: int) -> int:
-        m = _KEY_RE[key].search(content)
-        return _int(m.group(1), default) if m else default
+    kind_match = _KEY_RE["kind"].search(content)
+    kind = (kind_match.group(1).lower() if kind_match else "large")
 
-    type_match = _KEY_RE["mission_type_id"].search(content)
-    shape_match = _KEY_RE["shape"].search(content)
+    saved_match = _KEY_RE["saved"].search(content)
+    custom_match = _KEY_RE["custom"].search(content)
+    name_match = _KEY_RE["name"].search(content)
+    preset_match = _KEY_RE["preset"].search(content)
+    recurring = _RECURRING_RE.search(content) is not None
+
+    source = "preset"
+    custom: CustomMission | None = None
+    saved_name: str | None = None
+    if saved_match:
+        source = "saved"
+        saved_name = saved_match.group(1).strip()
+    elif custom_match:
+        source = "custom"
+        try:
+            values = parse_custom_values(custom_match.group(1))
+        except CustomMissionError as exc:
+            raise MissionSpecError(str(exc)) from exc
+        caption = (name_match.group(1).strip() if name_match else "") or location
+        custom = CustomMission(caption=caption, values=values)
 
     spec = MissionSpec(
         location_text=location,
-        mission_type_id=int(type_match.group(1)) if type_match else None,
-        poi_type=_grab("poi_type", 0),
-        size=_grab("size", 1),
-        shape=shape_match.group(1) if shape_match else "circle",
-        amount=_grab("amount", 1),
+        kind=kind,
+        source=source,
+        preset_type_id=int(preset_match.group(1)) if preset_match else None,
+        custom=custom,
+        saved_name=saved_name,
+        recurring=recurring,
     )
     return spec.validate()

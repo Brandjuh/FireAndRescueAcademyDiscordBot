@@ -158,6 +158,15 @@ class FRABot(commands.Bot):
             except discord.HTTPException:
                 pass
             return
+        if isinstance(error, _commands.CommandOnCooldown):
+            try:
+                await ctx.send(
+                    f"⏳ That command is on cooldown — try again in "
+                    f"{error.retry_after:.0f}s."
+                )
+            except discord.HTTPException:
+                pass
+            return
         log.exception("Command error in %s", getattr(ctx, "command", None), exc_info=error)
         try:
             await ctx.send("❌ Something went wrong running that command.")

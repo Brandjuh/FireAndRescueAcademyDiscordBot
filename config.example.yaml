@@ -85,11 +85,16 @@ automation:
     interval: 5
     min_contribution_rate: 5.0
   mission:
-    # Custom "Own mission": members supply ALL parameters (type, size,
-    # amount, location) via the Discord panel / /mission slash command, or
-    # a structured board post. Queued and started at the next FREE mission
-    # slot. Starts still honour the global dry_run switch above.
-    enabled: false            # master switch: runs the queue scheduler
+    # Unified mission/event system. Members request an alliance EVENT or a
+    # LARGE scale alliance mission via the Discord panel / /mission slash
+    # command, or a structured board post. They can supply a custom "Own
+    # mission" (required-unit values), pick one of the game's SAVED missions
+    # by name, or take a preset, and mark it one-time or recurring. Recurring
+    # requests join the rotation list (admins manage it with `!fra rotation`).
+    # The scheduler serves member requests first, then cycles the rotation to
+    # fill free slots. Queued and started at the next FREE slot; starts still
+    # honour the global dry_run switch above and never spend coins.
+    enabled: false            # master switch: runs the queue + rotation scheduler
     board_enabled: false      # also parse structured mission posts from the board
     thread_id: 15293          # board thread scanned when board_enabled
     interval: 5               # poll interval in minutes

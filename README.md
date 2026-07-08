@@ -212,15 +212,21 @@ Requires Discord administrator permission or a role listed in
 |---|---|
 | `!fra status` | Data counts, backfill progress, circuit breaker, recent sync runs |
 | `!fra sync <members\|applications\|logs\|treasury\|expenses\|backfill>` | Run a sync now |
+| `!fra synccommands [global]` | Re-sync the slash commands with Discord (guild by default; rate-limited to once/10 min) |
 | `!fra balance` | Latest known alliance funds |
 | `!fra top10 [daily\|monthly]` | Current income top-10 |
 | `!fra report list` | List every registered report and its periods |
 | `!fra report <name> [period]` | Render any report (`period`: today/yesterday/week/month/prev-month/year/prev-year/all; `daily`/`monthly` alias the income top-10) |
 | `!fra automation` | Board automation switches, dry-run state, recent requests |
 | `!fra sync <trainings\|buildings\|events>` | Poll a board thread now |
+| `!fra sync missions` | Advance the mission/event queue + rotation now |
 | `!fra missionpanel` | Post the "Request a mission" panel to the configured channel |
 | `!fra missions [limit]` | List recent scheduled missions and their status |
 | `!fra cancelmission <id>` | Cancel a not-yet-started scheduled mission |
+| `!fra nextmission` | Show which mission/event is up next and where (for the eventpinger) |
+| `!fra rotation` / `list` | Show the auto-start rotation list and which entry is next |
+| `!fra rotation add <location> [\| kind: event] [\| preset: Pile-up] [\| custom: need_lf=25 …] [\| saved: <name>] [\| name: <caption>]` | Add a location to the rotation |
+| `!fra rotation remove\|on\|off <id>` | Remove, pause or resume a rotation entry |
 | `!fra testbuild <hospital\|prison> <location>` | Test the building flow for a location (dry-run drives the form without submitting) |
 | `!fra dump <path> [rendered]` | Upload a MissionChief page's HTML for inspection (CSRF tokens redacted; `rendered` runs it through Playwright) |
 | `!fra update` | Pull the latest code, install deps and restart the bot |
@@ -229,27 +235,45 @@ Requires Discord administrator permission or a role listed in
 Members request missions with the **/mission** slash command or the panel
 button (see below).
 
-### Custom missions ("Own mission")
+### Missions & events
 
-Members request a **large scale alliance mission** and supply the full
-parameter set themselves — mission type, footprint (size/amount) and
-location. Requests arrive two ways:
+One system handles every mission/event request. A request has four choices:
 
-* the **/mission** slash command, or the button on the panel posted by
+* **location** — a place name ("Grand Rapids", "Wal Amsterdam") or a maps
+  link; it's geocoded;
+* **kind** — an alliance **event** or a **large** scale alliance mission;
+* **mission data** — a **preset**, a **custom** Own mission (you supply the
+  required-unit values, e.g. `need_lf=25 need_elw1=6 water_needed=15000`;
+  each field caps at 100 except water/foam at 1,000,000), or one of the
+  game's **saved** missions picked by name;
+* **schedule** — one-time, or **recurring** (it joins the rotation list).
+
+Requests arrive three ways:
+
+* the **/mission** slash command (with `kind` / `schedule` / `preset` /
+  `saved` / `custom` options), or the button on the panel posted by
   `!fra missionpanel` (channel set by `automation.mission.panel_channel_id`);
 * a structured board post on `automation.mission.thread_id`, e.g.
-  `own mission: 350 5th Ave, New York` / `type: 42` / `size: 3` /
-  `amount: 4` (only when `automation.mission.board_enabled`).
+  `own mission: Grand Rapids` / `name: Big fire` /
+  `custom: need_lf=25 need_elw1=6` / `recurring`, or
+  `large scale mission: Amsterdam` / `saved: Wildfire`
+  (only when `automation.mission.board_enabled`).
 
-Requests queue in `scheduled_missions` and are started **one at a time at
-the next free mission slot** (cooldown-aware), reusing the large-mission
-form path with a hard free-only guard — the bot never spends coins. The
-scheduler only runs when `automation.mission.enabled`, and a real start
-only happens when `automation.dry_run` is off; in dry-run each request is
-recorded as *skipped* with what would have been started. Outcomes are
-announced back in Discord (never on MissionChief while in dry-run). The
-`missions` report (`!fra report missions`) summarises requests and
-outcomes.
+The **rotation list** is an admin-managed set of locations the bot starts
+automatically and keeps cycling forever — one per free slot, oldest-started
+first. **Member requests come first**; the rotation only fills a free slot
+when nothing is queued. `!fra nextmission` reports which mission/event is up
+next and where (so the eventpinger can be driven off it). Recurring member
+requests are promoted into the rotation once they first start.
+
+Everything queues in `scheduled_missions` and starts **one at a time at the
+next free slot** (cooldown-aware), with a hard free-only guard — the bot
+never spends coins. The scheduler only runs when `automation.mission.enabled`,
+and a real start only happens when `automation.dry_run` is off; in dry-run
+each request is recorded as *skipped* with what would have been started.
+Outcomes are announced back in Discord (never on MissionChief while in
+dry-run). The `missions` report (`!fra report missions`) summarises requests
+and outcomes.
 
 ### Updating from Discord
 
