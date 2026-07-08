@@ -28,6 +28,12 @@ from .services.treasury_sync import TreasurySyncService
 
 log = logging.getLogger(__name__)
 
+# Periodic safety net for requests stranded in 'processing'. A request older
+# than STALE_PROCESSING_MINUTES is considered stuck (browser builds finish well
+# under this), and the sweep runs every STALE_SWEEP_INTERVAL_MINUTES.
+STALE_PROCESSING_MINUTES = 15
+STALE_SWEEP_INTERVAL_MINUTES = 5
+
 
 class FRABot(commands.Bot):
     def __init__(self, cfg: Config) -> None:
@@ -299,6 +305,16 @@ class FRABot(commands.Bot):
                 name="missions",
                 initial_delay_seconds=330.0,
             )
+        # Safety net: release requests/missions stranded in 'processing' (an
+        # action interrupted while the bot kept running). The startup sweep
+        # only catches ones stranded across a restart; this catches the rest
+        # without needing a restart. DB-only, so always on.
+        sched.add_interval_job(
+            self._sweep_stale_processing,
+            minutes=STALE_SWEEP_INTERVAL_MINUTES,
+            name="stale-sweep",
+            initial_delay_seconds=120.0,
+        )
         log.info(
             "Background jobs scheduled (automation: dry_run=%s, training=%s, "
             "building=%s, events=%s, mission=%s)",
@@ -341,6 +357,30 @@ class FRABot(commands.Bot):
             lock = asyncio.Lock()
             self._job_locks[name] = lock
         return lock
+
+    async def _sweep_stale_processing(self) -> None:
+        """Release board requests / missions stuck in 'processing' for longer
+        than STALE_PROCESSING_MINUTES, so a stranded one self-heals without a
+        restart. DB-only; the scheduler already isolates failures."""
+        from .db.repos import AutomationRepo, MissionsRepo
+
+        cutoff = (
+            dt.datetime.now(dt.timezone.utc)
+            - dt.timedelta(minutes=STALE_PROCESSING_MINUTES)
+        ).isoformat(timespec="seconds")
+        requests = await AutomationRepo(self.db).sweep_stale_processing(cutoff)
+        missions = await MissionsRepo(self.db).sweep_stale_processing(cutoff)
+        if requests or missions:
+            log.warning(
+                "Stale-sweep released %d board request(s) and %d mission(s) "
+                "stuck in processing (>%dm)",
+                requests, missions, STALE_PROCESSING_MINUTES,
+            )
+            await self.notify_admin(
+                f"🧹 Released {requests + missions} request(s) stuck in "
+                f"processing for over {STALE_PROCESSING_MINUTES} min — please "
+                "verify nothing half-ran on MissionChief."
+            )
 
     # ------------------------------------------------------------------
     # Discord helpers
