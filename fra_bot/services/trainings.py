@@ -12,6 +12,7 @@ signup window, mirroring the alliance's existing policy.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 
@@ -40,6 +41,7 @@ ALLIANCE_BUILDINGS_PATH = "/verband/gebauede"
 MAX_ACADEMY_LIST_PAGES = 10
 ALLIANCE_SIGNUP_SECONDS = 3600  # class stays open to the alliance for 1h
 BOARD_FEE = 0                   # board classes are free
+RETRY_MINUTES = 15              # backoff between busy retries (bounded by MAX_ATTEMPTS)
 
 GUIDE_MARKER = "[FRA] 📋 How to request a TRAINING"
 
@@ -219,9 +221,19 @@ class TrainingsService(BoardRequestService):
             else:  # failed
                 lines.append(f"❌ {match.name}: {outcome['reason']}")
 
+        next_attempt_at: str | None = None
+        bump = False
         if pending:
             status = "waiting"
             detail = "retrying: " + ", ".join(p["name"] for p in pending)
+            # Busy retries must be BOUNDED: bump attempts so MAX_ATTEMPTS can
+            # end a hopeless request (e.g. no academy of that discipline
+            # exists), and back off so each retry doesn't re-walk the whole
+            # academy list every poll.
+            bump = True
+            next_attempt_at = (
+                dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=RETRY_MINUTES)
+            ).isoformat()
         elif opened_any:
             status = "done"
             detail = "; ".join(f"{r['training']}: {r['outcome']}" for r in results)
@@ -239,6 +251,8 @@ class TrainingsService(BoardRequestService):
             payload=json.dumps(
                 {"results": results, "pending_trainings": pending}
             ),
+            next_attempt_at=next_attempt_at,
+            bump_attempts=bump,
             announce=announce or status in ("done", "failed"),
         )
 

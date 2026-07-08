@@ -100,9 +100,10 @@ OVERPASS_DATA = {"elements": [
 
 
 class FakeClient:
-    def __init__(self, *, funds, api_json):
+    def __init__(self, *, funds, api_json, alliance_json="[]"):
         self._funds_html = f"<div>Alliance Funds: {funds:,} Credits</div>"
         self._api_json = api_json
+        self._alliance_json = alliance_json
 
     def url(self, path):
         return path
@@ -110,6 +111,8 @@ class FakeClient:
     async def fetch_page(self, path, *, referer=None):
         if path == "/api/buildings":
             return self._api_json
+        if path == "/api/alliance_buildings":
+            return self._alliance_json
         if path == "/verband/kasse":
             return self._funds_html
         return "<html></html>"
@@ -148,8 +151,8 @@ async def db(tmp_path):
     await database.close()
 
 
-def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", overpass_data=None,
-         enabled=True, min_funds=2_000_000, seed=0):
+def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", alliance_json="[]",
+         overpass_data=None, enabled=True, min_funds=2_000_000, seed=0):
     from fra_bot.db.repos import RunsRepo, StateRepo
     from fra_bot.services.buildings import BuildingsService
 
@@ -162,7 +165,7 @@ def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", overpass_data=None
         daily_build_enabled=enabled, min_alliance_funds=min_funds,
         daily_build_time="03:00",
     )
-    svc.client = FakeClient(funds=funds, api_json=api_json)
+    svc.client = FakeClient(funds=funds, api_json=api_json, alliance_json=alliance_json)
     svc.state = StateRepo(db)
     svc.runs = RunsRepo(db)
     svc._geocoder = FakeGeo()
@@ -213,6 +216,16 @@ async def test_daily_build_dedups_against_existing(db):
     assert hospital_line.startswith("❔")       # deduped -> no fresh location
     assert prison_line.startswith("📝")          # prison still buildable
     assert svc._overpass.calls >= 1 + 6          # prison once + hospital retried 6x
+
+
+async def test_daily_build_dedups_against_alliance_buildings(db):
+    # The daily build creates ALLIANCE buildings — a previous day's build only
+    # shows up on /api/alliance_buildings, and must still block a repeat.
+    alliance = '[{"id": 9, "building_type": 2, "latitude": 40.0006, "longitude": -74.001}]'
+    svc = _svc(db, dry_run=True, api_json="[]", alliance_json=alliance)
+    lines = await svc.daily_build()
+    hospital_line = next(line for line in lines if "hospital" in line)
+    assert hospital_line.startswith("❔")       # blocked by the alliance building
 
 
 async def test_daily_build_live_builds_both(db, monkeypatch):

@@ -341,7 +341,9 @@ class MissionScheduler:
 
         # Advance the cursor only after the whole page is handled; a crash
         # mid-scan re-reads, and the unique board index dedups re-enqueues.
-        if max_post and (last_seen is None or max_post > last_seen):
+        # On first contact this ALWAYS writes — even "0" for an empty thread —
+        # so the baseline can't repeat and swallow the first real request.
+        if last_seen is None or max_post > last_seen:
             await self.state.set(self._cursor_key(thread_id), str(max_post))
         if baseline:
             log.info(

@@ -755,6 +755,17 @@ async def test_board_scan_skips_own_and_baseline(db):
     assert await sched._scan_board(15307, "large") == 0
 
 
+async def test_board_scan_empty_baseline_then_first_post_enqueues(db):
+    """An EMPTY board's first scan sets the baseline too — the first real
+    post afterwards must be enqueued, not swallowed as a second baseline."""
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    await sched.state.set("mission_board_guide_id:15307", "1")
+    sched.board = FakeBoard([])                        # nothing on the board yet
+    assert await sched._scan_board(15307, "large") == 0
+    sched.board = FakeBoard([_post(101, "New York City")])
+    assert await sched._scan_board(15307, "large") == 1  # processed, not baseline
+
+
 async def test_request_boards_dedup_and_gating(db):
     sched = _scheduler(_cfg(events_enabled=True, board_enabled=True), FakeClient(), db)
     boards = sched._request_boards()

@@ -68,10 +68,20 @@ def parse_current_level(html: str) -> int | None:
 
 
 def _parse_price(text: str) -> int | None:
-    match = _DIGITS_RE.search(text or "")
-    if not match:
-        return None
-    digits = re.sub(r"[^\d]", "", match.group(0))
+    """The credits price in an extension label.
+
+    Anchored on the "Credits" suffix so a leading count (e.g. "2 Cells —
+    100,000 Credits") is never mistaken for the price; falls back to the LAST
+    number in the label (labels put the price at the end)."""
+    match = re.search(r"(\d[\d.,\s]*?)\s*credits", text or "", re.IGNORECASE)
+    if match is None:
+        candidates = _DIGITS_RE.findall(text or "")
+        if not candidates:
+            return None
+        match_text = candidates[-1]
+    else:
+        match_text = match.group(1)
+    digits = re.sub(r"[^\d]", "", match_text)
     return int(digits) if digits else None
 
 

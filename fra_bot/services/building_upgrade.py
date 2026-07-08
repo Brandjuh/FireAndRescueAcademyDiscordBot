@@ -177,11 +177,31 @@ class BuildingUpgradeService:
     async def _upgrade_live(self, b, report: UpgradeReport, max_actions: int) -> None:
         attempted: set[int] = set()
         raised_level = False
+        level_before: int | None = None
         guard = 0
         while report.actions < max_actions and guard < _PER_BUILDING_GUARD:
             guard += 1
             html = await self.client.fetch_page(f"/buildings/{b.building_id}")
             token = parse_csrf_token(html)
+
+            if level_before is not None:
+                # Verify the level GET actually landed: MissionChief answers a
+                # refused upgrade (funds, already max) with a 200 re-render,
+                # so only a level that really moved counts as raised.
+                level_after = parse_current_level(html)
+                if level_after is not None and level_after > level_before:
+                    report.levels_raised += 1
+                    report.lines.append(
+                        f"✅ {b.name}: raised level {level_before} → {level_after}"
+                    )
+                else:
+                    report.errors += 1
+                    report.lines.append(
+                        f"⚠️ {b.name}: level upgrade did not take "
+                        f"(still {level_after if level_after is not None else '?'}) "
+                        "— check alliance funds"
+                    )
+                level_before = None
 
             if b.kind == "hospital" and not raised_level:
                 level = parse_current_level(html)
@@ -192,8 +212,7 @@ class BuildingUpgradeService:
                         return
                     if await self._raise_level(b.building_id):
                         report.actions += 1
-                        report.levels_raised += 1
-                        report.lines.append(f"✅ {b.name}: raised level → {self._max_level}")
+                        level_before = level  # verified on the next re-fetch
                     else:
                         report.errors += 1
                         report.lines.append(f"❌ {b.name}: level upgrade rejected")

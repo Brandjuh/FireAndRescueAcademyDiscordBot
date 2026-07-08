@@ -166,7 +166,15 @@ class BoardRequestService:
         try:
             await self._ensure_guide()
             last_seen = await self.board_repo.last_seen_post_id(self.thread_id)
-            baseline = last_seen is None
+            # First contact records history without acting on it. An EMPTY
+            # thread records nothing, so a bare `last_seen is None` would stay
+            # baseline forever and silently swallow the first real request —
+            # remember explicitly that the baseline pass has happened.
+            baseline_key = f"board_baseline_done:{self.kind}:{self.thread_id}"
+            baseline = (
+                last_seen is None
+                and await self.state.get(baseline_key) is None
+            )
             page, fresh_posts = await self.board.fetch_new_posts(
                 self.thread_id, last_seen
             )
@@ -209,6 +217,7 @@ class BoardRequestService:
                     )
 
             if baseline:
+                await self.state.set(baseline_key, "1")
                 log.info(
                     "%s: thread %s baseline set (%d posts recorded, none processed)",
                     self.kind, self.thread_id, len(fresh_posts),

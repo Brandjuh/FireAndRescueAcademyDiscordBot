@@ -45,6 +45,9 @@ log = logging.getLogger(__name__)
 
 KASSE_PATH = "/verband/kasse"
 API_BUILDINGS_PATH = "/api/buildings"
+# The daily build creates ALLIANCE buildings, which live on their own API
+# endpoint — dedup must see both our personal and the alliance buildings.
+API_ALLIANCE_BUILDINGS_PATH = "/api/alliance_buildings"
 
 # Daily auto-build tuning.
 AUTO_BUILD_TYPES = ("hospital", "prison")     # one of each, every day
@@ -535,18 +538,23 @@ class BuildingsService(BoardRequestService):
         return None
 
     async def _existing_buildings(self) -> list:
-        """Our current buildings (with coords) for the proximity dedup. An
-        empty list on failure — we'd rather build than block on a read error,
-        and the game still rejects an exact overlap."""
-        try:
-            raw = await self.client.fetch_page(API_BUILDINGS_PATH)
-        except MissionChiefError as exc:
-            log.warning("daily build: could not read %s (%s); dedup skipped",
-                        API_BUILDINGS_PATH, exc)
-            return []
-        try:
-            return parse_api_buildings(raw)
-        except (ValueError, TypeError) as exc:
-            log.warning("daily build: could not parse %s (%s); dedup skipped",
-                        API_BUILDINGS_PATH, exc)
-            return []
+        """Current buildings (with coords) for the proximity dedup: our own
+        AND the alliance's — the daily build creates alliance buildings, so
+        deduping against /api/buildings alone would let it stack a second
+        facility next to one it built on an earlier day. Per-endpoint failures
+        degrade to whatever did load — we'd rather build than block on a read
+        error, and the game still rejects an exact overlap."""
+        existing: list = []
+        for path in (API_BUILDINGS_PATH, API_ALLIANCE_BUILDINGS_PATH):
+            try:
+                raw = await self.client.fetch_page(path)
+            except MissionChiefError as exc:
+                log.warning("daily build: could not read %s (%s); dedup partial",
+                            path, exc)
+                continue
+            try:
+                existing.extend(parse_api_buildings(raw))
+            except (ValueError, TypeError) as exc:
+                log.warning("daily build: could not parse %s (%s); dedup partial",
+                            path, exc)
+        return existing
