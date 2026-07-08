@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 
@@ -99,6 +100,15 @@ class AdminCog(commands.Cog):
         )
         embed.add_field(name="Alliance logs stored", value=f"{log_count:,}")
         embed.add_field(name="Expenses stored", value=f"{expense_count:,}")
+        backlog = self.bot.mc.pacer_backlog
+        if backlog:
+            embed.add_field(
+                name="⏳ MC request backlog",
+                value=(
+                    f"{backlog} waiting — if this keeps growing, lower "
+                    "`missionchief.max_delay` (default 9.0)"
+                ),
+            )
         if balance is not None:
             embed.add_field(
                 name="Alliance funds",
@@ -568,48 +578,83 @@ class AdminCog(commands.Cog):
         """
         repost = mode.strip().lower() == "repost"
         auto = self.bot.cfg.automation
-        message = await ctx.send(
-            "⏳ Syncing board guides… (MissionChief pacing applies — the "
-            "trainings guide fetches classroom availability, so give it a "
-            "few minutes)"
-        )
+        started = dt.datetime.now(dt.timezone.utc)
+        message = await ctx.send("⏳ Syncing board guides…")
         lines: list[str] = []
+        current = {"label": "starting"}
 
-        async def _report() -> None:
-            await message.edit(
-                content=("\n".join(lines) + "\n⏳ …")[:1990]
+        async def _heartbeat() -> None:
+            # A live status line so the command NEVER looks silently stuck:
+            # elapsed time + the shared MC request backlog (congestion gauge).
+            while True:
+                await asyncio.sleep(20)
+                elapsed = int(
+                    (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
+                )
+                backlog = self.bot.mc.pacer_backlog
+                hint = (
+                    " — backlog high: lower `missionchief.max_delay` (default 9.0)"
+                    if backlog > 5 else ""
+                )
+                status = (
+                    f"⏳ {current['label']}… {elapsed // 60}m{elapsed % 60:02d}s "
+                    f"elapsed · {backlog} MC request(s) queued{hint}"
+                )
+                try:
+                    await message.edit(
+                        content="\n".join([*lines, status])[:1990]
+                    )
+                except discord.HTTPException:
+                    return
+
+        async def _run(label: str, job: str, coro_factory) -> None:
+            current["label"] = (
+                f"{label} (waiting for the running `{job}` poll)"
+                if self.bot.job_lock(job).locked() else label
             )
+            try:
+                async with asyncio.timeout(15 * 60):
+                    async with self.bot.job_lock(job):
+                        current["label"] = label
+                        result = await coro_factory()
+                        if isinstance(result, list):
+                            lines.extend(result)
+                        else:
+                            lines.append(result)
+            except TimeoutError:
+                lines.append(
+                    f"⏱️ {label}: gave up after 15 min — the MissionChief "
+                    "request queue is congested (see `!fra status` backlog; "
+                    "check `missionchief.max_delay`, default 9.0)."
+                )
 
-        async def _locked_note(job: str) -> None:
-            if self.bot.job_lock(job).locked():
-                lines.append(f"⏳ waiting for the running `{job}` poll to finish…")
-                await _report()
-
+        heartbeat = asyncio.create_task(_heartbeat())
         try:
             if auto.training.enabled:
-                await _locked_note("board-trainings")
-                async with self.bot.job_lock("board-trainings"):
-                    lines.append(await self.bot.trainings.force_guide(repost=repost))
-                await _report()
+                await _run(
+                    "trainings guide", "board-trainings",
+                    lambda: self.bot.trainings.force_guide(repost=repost),
+                )
             if auto.building.enabled:
-                await _locked_note("board-buildings")
-                async with self.bot.job_lock("board-buildings"):
-                    lines.append(await self.bot.buildings.force_guide(repost=repost))
-                await _report()
+                await _run(
+                    "building guide", "board-buildings",
+                    lambda: self.bot.buildings.force_guide(repost=repost),
+                )
             boards = self.bot.missions_service._request_boards()
             if boards:
-                await _locked_note("missions")
-                async with self.bot.job_lock("missions"):
-                    for thread_id, kind in boards:
-                        lines.append(
-                            await self.bot.missions_service.force_guide(
-                                thread_id, kind, repost=repost
-                            )
+                async def _mission_guides() -> list[str]:
+                    return [
+                        await self.bot.missions_service.force_guide(
+                            thread_id, kind, repost=repost
                         )
+                        for thread_id, kind in boards
+                    ]
+                await _run("mission/event guides", "missions", _mission_guides)
         except Exception as exc:  # noqa: BLE001 — surface it to the admin
             log.exception("guide sync failed")
             lines.append(f"❌ guide sync aborted: {exc}")
-        lines = [line for line in lines if not line.startswith("⏳ waiting")]
+        finally:
+            heartbeat.cancel()
         if not lines:
             lines.append(
                 "No boards enabled — turn on training/building/events/mission "
