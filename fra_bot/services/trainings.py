@@ -18,6 +18,7 @@ import logging
 
 from ..config import Config
 from ..db.database import Database
+from ..db.repos import RemindersRepo
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.academy import (
@@ -61,6 +62,7 @@ class TrainingsService(BoardRequestService):
     def __init__(self, cfg: Config, client: MissionChiefClient, db: Database) -> None:
         super().__init__(cfg, client, db)
         self._auto = cfg.automation.training
+        self.reminders = RemindersRepo(db)
 
     @property
     def thread_id(self) -> int:
@@ -167,26 +169,27 @@ class TrainingsService(BoardRequestService):
                     f"contribution rate {rate:g}% is below the required "
                     f"{self._auto.min_contribution_rate:g}%",
                 )
-                await self.reply(
+                await self.reply_for(
+                    request,
                     f"@{request['requester_name']}: your training request was not "
                     f"processed — your alliance contribution is {rate:g}%, the "
                     f"minimum is {self._auto.min_contribution_rate:g}%."
                 )
                 return
 
-        await self._process(
-            request["id"], request["requester_name"], matches, ambiguous, announce=announce
-        )
+        await self._process(request, payload, matches, ambiguous, announce=announce)
 
     async def _process(
         self,
-        request_id: int,
-        requester: str | None,
+        request,
+        payload: dict,
         matches: list[TrainingMatch],
         ambiguous: list[AmbiguousMatch],
         *,
         announce: bool,
     ) -> None:
+        request_id = request["id"]
+        requester = request["requester_name"]
         lines: list[str] = []
         results: list[dict] = []
         opened_any = False
@@ -206,6 +209,7 @@ class TrainingsService(BoardRequestService):
                     f"https://www.missionchief.com/buildings/{outcome['building_id']} "
                     f"(free, join within 1 hour)"
                 )
+                await self._maybe_schedule_reminder(request_id, payload, match)
             elif outcome["status"] == "uncertain":
                 opened_any = True
                 lines.append(
@@ -244,22 +248,47 @@ class TrainingsService(BoardRequestService):
             status = "skipped"
             detail = "only ambiguous names found"
 
+        # Preserve Discord flags (discord_user_id/remind/channel_id) across
+        # retries — the payload is rewritten every attempt.
+        merged = dict(payload)
+        merged.update({"results": results, "pending_trainings": pending})
         await self.requests.set_status(
             request_id,
             status,
             detail,
-            payload=json.dumps(
-                {"results": results, "pending_trainings": pending}
-            ),
+            payload=json.dumps(merged),
             next_attempt_at=next_attempt_at,
             bump_attempts=bump,
             announce=announce or status in ("done", "failed"),
         )
 
         if lines and (announce or opened_any):
-            await self.reply(
+            await self.reply_for(
+                request,
                 f"Training request from {requester}:\n" + "\n".join(lines)
             )
+
+    async def _maybe_schedule_reminder(
+        self, request_id: int, payload: dict, match: TrainingMatch
+    ) -> None:
+        """Discord requesters can opt into a ping once the course should be
+        finished (start + the catalog duration in days)."""
+        user_id = payload.get("discord_user_id")
+        if not payload.get("remind") or not user_id:
+            return
+        days = match.duration_days or DISCIPLINES.get(match.discipline, {}).get(match.name, 0)
+        if not days:
+            return  # unknown duration: can't estimate an end time
+        due = (
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=days)
+        ).isoformat()
+        await self.reminders.add(
+            discord_user_id=int(user_id),
+            channel_id=payload.get("channel_id"),
+            training=match.name,
+            due_at=due,
+            request_id=request_id,
+        )
 
     # ------------------------------------------------------------------
 

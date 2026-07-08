@@ -351,6 +351,18 @@ class BoardRequestService:
         except MissionChiefError as exc:
             log.warning("%s: board reply failed: %s", self.kind, exc)
 
+    @staticmethod
+    def is_discord_request(request: aiosqlite.Row) -> bool:
+        """Discord-sourced requests carry thread_id 0 (no board post). Their
+        feedback goes through the Discord publisher, never to the board."""
+        return not request["thread_id"]
+
+    async def reply_for(self, request: aiosqlite.Row, content: str) -> None:
+        """Board reply for a BOARD request; silent for a Discord request."""
+        if self.is_discord_request(request):
+            return
+        await self.reply(content)
+
     async def contribution_rate(self, mc_user_id: int | None) -> float | None:
         """Requester's alliance contribution rate from the roster."""
         if mc_user_id is None:

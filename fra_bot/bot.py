@@ -147,6 +147,7 @@ class FRABot(commands.Bot):
         from .cogs.notifications import NotificationsCog
         from .cogs.reporting import ReportingCog
         from .cogs.reports import ReportsCog
+        from .cogs.requests_panel import RequestPanelView, RequestsCog
 
         await self.add_cog(AdminCog(self))
         await self.add_cog(NotificationsCog(self))
@@ -154,11 +155,15 @@ class FRABot(commands.Bot):
         await self.add_cog(AutomationCog(self))
         await self.add_cog(ReportingCog(self))
         await self.add_cog(MissionsCog(self))
+        await self.add_cog(RequestsCog(self))
 
-        # Persistent mission panel survives restarts; register its view.
+        # Persistent panels survive restarts; register their views.
         missions_cog = self.get_cog("MissionsCog")
         if missions_cog is not None:
             self.add_view(MissionPanelView(missions_cog))
+        requests_cog = self.get_cog("RequestsCog")
+        if requests_cog is not None:
+            self.add_view(RequestPanelView(requests_cog))
 
         # Register the /mission slash command with the guild for fast
         # propagation (global sync can take up to an hour).
