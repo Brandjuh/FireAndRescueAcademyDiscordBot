@@ -180,3 +180,5 @@ def test_detect_building_type():
     assert detect_building_type("Random Park", None) is None
     # Ambiguous: both terms present -> None (ask the user).
     assert detect_building_type("Prison Hospital Wing", None) is None
+    # Auto-detect for !fra testbuild: French "Hospitalier" contains "hospital".
+    assert detect_building_type("Centre Hospitalier de Beaune, France", None) == "hospital"
