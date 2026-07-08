@@ -56,7 +56,7 @@ from ..mc.parsers.mission_spec import (
     PRESET_TYPE_IDS,
     MissionSpec,
     MissionSpecError,
-    parse_mission_spec,
+    parse_board_request,
 )
 
 log = logging.getLogger(__name__)
@@ -178,12 +178,12 @@ class MissionScheduler:
         return None
 
     async def poll(self) -> None:
-        """Scan the board (if enabled), then advance the queue/rotation."""
+        """Scan the request board(s), then advance the queue/rotation."""
         run_id = await self.runs.start("missions")
         try:
             scanned = 0
-            if self._auto.board_enabled:
-                scanned = await self._scan_board()
+            for thread_id, default_kind in self._request_boards():
+                scanned += await self._scan_board(thread_id, default_kind)
             executed = await self._advance()
             await self.runs.finish(
                 run_id, status="success", pages=1,
@@ -195,16 +195,45 @@ class MissionScheduler:
 
     # -- board scanning --------------------------------------------------
 
-    def _cursor_key(self) -> str:
-        # Independent from the events poller's board_posts cursor so the two
-        # can share the thread without stepping on each other's dedup.
-        return f"mission_board_last_post:{self.thread_id}"
+    def _request_boards(self) -> list[tuple[int, str]]:
+        """The dedicated request boards to scan, each with its default kind.
 
-    async def _scan_board(self) -> int:
-        raw = await self.state.get(self._cursor_key())
+        The 'events' board starts alliance EVENTS; the 'mission' board starts
+        LARGE scale missions. Deduped by thread id (first wins) so a shared
+        thread is never scanned twice."""
+        boards: list[tuple[int, str]] = []
+        events = self.cfg.automation.events
+        mission = self.cfg.automation.mission
+        if events.enabled and events.thread_id:
+            boards.append((int(events.thread_id), "event"))
+        if mission.board_enabled and mission.thread_id:
+            boards.append((int(mission.thread_id), "large"))
+        seen: set[int] = set()
+        deduped: list[tuple[int, str]] = []
+        for thread_id, kind in boards:
+            if thread_id in seen:
+                continue
+            seen.add(thread_id)
+            deduped.append((thread_id, kind))
+        return deduped
+
+    def _cursor_key(self, thread_id: int) -> str:
+        return f"mission_board_last_post:{thread_id}"
+
+    def _guide_key(self, thread_id: int) -> str:
+        return f"mission_board_guide_posted:{thread_id}"
+
+    async def _scan_board(self, thread_id: int, default_kind: str) -> int:
+        # Post the how-to-request guide once per board (best-effort; suppressed
+        # in dry-run like every board reply).
+        if not await self.state.get(self._guide_key(thread_id)):
+            await self._reply_to(thread_id, _board_guide(default_kind, self._auto.min_contribution_rate))
+            await self.state.set(self._guide_key(thread_id), "1")
+
+        raw = await self.state.get(self._cursor_key(thread_id))
         last_seen = int(raw) if raw else None
         baseline = last_seen is None
-        page, fresh = await self.board.fetch_new_posts(self.thread_id, last_seen)
+        page, fresh = await self.board.fetch_new_posts(thread_id, last_seen)
 
         created = 0
         max_post = last_seen or 0
@@ -219,9 +248,16 @@ class MissionScheduler:
             if is_own or post.content.startswith(REPLY_MARKER):
                 continue
             try:
-                spec = parse_mission_spec(post.content)
+                spec = parse_board_request(post.content, default_kind=default_kind)
             except MissionSpecError as exc:
-                log.info("mission: post %s not enqueued (%s)", post.post_id, exc)
+                # A clear request with an unusable field — ask the poster to fix it.
+                log.info("mission: post %s needs clarification (%s)", post.post_id, exc)
+                await self._reply_to(
+                    thread_id,
+                    f"@{post.author_name or 'there'}: I couldn't use that request — "
+                    f"{exc}. Post a location (e.g. \"New York City\"); see the pinned "
+                    "how-to for the options.",
+                )
                 continue
             except Exception:
                 log.exception("mission: error parsing post %s", post.post_id)
@@ -229,7 +265,7 @@ class MissionScheduler:
             if spec is None:
                 continue
             new_id = await self.missions.create_from_board(
-                self.thread_id, post.post_id,
+                thread_id, post.post_id,
                 {
                     "kind": spec.kind,
                     "mission_source": spec.source,
@@ -250,17 +286,35 @@ class MissionScheduler:
             )
             if new_id is not None:
                 created += 1
+                await self._reply_to(
+                    thread_id,
+                    f"@{post.author_name or 'there'}: got it — {spec.describe()} at "
+                    f"{spec.location_text}. It'll start at the next free alliance slot.",
+                )
 
         # Advance the cursor only after the whole page is handled; a crash
         # mid-scan re-reads, and the unique board index dedups re-enqueues.
         if max_post and (last_seen is None or max_post > last_seen):
-            await self.state.set(self._cursor_key(), str(max_post))
+            await self.state.set(self._cursor_key(thread_id), str(max_post))
         if baseline:
             log.info(
                 "mission: thread %s baseline set (%d posts, none enqueued)",
-                self.thread_id, len(fresh),
+                thread_id, len(fresh),
             )
         return created
+
+    async def _reply_to(self, thread_id: int, content: str) -> None:
+        """Post a board reply to a specific thread (suppressed in dry-run /
+        when replies are disabled)."""
+        if not self.cfg.automation.reply_to_board:
+            return
+        if self.dry_run:
+            log.info("mission board DRY-RUN reply to %s:\n%s", thread_id, content)
+            return
+        try:
+            await self.board.post_reply(thread_id, content)
+        except MissionChiefError as exc:
+            log.warning("mission: board reply to %s failed: %s", thread_id, exc)
 
     # -- queue + rotation advance ---------------------------------------
 
@@ -758,25 +812,58 @@ class MissionScheduler:
         return row["contribution_rate"] if row is not None else None
 
     async def _notify_board(self, mission: aiosqlite.Row, content: str) -> None:
-        """Reply on the board — only for board-sourced requests. Discord
-        requests are notified in Discord by the publisher, so posting to the
-        board for them would just be noise. Skipped in dry-run / when replies
-        are disabled."""
+        """Reply on the board — only for board-sourced requests, and on the
+        SAME thread the request came from (events board vs mission board).
+        Discord requests are notified in Discord by the publisher, so posting
+        to the board for them would just be noise."""
         if mission["source"] != "board":
             return
-        if not self.cfg.automation.reply_to_board:
-            return
-        if self.dry_run:
-            log.info("mission DRY-RUN board reply:\n%s", content)
-            return
-        try:
-            await self.board.post_reply(self.thread_id, content)
-        except MissionChiefError as exc:
-            log.warning("mission: board reply failed: %s", exc)
+        thread_id = mission["board_thread_id"] or self._auto.thread_id
+        await self._reply_to(int(thread_id), content)
 
 
 class _SavedMissionNotFound(Exception):
     """The named saved mission wasn't present in the form's dropdown."""
+
+
+def _board_guide(default_kind: str, min_rate: float) -> str:
+    """The how-to-request post the bot maintains on a request board. Starts
+    with the [FRA] marker so it's never re-parsed as a request."""
+    if default_kind == "event":
+        lines = [
+            "[FRA] 📋 How to request an ALLIANCE EVENT here",
+            "",
+            "Just post a location — a place name or a Google Maps link. e.g.:",
+            "• New York City",
+            "• Amsterdam, Netherlands",
+            "• https://maps.app.goo.gl/…",
+            "",
+            "Optional extra lines to fine-tune (leave out for the defaults):",
+            "• event: Storm   (or Civil Unrest / Storm Surge / Fall/Winter/Spring/Summer weather / Sports Event / Random)",
+            "• area: small | medium | large   ·   shape: rectangle | circle   ·   call: 30 | 45 | 60",
+            "• schedule: recurring   (keep it in the rotation)",
+            "",
+            "No extras? You get a random event at Large / Circle / 30s.",
+        ]
+    else:
+        lines = [
+            "[FRA] 📋 How to request a LARGE SCALE ALLIANCE MISSION here",
+            "",
+            "Just post a location — a place name or a Google Maps link. e.g.:",
+            "• New York City",
+            "• Amsterdam, Netherlands",
+            "• https://maps.app.goo.gl/…",
+            "",
+            "Optional extra lines to fine-tune (leave out for a standard mission):",
+            "• custom: need_lf=25 need_elw1=6 water_needed=15000   (your own required units)",
+            "• saved: <name>   (start one of the game's Saved Missions by name)",
+            "• name: <mission name>   ·   schedule: recurring",
+        ]
+    lines += [
+        "",
+        f"Requests from members below {min_rate:g}% alliance contribution are skipped.",
+    ]
+    return "\n".join(lines)
 
 
 def _with_coins(body: list[tuple[str, str]], *, count: int = 1) -> list[tuple[str, str]]:
