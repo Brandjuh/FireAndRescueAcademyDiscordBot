@@ -76,7 +76,13 @@ ACADEMY_PAGE = (
 def _service(db, dry_run):
     svc = TrainingsService.__new__(TrainingsService)
     # minimal init without the real client wiring
-    from fra_bot.db.repos import BoardRepo, MembersRepo, RunsRepo, StateRepo
+    from fra_bot.db.repos import (
+        BoardDeletionRepo,
+        BoardRepo,
+        MembersRepo,
+        RunsRepo,
+        StateRepo,
+    )
     from fra_bot.mc.board import BoardClient
 
     cfg = _cfg(dry_run)
@@ -92,6 +98,7 @@ def _service(db, dry_run):
     svc.members = MembersRepo(db)
     svc.runs = RunsRepo(db)
     svc.state = StateRepo(db)
+    svc.deletions = BoardDeletionRepo(db)
     svc._auto = cfg.automation.training
     return svc, client
 

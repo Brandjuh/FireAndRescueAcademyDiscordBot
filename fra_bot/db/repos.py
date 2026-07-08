@@ -1415,6 +1415,69 @@ class RotationRepo:
         return n == 1
 
 
+class BoardDeletionRepo:
+    """Board request posts scheduled for later deletion (the 12h tidy-up).
+
+    A post is scheduled once it's been handled; the sweep deletes it after
+    ``due_at``. On failure the sweep bumps ``attempts`` and pushes ``due_at``
+    out; after ``MAX_ATTEMPTS`` the row is dropped so it can't retry forever.
+    """
+
+    MAX_ATTEMPTS = 6
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def schedule(
+        self, thread_id: int, post_id: int, *, due_at: str, reason: str | None = None
+    ) -> None:
+        """Queue a post for deletion at ``due_at``. Idempotent per (thread,
+        post): a repeat keeps the earlier due time."""
+        await self._db.execute(
+            """
+            INSERT INTO board_pending_deletions
+                (thread_id, post_id, reason, due_at, attempts, created_at)
+            VALUES (?, ?, ?, ?, 0, ?)
+            ON CONFLICT(thread_id, post_id) DO UPDATE SET
+                due_at = MIN(due_at, excluded.due_at),
+                reason = COALESCE(reason, excluded.reason)
+            """,
+            (int(thread_id), int(post_id), reason, due_at, utcnow_iso()),
+        )
+
+    async def due(self, *, limit: int = 50) -> list[aiosqlite.Row]:
+        """Rows whose deletion time has arrived, soonest first."""
+        async with self._db.conn.execute(
+            "SELECT * FROM board_pending_deletions WHERE due_at <= ? "
+            "ORDER BY due_at ASC LIMIT ?",
+            (utcnow_iso(), limit),
+        ) as cur:
+            return await cur.fetchall()
+
+    async def remove(self, row_id: int) -> None:
+        await self._db.execute(
+            "DELETE FROM board_pending_deletions WHERE id = ?", (row_id,)
+        )
+
+    async def bump(self, row_id: int, *, backoff_seconds: int, error: str | None) -> None:
+        """Record a failed attempt and push the next try out by ``backoff_seconds``."""
+        next_due = (
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=backoff_seconds)
+        ).isoformat()
+        await self._db.execute(
+            "UPDATE board_pending_deletions SET attempts = attempts + 1, "
+            "last_error = ?, due_at = ? WHERE id = ?",
+            ((error or "")[:200] or None, next_due, row_id),
+        )
+
+    async def pending_count(self) -> int:
+        async with self._db.conn.execute(
+            "SELECT COUNT(*) AS n FROM board_pending_deletions"
+        ) as cur:
+            row = await cur.fetchone()
+        return row["n"] if row else 0
+
+
 def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
     """(daily, monthly) period keys for the current New York game day."""
     from zoneinfo import ZoneInfo
