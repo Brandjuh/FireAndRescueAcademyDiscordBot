@@ -315,9 +315,19 @@ class MissionScheduler:
             try:
                 resolved = await self._resolve(mission["location_text"] or "")
             except GeocodeError as exc:
-                await self.missions.set_status(
-                    mission["id"], "failed", f"geocoding failed: {exc}",
-                )
+                # Transient (network/rate-limit/5xx) → keep the request and
+                # retry; permanent (bad API key, place not found) → fail with
+                # the actionable message so it shows up in !fra missions.
+                if getattr(exc, "transient", False) and mission["attempts"] < MAX_ATTEMPTS:
+                    await self.missions.set_status(
+                        mission["id"], "waiting",
+                        f"geocoding failed ({exc}); will retry",
+                        bump_attempts=True, announce=False,
+                    )
+                else:
+                    await self.missions.set_status(
+                        mission["id"], "failed", f"geocoding failed: {exc}",
+                    )
                 return
             lat, lng, address = resolved.latitude, resolved.longitude, resolved.address or ""
             await self.missions.set_status(

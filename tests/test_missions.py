@@ -375,6 +375,40 @@ async def test_member_request_served_before_rotation(db):
     assert (await sched.rotation.get(rid))["last_started_at"] is not None
 
 
+async def test_geocode_transient_failure_retries_not_fails(db):
+    from fra_bot.geo.geocoder import GeocodeError
+
+    class FlakyGeo(FakeGeo):
+        async def search(self, query):
+            raise GeocodeError("provider hiccup", status=503, transient=True)
+
+    sched = MissionScheduler(_cfg(dry_run=True), FakeClient(), db, FlakyGeo())
+    mid = await _enqueue(sched)
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "waiting"          # kept for retry
+    assert "will retry" in row["status_detail"]
+
+
+async def test_geocode_permanent_failure_fails_with_message(db):
+    from fra_bot.geo.geocoder import GeocodeError
+
+    class DeadKeyGeo(FakeGeo):
+        async def search(self, query):
+            raise GeocodeError(
+                "geocoder geocode.maps.co returned HTTP 401 for /search "
+                "— check GEOCODER_API_KEY",
+                status=401, transient=False,
+            )
+
+    sched = MissionScheduler(_cfg(dry_run=True), FakeClient(), db, DeadKeyGeo())
+    mid = await _enqueue(sched)
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "failed"
+    assert "401" in row["status_detail"]
+
+
 async def test_rotation_geocode_failure_deactivates(db):
     class DeadGeo(FakeGeo):
         async def search(self, query):
