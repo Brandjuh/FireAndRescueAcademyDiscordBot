@@ -11,6 +11,7 @@ from typing import Any
 
 import aiosqlite
 
+from ..mc.parsers.common import infer_expense_event_ats
 from .database import Database, utcnow_iso
 
 
@@ -706,22 +707,48 @@ class TreasuryRepo:
             row = await cur.fetchone()
         return row["n"]
 
-    async def staging_finalize(self, done_key: str, next_page_key: str) -> int:
+    async def staging_finalize(
+        self, done_key: str, next_page_key: str, *, current_year: int
+    ) -> int:
         """Copy staging into expenses (chronological), clear staging, and
         flip the backfill-done state — all in ONE transaction, so the
-        ledger and the 'done' flag can never disagree after a crash."""
+        ledger and the 'done' flag can never disagree after a crash.
+
+        The ledger's dates are yearless, so as we finalize we infer each
+        row's year from its position in the newest→oldest sequence
+        (``infer_expense_event_ats``) — making historical expenses datable
+        and therefore reportable by period.
+        """
         now = utcnow_iso()
         async with self._db.transaction() as conn:
-            cur = await conn.execute(
+            # id ASC = insertion order = display order (newest first).
+            async with conn.execute(
+                "SELECT signature, raw_date, username, amount, description "
+                "FROM expenses_backfill_staging ORDER BY id ASC"
+            ) as cur:
+                staged = list(await cur.fetchall())
+
+            event_ats = infer_expense_event_ats(
+                [row["raw_date"] for row in staged], current_year=current_year
+            )
+            # Insert oldest-first so ascending expense ids match event order.
+            ordered = list(zip(staged, event_ats))
+            ordered.reverse()
+            await conn.executemany(
                 """
                 INSERT INTO expenses
                     (signature, raw_date, event_at, username, amount, description, scraped_at)
-                SELECT signature, raw_date, event_at, username, amount, description, ?
-                FROM expenses_backfill_staging ORDER BY id DESC
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (now,),
+                [
+                    (
+                        row["signature"], row["raw_date"], event_at,
+                        row["username"], row["amount"], row["description"], now,
+                    )
+                    for row, event_at in ordered
+                ],
             )
-            copied = cur.rowcount
+            copied = len(ordered)
             await conn.execute("DELETE FROM expenses_backfill_staging")
             await conn.execute(
                 "INSERT INTO scraper_state (key, value) VALUES (?, '1') "

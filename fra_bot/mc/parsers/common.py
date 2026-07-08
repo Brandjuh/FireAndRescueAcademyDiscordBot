@@ -101,3 +101,63 @@ def normalize_mc_timestamp(
     if age < dt.timedelta(minutes=-5) or age > dt.timedelta(days=max_age_days):
         return None  # ambiguous — keep only the raw string
     return candidate.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def _parse_yearless_parts(raw: str) -> tuple[int, int, int, int] | None:
+    """'24 Dec 04:20' -> (month, day, hour, minute), or None."""
+    try:
+        parsed = dt.datetime.strptime((raw or "").strip(), "%d %b %H:%M")
+    except ValueError:
+        return None
+    return (parsed.month, parsed.day, parsed.hour, parsed.minute)
+
+
+def _parts_to_utc_iso(year: int, month: int, day: int, hour: int, minute: int) -> str | None:
+    try:
+        local = dt.datetime(year, month, day, hour, minute, tzinfo=MC_TIMEZONE)
+    except ValueError:
+        return None  # e.g. Feb 29 landing on a non-leap year after inference
+    return local.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def _parse_absolute(raw: str) -> tuple[str, int, int] | None:
+    """'July 06, 2026 14:23' -> (utc_iso, year, month), or None."""
+    try:
+        parsed = dt.datetime.strptime((raw or "").strip(), "%B %d, %Y %H:%M")
+    except ValueError:
+        return None
+    iso = parsed.replace(tzinfo=MC_TIMEZONE).astimezone(UTC).isoformat(timespec="seconds")
+    return (iso, parsed.year, parsed.month)
+
+
+def infer_expense_event_ats(
+    raw_dates: list[str], *, current_year: int
+) -> list[str | None]:
+    """Infer UTC event_at for expense dates given in NEWEST→OLDEST order.
+
+    MissionChief's expense ledger shows dates without a year ("24 Dec
+    04:20"), so a single old row is undatable in isolation. Walking the
+    ledger backward, though, the month only ever decreases until it wraps
+    (…Feb, Jan, Dec…) — each wrap is a year boundary, so we count the year
+    down from the newest row. A row carrying an explicit year (absolute
+    format) re-anchors the cursor. Unparseable rows yield None.
+    """
+    results: list[str | None] = []
+    year = current_year
+    prev_month: int | None = None
+    for raw in raw_dates:
+        absolute = _parse_absolute(raw)
+        if absolute is not None:
+            iso, year, prev_month = absolute
+            results.append(iso)
+            continue
+        parts = _parse_yearless_parts(raw)
+        if parts is None:
+            results.append(None)
+            continue
+        month = parts[0]
+        if prev_month is not None and month > prev_month:
+            year -= 1  # walked back past a New Year
+        prev_month = month
+        results.append(_parts_to_utc_iso(year, *parts))
+    return results

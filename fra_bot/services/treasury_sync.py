@@ -153,7 +153,8 @@ class TreasurySyncService:
                     # Walked past the last page: commit the whole ledger
                     # and flip the done flag atomically.
                     copied = await self._treasury.staging_finalize(
-                        STATE_BACKFILL_DONE, STATE_BACKFILL_NEXT_PAGE
+                        STATE_BACKFILL_DONE, STATE_BACKFILL_NEXT_PAGE,
+                        current_year=int(ny_period_keys()[0][:4]),
                     )
                     await self._runs.finish(
                         run_id,

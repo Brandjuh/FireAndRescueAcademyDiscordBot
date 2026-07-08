@@ -5,6 +5,7 @@ import pytest
 from fra_bot.mc.errors import ParseError
 from fra_bot.mc.parsers.applications import parse_applications_page
 from fra_bot.mc.parsers.common import (
+    infer_expense_event_ats,
     normalize_mc_timestamp,
     parse_int,
     parse_percent,
@@ -301,3 +302,27 @@ def test_parse_expenses_small_amounts_kept():
 def test_parse_last_page_number():
     assert parse_last_page_number(KASSE_HTML) == 3157
     assert parse_last_page_number("<html></html>") is None
+
+
+def test_infer_expense_event_ats_rolls_year_back():
+    # Newest -> oldest; noon times so the UTC offset can't shift the date.
+    raws = ["08 Jul 12:00", "02 Jan 12:00", "31 Dec 12:00", "15 Nov 12:00"]
+    out = infer_expense_event_ats(raws, current_year=2026)
+    assert out[0].startswith("2026-07-08")
+    assert out[1].startswith("2026-01-02")
+    assert out[2].startswith("2025-12-31")  # rolled back past New Year
+    assert out[3].startswith("2025-11-15")
+
+
+def test_infer_expense_event_ats_absolute_reanchors():
+    raws = ["08 Jul 12:00", "July 06, 2023 12:00", "02 Jun 12:00"]
+    out = infer_expense_event_ats(raws, current_year=2026)
+    assert out[0].startswith("2026-07-08")
+    assert out[1].startswith("2023-07-06")   # explicit year wins
+    assert out[2].startswith("2023-06-02")   # cursor re-anchored to 2023
+
+
+def test_infer_expense_event_ats_handles_unparseable():
+    out = infer_expense_event_ats(["not a date", "08 Jul 12:00"], current_year=2026)
+    assert out[0] is None
+    assert out[1].startswith("2026-07-08")
