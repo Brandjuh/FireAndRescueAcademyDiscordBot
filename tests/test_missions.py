@@ -572,7 +572,9 @@ async def test_recurring_request_promotes_to_rotation(db):
     entries = await sched.rotation.list_all()
     assert len(entries) == 1
     assert entries[0]["location_text"] == "Grand Rapids"
-    assert entries[0]["latitude"] == 40.5                   # cached resolved coords
+    # Promotion happens AT INTAKE now (before geocoding), so coordinates
+    # are cached later — at the first real start (rotation.mark_started).
+    assert entries[0]["latitude"] is None
 
 
 async def test_next_up_prefers_request_then_rotation(db):
@@ -937,7 +939,8 @@ async def test_schedule_post_lists_rotation_and_queue(db):
     assert body.startswith("[FRA] 📅 Scheduled locations")
     assert "Amsterdam, Netherlands" in body
     assert "Tokyo, Japan" not in body                  # other board's kind
-    assert "New York City — requested by Bob" in body
+    assert "- New York City" in body
+    assert "requested by" not in body                  # names add noise
 
     # The events board shows its own kind, and an empty queue says so.
     events = await sched._schedule_body("event")
@@ -949,3 +952,25 @@ async def test_schedule_post_lists_rotation_and_queue(db):
     await sched.rotation.set_active(rid, False)
     body = await sched._schedule_body("large")
     assert "— paused" in body
+
+
+async def test_recurring_promoted_at_intake_while_queued(db):
+    """A recurring request must appear in the rotation IMMEDIATELY (the
+    member asked for a recurring spot), not only after its first start —
+    with a busy queue it would otherwise stay invisible for hours. The
+    schedule post shows it under rotation, not duplicated in the queue."""
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(_WAITING), db)
+    mid = await _enqueue(sched, recurring=1, location_text="Sacramento, CA")
+    await sched._advance()                              # start waits (cooldown)
+    row = await sched.missions.get(mid)
+    assert row["status"] == "waiting"                   # still queued...
+    assert row["rotation_id"] is not None               # ...but already rotating
+    entries = await sched.rotation.list_all()
+    assert len(entries) == 1
+    assert entries[0]["location_text"] == "Sacramento, CA"
+
+    body = await sched._schedule_body("large")
+    assert body.count("Sacramento, CA") == 1            # rotation section only
+    # A second poll never promotes twice.
+    await sched._advance()
+    assert len(await sched.rotation.list_all()) == 1
