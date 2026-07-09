@@ -133,27 +133,30 @@ GUIDE_MARKER = "[FRA] 📋 How to request a BUILDING"
 
 
 def _building_guide(min_funds: int) -> str:
-    """The how-to-request post for the building board. Starts with
-    :data:`GUIDE_MARKER` so it's never re-parsed as a request; the base
-    appends a "last updated" line."""
+    """The how-to-request post for the building board, structured like the
+    old bot's request guides. Starts with :data:`GUIDE_MARKER` so it's never
+    re-parsed as a request; the base appends a "last updated" line."""
     return "\n".join([
         GUIDE_MARKER,
+        "[b]Building Request Guide[/b]",
+        "",
+        "This post is maintained automatically by the Fire & Rescue "
+        "Academy bot.",
         "",
         "[b]How to request[/b]",
-        "Post a Google Maps link to a REAL hospital or prison, on its own line.",
-        "I work out which it is from the pin and build it for the alliance.",
-        "",
-        "[b]Copy an example and change the link[/b]",
-        "https://maps.app.goo.gl/xxxxx",
-        "https://www.google.com/maps/place/…",
-        "",
-        "[b]Good to know[/b]",
-        "- Only hospitals and prisons are built automatically.",
-        "- The pin must be an actual hospital or prison — clinics, doctors,",
-        "  police stations, courthouses and museums are refused.",
+        "- Post a Google Maps link to a REAL hospital or prison, on its "
+        "own line.",
+        "- I work out which it is from the pin and build it for the "
+        "alliance.",
+        "- Only hospitals and prisons are built automatically; clinics, "
+        "doctors, police stations, courthouses and museums are refused.",
         f"- Nothing is built while alliance funds are below {min_funds:,} "
         "credits; the request waits until funds recover.",
         "- One link per post.",
+        "",
+        "[b]Examples[/b]",
+        "https://maps.app.goo.gl/xxxxx",
+        "https://www.google.com/maps/place/…",
     ])
 
 

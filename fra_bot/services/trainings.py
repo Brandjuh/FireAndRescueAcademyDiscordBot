@@ -95,13 +95,15 @@ class TrainingsService(BoardRequestService):
     def guide_body(self) -> str:
         return _overview_guide(self._auto.min_contribution_rate)
 
-    async def _overview_content(self, now_epoch: float) -> str:
+    async def _overview_content(self, now_epoch: float, *, quick: bool = False) -> str:
         """Overview post: the stable how-to text + the live academy
         availability + a last-updated line. Expensive (walks the academy
-        pages) — only built once the guide throttle decided to write."""
+        pages) — only built once the guide throttle decided to write.
+        ``quick`` skips the walk (used by the forced `!fra guides` sync so
+        the posts land fast); the hourly refresh fills the numbers in."""
         from ..mc.board import guide_updated_line
 
-        counts = await self._collect_availability()
+        counts = None if quick else await self._collect_availability()
         lines = [
             self.guide_body(),
             "",
@@ -109,7 +111,7 @@ class TrainingsService(BoardRequestService):
             guide_updated_line(now_epoch),
         ]
         if counts is None:
-            lines.append("- temporarily unavailable — I'll refresh this shortly")
+            lines.append("- being refreshed — the numbers appear here shortly")
         else:
             for key in _AGENCY_ORDER:
                 count = counts.get(key, 0)
@@ -128,12 +130,13 @@ class TrainingsService(BoardRequestService):
     def _section_refreshed_key(self, key: str) -> str:
         return f"board_guide_refreshed:training:{self.thread_id}:{key}"
 
-    async def _ensure_guide(self) -> None:
+    async def _ensure_guide(self, *, quick: bool = False) -> None:
         """Maintain the guide as SEVERAL posts, like the old bot: one
         overview (with live availability, refreshed hourly) plus one post
         per academy type listing the exact request text. Splitting keeps
         every post small enough for the forum. Each post is find-or-edit,
-        never duplicated; a failing section doesn't block the others."""
+        never duplicated; a failing section doesn't block the others.
+        ``quick`` skips the availability walk (forced syncs)."""
         if not self.cfg.automation.reply_to_board:
             return
         import hashlib
@@ -148,7 +151,7 @@ class TrainingsService(BoardRequestService):
                 id_key=self._guide_id_key(), hash_key=self._guide_hash_key(),
                 refreshed_key=self._guide_refreshed_key(),
                 marker=GUIDE_MARKER,
-                desired=lambda: self._overview_content(now),
+                desired=lambda: self._overview_content(now, quick=quick),
                 signature=hashlib.sha1(body.encode("utf-8")).hexdigest()[:12],
                 now_epoch=now,
             )
@@ -200,16 +203,26 @@ class TrainingsService(BoardRequestService):
                     await self.state.delete(id_key)
                 await self.state.delete(hash_key)
                 await self.state.delete(refreshed_key)
-            await self._ensure_guide()
+            # Quick sync: land the five posts fast, without the availability
+            # walk. The overview's refresh marker is cleared afterwards so
+            # the next poll fills the numbers in within minutes.
+            await self._ensure_guide(quick=True)
         except MissionChiefError as exc:
             return f"❌ {label}: {exc}"
         parts = []
         for name, _, id_key, _, _ in sections:
             post_id = await self.state.get(id_key)
             parts.append(f"{name} #{post_id}" if post_id else f"{name} ❌")
+        if await self.state.get(self._guide_id_key()):
+            await self.state.delete(self._guide_refreshed_key())
         icon = "✅" if all("#" in part for part in parts) else "⚠️"
         url = self.client.url(f"/alliance_threads/{self.thread_id}")
-        return f"{icon} {label}: " + " · ".join(parts) + f" — {url}"
+        line = f"{icon} {label}: " + " · ".join(parts) + f" — {url}"
+        if icon == "⚠️":
+            reason = getattr(self.board, "last_error", None)
+            if reason:
+                line += f"\n   ↳ last error: {reason}"
+        return line
 
     async def _collect_availability(self) -> dict[str, int] | None:
         """Free classrooms per discipline across all alliance academies.

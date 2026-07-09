@@ -192,7 +192,8 @@ class BoardRequestService:
         if post_id:
             url = self.client.url(f"/alliance_threads/{self.thread_id}")
             return f"✅ {label}: guide is post #{post_id} — {url}"
-        return f"❌ {label}: could not create or edit the guide (see the log)"
+        reason = getattr(self.board, "last_error", None) or "see the log"
+        return f"❌ {label}: could not create or edit the guide — {reason}"
 
     async def poll(self) -> None:
         run_id = await self.runs.start(f"board_{self.kind}")

@@ -56,6 +56,9 @@ def guide_updated_line(now_epoch: float | None = None) -> str:
 class BoardClient:
     def __init__(self, client: MissionChiefClient) -> None:
         self._client = client
+        #: Human-readable reason for the most recent post/edit failure —
+        #: surfaced by `!fra guides` so a silent False never hides WHY.
+        self.last_error: str | None = None
 
     # Safety cap on how many pages we'll walk back in one poll.
     MAX_PAGES_PER_POLL = 5
@@ -117,8 +120,13 @@ class BoardClient:
 
     async def post_reply(self, thread_id: int, content: str) -> bool:
         """Post a reply to a thread. Content gets the [FRA] marker."""
+        self.last_error = None
         page = await self.fetch_latest_page(thread_id)
         if page.reply_token is None:
+            self.last_error = (
+                "no reply form/token on the thread — can the bot's "
+                "MissionChief account post there?"
+            )
             log.warning("No reply token on thread %s; cannot reply", thread_id)
             return False
         action = page.reply_action or f"/alliance_posts?alliance_thread_id={thread_id}"
@@ -134,6 +142,7 @@ class BoardClient:
             referer=self._client.url(f"/alliance_threads/{thread_id}"),
         )
         if status >= 400:
+            self.last_error = f"the forum rejected the post with HTTP {status}"
             log.warning("Board reply to thread %s failed with HTTP %s", thread_id, status)
             return False
         return True
@@ -176,12 +185,18 @@ class BoardClient:
 
     async def create_post_get_id(self, thread_id: int, content: str) -> int | None:
         """Post a reply and return its new post id (found by matching the
-        first line back on the thread), or None."""
+        first line back on the thread), or None (see ``last_error``)."""
         if not await self.post_reply(thread_id, content):
             return None
         body = content if content.startswith(REPLY_MARKER) else f"{REPLY_MARKER} {content}"
         marker = body.splitlines()[0][:60] if body else REPLY_MARKER
-        return await self.find_bot_post(thread_id, marker)
+        found = await self.find_bot_post(thread_id, marker)
+        if found is None:
+            self.last_error = (
+                "the post was accepted but I can't find it back on the "
+                "thread — did the forum drop or transform it?"
+            )
+        return found
 
     async def edit_post(self, post_id: int, content: str) -> bool:
         """Edit one of our posts in place (Rails ``_method=patch``).
@@ -189,9 +204,11 @@ class BoardClient:
         Returns False (rather than raising) when the post can't be edited —
         e.g. it was deleted, so its edit page 404s. Callers treat False as
         "stale id: forget it and find/create the post again"."""
+        self.last_error = None
         try:
             html = await self._client.fetch_page(f"/alliance_posts/{post_id}/edit")
         except MissionChiefError as exc:
+            self.last_error = f"edit page for post {post_id} unavailable ({exc})"
             log.warning("Edit page for post %s unavailable (%s)", post_id, exc)
             return False
         soup = BeautifulSoup(html, "lxml")

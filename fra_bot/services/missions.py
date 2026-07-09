@@ -317,7 +317,8 @@ class MissionScheduler:
         if post_id:
             url = self.client.url(f"/alliance_threads/{thread_id}")
             return f"✅ {label}: guide is post #{post_id} — {url}"
-        return f"❌ {label}: could not create or edit the guide (see the log)"
+        reason = getattr(self.board, "last_error", None) or "see the log"
+        return f"❌ {label}: could not create or edit the guide — {reason}"
 
     async def _scan_board(self, thread_id: int, default_kind: str) -> int:
         await self._ensure_guide(thread_id, default_kind)
@@ -952,56 +953,70 @@ def _guide_marker(default_kind: str) -> str:
 def _board_guide(default_kind: str, min_rate: float) -> str:
     """The how-to-request post the bot maintains on a request board.
 
-    Starts with the [FRA] marker (so it's never re-parsed as a request) and
-    uses forum BBCode headers. Kept short and copy-friendly: the examples sit
-    on their own lines so members can tap-and-copy one on a phone. This is the
-    STABLE text — the caller appends a "last updated" line."""
+    Structured like the old bot's request guides: a titled guide with a
+    maintained-automatically note, a "How to request" bullet list, optional
+    settings, and copy-friendly examples on their own lines. Starts with the
+    [FRA] marker so it's never re-parsed as a request. This is the STABLE
+    text — the caller appends a "last updated" line."""
     if default_kind == "event":
         return "\n".join([
             _guide_marker("event"),
+            "[b]Alliance Event Request Guide[/b]",
+            "",
+            "This post is maintained automatically by the Fire & Rescue "
+            "Academy bot.",
             "",
             "[b]How to request[/b]",
-            "Post a location on its own line — a place name or a Google Maps link.",
-            "No extras needed: you get a random event, Large / Circle / 30s.",
+            "- Post a location on its own line: a place name or a Google "
+            "Maps link.",
+            "- That is all you need — you get a random event at Large / "
+            "Circle / 30 seconds.",
+            "- One event per post. It starts at the next free alliance "
+            "event slot, so it can take a while.",
+            f"- If your alliance contribution is below {min_rate:g}%, the "
+            "request is skipped.",
             "",
-            "[b]Copy an example and change the place[/b]",
+            "[b]Optional lines to fine-tune[/b]",
+            "- event: Storm (or Civil Unrest, Storm Surge, Fall weather, "
+            "Winter weather, Spring weather, Summer weather, Sports Event, "
+            "Random)",
+            "- area: small / medium / large",
+            "- shape: circle / rectangle",
+            "- call: 30 / 45 / 60",
+            "- schedule: recurring (keeps coming back)",
+            "",
+            "[b]Examples[/b]",
             "New York City",
             "Amsterdam, Netherlands",
             "https://maps.app.goo.gl/xxxxx",
-            "",
-            "[b]Want to fine-tune? Add any of these on their own lines[/b]",
-            "event: Storm      (or Civil Unrest, Storm Surge, Fall/Winter/Spring/Summer weather, Sports Event, Random)",
-            "area: large       (small, medium or large)",
-            "shape: circle     (circle or rectangle)",
-            "call: 30          (30, 45 or 60 seconds)",
-            "schedule: recurring   (keep it coming back)",
-            "",
-            "[b]Good to know[/b]",
-            "- One event per post.",
-            "- It starts at the next free alliance slot — this can take a while.",
-            f"- Members below {min_rate:g}% alliance contribution are skipped.",
         ])
     return "\n".join([
         _guide_marker("large"),
+        "[b]Large Scale Mission Request Guide[/b]",
+        "",
+        "This post is maintained automatically by the Fire & Rescue "
+        "Academy bot.",
         "",
         "[b]How to request[/b]",
-        "Post a location on its own line — a place name or a Google Maps link. That's all you need.",
+        "- Post a location on its own line: a place name or a Google Maps "
+        "link.",
+        "- That is all you need for a standard large scale mission.",
+        "- One mission per post. It starts at the next free alliance slot, "
+        "so it can take a while.",
+        f"- If your alliance contribution is below {min_rate:g}%, the "
+        "request is skipped.",
         "",
-        "[b]Copy an example and change the place[/b]",
+        "[b]Optional lines for your own mission[/b]",
+        "- name: My mission name",
+        "- custom: need_lf=25 need_elw1=6 water_needed=15000 (your own "
+        "required units)",
+        "- saved: <name> (start one of the game's Saved Missions by name)",
+        "- schedule: recurring (keeps coming back)",
+        "",
+        "[b]Examples[/b]",
         "New York City",
         "Amsterdam, Netherlands",
         "https://maps.app.goo.gl/xxxxx",
-        "",
-        "[b]Want more control? Add any of these on their own lines[/b]",
-        "name: My mission name",
-        "custom: need_lf=25 need_elw1=6 water_needed=15000   (your own required units)",
-        "saved: <name>        (start one of the game's Saved Missions by name)",
-        "schedule: recurring   (keep it coming back)",
-        "",
-        "[b]Good to know[/b]",
-        "- One mission per post.",
-        "- It starts at the next free alliance slot — this can take a while.",
-        f"- Members below {min_rate:g}% alliance contribution are skipped.",
     ])
 
 

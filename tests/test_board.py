@@ -251,3 +251,44 @@ async def test_find_bot_post_matches_despite_emoji_rendering():
     assert found == 501
     # Other markers still don't match.
     assert await board.find_bot_post(15305, "[FRA] 📋 How to request a BUILDING") is None
+
+
+async def test_post_reply_sets_last_error_reasons():
+    """Failures carry a human-readable reason for the guides report."""
+    from fra_bot.mc.board import BoardClient
+
+    NO_FORM = """
+    <html><body>
+    <div id="post-on-page-1"><a href="/alliance_posts/1">#1</a>
+      <div class="col-md-11">hello</div></div>
+    </body></html>
+    """
+
+    class NoFormClient:
+        def url(self, path):
+            return path
+
+        async def fetch_page(self, path, *, referer=None):
+            return NO_FORM
+
+        async def post_form(self, path, data, **kwargs):
+            raise AssertionError("must not POST without a token")
+
+    board = BoardClient(NoFormClient())
+    assert await board.post_reply(15305, "[FRA] hi") is False
+    assert "no reply form/token" in board.last_error
+
+    class RejectClient(NoFormClient):
+        async def fetch_page(self, path, *, referer=None):
+            return NO_FORM.replace(
+                "</body>",
+                '<form id="new_alliance_post" action="/alliance_posts">'
+                '<input name="authenticity_token" value="tok"/></form></body>',
+            )
+
+        async def post_form(self, path, data, **kwargs):
+            return (422, "", "")
+
+    board = BoardClient(RejectClient())
+    assert await board.post_reply(15305, "[FRA] hi") is False
+    assert "HTTP 422" in board.last_error
