@@ -153,6 +153,7 @@ class FRABot(commands.Bot):
 
         from .cogs.admin import AdminCog
         from .cogs.automation import AutomationCog
+        from .cogs.membersync import MemberSyncCog
         from .cogs.missions import MissionPanelView, MissionsCog
         from .cogs.notifications import NotificationsCog
         from .cogs.reporting import ReportingCog
