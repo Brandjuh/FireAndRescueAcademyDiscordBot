@@ -226,10 +226,19 @@ class AutomationCog(commands.Cog):
         for row in await self._requests.pending_announcements():
             label = _KIND_LABEL.get(row["kind"], row["kind"])
             icon = _STATUS_ICON.get(row["status"], "•")
+            description = row["status_detail"] or ""
+            # "built prison #5561931" becomes a clickable building link.
+            built = re.match(r"built (\w+) #(\d+)\b", description)
+            if built:
+                description = (
+                    f"**[Built {built.group(1)} #{built.group(2)}]"
+                    f"(https://www.missionchief.com/buildings/{built.group(2)})**"
+                    + description[built.end():]
+                )
             embed = discord.Embed(
                 title=f"{label} request — {icon} {row['status']}"[:_TITLE_LIMIT],
                 colour=_STATUS_COLOUR.get(row["status"], discord.Colour.blurple()),
-                description=(row["status_detail"] or "")[:_DESC_LIMIT],
+                description=description[:_DESC_LIMIT],
                 timestamp=dt.datetime.now(dt.timezone.utc),
             )
             if row["requester_name"]:
@@ -475,5 +484,8 @@ class AutomationCog(commands.Cog):
         if data.get("location") and "address" not in data:
             parts.append(f"Location: {data['location']}")
         if data.get("building_id"):
-            parts.append(f"Building: {data['building_id']}")
+            parts.append(
+                f"Building: [#{data['building_id']}]"
+                f"(https://www.missionchief.com/buildings/{data['building_id']})"
+            )
         return "\n".join(parts) if parts else None
