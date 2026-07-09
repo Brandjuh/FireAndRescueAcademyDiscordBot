@@ -76,27 +76,136 @@ _SET_POSITION_SCRIPT = """
 }
 """
 
-# 3a. Inspect the alliance build button for this type WITHOUT clicking, so
-#     we can enforce the free-only (no-coins) guard before submitting.
-_ALLIANCE_BTN_INFO_SCRIPT = """
-(typeId) => {
-    const detail = document.querySelector('#detail_' + typeId);
-    if (!detail) return {found: false, error: 'no build detail for this type'};
-    const btn = detail.querySelector('.alliance_activate');
-    if (!btn) return {found: false, error: 'no "Build as Alliance Building" button'};
-    return {found: true, label: (btn.value || btn.innerText || '').trim()};
+# 3. Prepare the form and pick the alliance submit button — the reference
+#    bot's script, adopted verbatim. Crucially it sets build_as_alliance=1
+#    ITSELF as a form field and clicks a plain submit button, instead of
+#    relying on the page's jQuery .alliance_activate handler (a synthetic
+#    click that misses the handler would submit a PERSONAL build, which the
+#    game refuses with a 200 re-render — exactly the silent failure seen
+#    live). The free-only guard is the button-text filter: 'credits'
+#    without 'coins'. Returns {ok, submitIndex, snapshot} or
+#    {ok: false, reason, snapshot} with full field diagnostics.
+_PREPARE_FORM_SCRIPT = r"""
+async (config) => {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const visibleText = (element) => [element?.value, element?.textContent, element?.getAttribute?.("title"), element?.getAttribute?.("aria-label")]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const fieldByName = (name) => document.querySelector(`[name="${window.CSS.escape(name)}"]`);
+  const fieldValue = (name) => fieldByName(name)?.value || "";
+  const dispatch = (field) => {
+    if (!field) return;
+    for (const eventName of ["input", "change"]) {
+      field.dispatchEvent(new Event(eventName, { bubbles: true }));
+    }
+  };
+  const isVisible = (element) => {
+    if (!element) return false;
+    const style = window.getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const setField = (name, value) => {
+    const field = fieldByName(name);
+    if (!field) return false;
+    field.value = String(value);
+    dispatch(field);
+    return true;
+  };
+  const fail = (reason) => ({
+    ok: false,
+    reason,
+    snapshot: {
+      url: location.href,
+      buildingType: fieldValue("building[building_type]"),
+      name: fieldValue("building[name]"),
+      latitude: fieldValue("building[latitude]"),
+      longitude: fieldValue("building[longitude]"),
+      address: fieldValue("building[address]"),
+      buildAsAlliance: fieldValue("build_as_alliance"),
+      buildWithCoins: fieldValue("build_with_coins"),
+    },
+  });
+  function allianceContext(button) {
+    for (let node = button?.parentElement; node && node !== document.body; node = node.parentElement) {
+      const text = visibleText(node).toLowerCase();
+      if (text.includes("build as alliance building")) return node;
+      if (node.matches?.("form")) return null;
+    }
+    return null;
+  }
+
+  const form = document.querySelector("#new_building") || document.querySelector('form[action*="/buildings"]');
+  if (!form) return fail("MissionChief building form was not loaded.");
+
+  const typeSelect = fieldByName("building[building_type]");
+  if (!typeSelect) return fail("MissionChief building type field was not found.");
+  typeSelect.value = String(config.buildingTypeId || "");
+  dispatch(typeSelect);
+  await sleep(300);
+
+  if (fieldValue("building[building_type]") !== String(config.buildingTypeId || "")) {
+    return fail(`MissionChief did not accept building type ${config.buildingTypeId}.`);
+  }
+  if (!setField("building[name]", config.name || "")) return fail("MissionChief building name field was not found.");
+  if (!setField("building[latitude]", config.latitude || "")) return fail("MissionChief latitude field was not found.");
+  if (!setField("building[longitude]", config.longitude || "")) return fail("MissionChief longitude field was not found.");
+  setField("building[address]", config.address || "");
+  setField("build_with_coins", "0");
+  setField("build_as_alliance", "1");
+  const buildAnother = fieldByName("build_another");
+  if (buildAnother) {
+    buildAnother.checked = false;
+    dispatch(buildAnother);
+  }
+
+  const buttons = [...document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
+  const candidates = buttons
+    .map((button, index) => ({ button, index, text: visibleText(button), context: allianceContext(button) }))
+    .filter((item) => {
+      const text = item.text.toLowerCase();
+      return item.context
+        && isVisible(item.button)
+        && !item.button.disabled
+        && !item.button.hasAttribute("disabled")
+        && text.includes("build")
+        && text.includes("credits")
+        && !text.includes("coins");
+    });
+
+  if (candidates.length < 1) {
+    return fail("No enabled alliance build button was found.");
+  }
+  const selected = candidates[0];
+  return {
+    ok: true,
+    submitIndex: selected.index,
+    label: selected.text,
+    snapshot: {
+      buildingType: fieldValue("building[building_type]"),
+      name: fieldValue("building[name]"),
+      latitude: fieldValue("building[latitude]"),
+      longitude: fieldValue("building[longitude]"),
+      address: fieldValue("building[address]"),
+      buildAsAlliance: fieldValue("build_as_alliance"),
+      buildWithCoins: fieldValue("build_with_coins"),
+    },
+  };
 }
 """
 
-# 3b. Click it. The page's jQuery handler sets build_as_alliance=1 and the
-#     button (type=submit) posts the form.
-_CLICK_ALLIANCE_SCRIPT = """
-(typeId) => {
-    const detail = document.querySelector('#detail_' + typeId);
-    const btn = detail && detail.querySelector('.alliance_activate');
-    if (!btn) return {ok: false, error: 'alliance button vanished'};
-    btn.click();
-    return {ok: true};
+# 4. Click the selected submit button (plain native click on a real submit
+#    input — no dependency on page JS).
+_CLICK_SUBMIT_SCRIPT = r"""
+(submitIndex) => {
+  const buttons = [...document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
+  const button = buttons[submitIndex];
+  if (!button) return false;
+  button.click();
+  return true;
 }
 """
 
@@ -286,19 +395,29 @@ class BrowserBuilder:
                             "nor the geocoder returned one), so nothing was built.",
                         )
 
-                # 3. Free-only guard: the alliance button must not spend coins.
-                info = await page.evaluate(_ALLIANCE_BTN_INFO_SCRIPT, type_id)
-                if not info.get("found"):
-                    return BuildResult(False, None, info.get("error", "no alliance build button"))
-                label = info.get("label") or ""
-                if "coin" in label.lower():
-                    return BuildResult(False, None, "refusing to build: button would spend coins")
+                # 3. Fill every form field (with events) and pick the
+                #    alliance submit button — the reference bot's script.
+                prep = await page.evaluate(_PREPARE_FORM_SCRIPT, {
+                    "buildingTypeId": type_id,
+                    "name": config["name"],
+                    "latitude": config["lat"],
+                    "longitude": config["lng"],
+                    "address": resolved_address,
+                })
+                if not prep.get("ok"):
+                    return BuildResult(
+                        False, None,
+                        f"{prep.get('reason', 'form preparation failed')} "
+                        f"[form: {prep.get('snapshot')}]",
+                    )
+                label = prep.get("label") or ""
 
                 if dry_run:
                     # Everything is set up correctly; stop short of submitting.
                     return BuildResult(
                         True, None,
-                        f"dry-run OK — would click '{label}'; address '{resolved_address}'",
+                        f"dry-run OK — would click '{label}'; "
+                        f"form: {prep.get('snapshot')}",
                     )
 
                 try:
@@ -307,9 +426,11 @@ class BrowserBuilder:
                         and ("/buildings" in r.url or "/alliance_buildings" in r.url),
                         timeout=30000,
                     ) as resp_info:
-                        clicked = await page.evaluate(_CLICK_ALLIANCE_SCRIPT, type_id)
-                        if not clicked.get("ok"):
-                            return BuildResult(False, None, clicked.get("error", "click failed"))
+                        clicked = await page.evaluate(
+                            _CLICK_SUBMIT_SCRIPT, prep["submitIndex"]
+                        )
+                        if not clicked:
+                            return BuildResult(False, None, "submit button vanished")
                     response = await resp_info.value
                 except Exception as exc:  # noqa: BLE001 - report, don't crash
                     return BuildResult(
