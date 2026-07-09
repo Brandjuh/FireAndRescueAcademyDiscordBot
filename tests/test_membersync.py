@@ -114,3 +114,23 @@ async def test_prune_flags_leavers_with_safety_gate(db):
     # A collapsed roster (broken scrape) must never mass-derole.
     await db.execute("UPDATE members SET is_active = 0")
     assert await svc.prune_candidates() == []
+
+
+def test_setup_hook_imports_every_cog_it_registers():
+    """Regression for the NameError crash: every Cog class used in
+    setup_hook's add_cog calls must be imported there too."""
+    import re
+    from pathlib import Path
+
+    src = Path("fra_bot/bot.py").read_text()
+    registered = set(re.findall(r"add_cog\((\w+)\(self\)\)", src))
+    imported = set(re.findall(r"from \.cogs\.\w+ import ([\w, ]+)", src))
+    imported_names = {
+        name.strip() for group in imported for name in group.split(",")
+    }
+    missing = registered - imported_names
+    assert not missing, f"cogs registered but not imported: {missing}"
+
+
+def test_membersync_cog_module_imports():
+    from fra_bot.cogs.membersync import MemberSyncCog  # noqa: F401
