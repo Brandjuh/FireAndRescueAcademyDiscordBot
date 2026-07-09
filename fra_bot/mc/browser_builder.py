@@ -101,6 +101,20 @@ _CLICK_ALLIANCE_SCRIPT = """
 """
 
 
+async def _page_flash(page) -> str:
+    """The page's error flash / validation text, if any (trimmed)."""
+    try:
+        text = await page.evaluate(
+            "() => { const el = document.querySelector("
+            "'.alert-danger, .alert.alert-error, #flash_error, .flash_error,"
+            " #error_explanation, .danger.alert'); "
+            "return el ? el.innerText.trim() : ''; }"
+        )
+        return " ".join((text or "").split())[:200]
+    except Exception:  # noqa: BLE001 - diagnostics only
+        return ""
+
+
 class BrowserUnavailable(RuntimeError):
     """Playwright is not installed / usable."""
 
@@ -287,31 +301,58 @@ class BrowserBuilder:
                         f"dry-run OK — would click '{label}'; address '{resolved_address}'",
                     )
 
-                building_id = None
                 try:
                     async with page.expect_response(
-                        lambda r: "/buildings" in r.url and r.request.method == "POST",
+                        lambda r: r.request.method == "POST"
+                        and ("/buildings" in r.url or "/alliance_buildings" in r.url),
                         timeout=30000,
                     ) as resp_info:
                         clicked = await page.evaluate(_CLICK_ALLIANCE_SCRIPT, type_id)
                         if not clicked.get("ok"):
                             return BuildResult(False, None, clicked.get("error", "click failed"))
                     response = await resp_info.value
-                    import re
-
-                    match = re.search(r"/buildings/(\d+)", response.url) or re.search(
-                        r"/buildings/(\d+)", str(page.url)
-                    )
-                    if match:
-                        building_id = int(match.group(1))
                 except Exception as exc:  # noqa: BLE001 - report, don't crash
                     return BuildResult(
                         False, None, f"submit did not confirm in time: {exc}"
                     )
 
-                if building_id is None:
+                # The old flow trusted any response here. A rejected build
+                # (permissions, validation) also answers the POST — the
+                # status and the page's error flash tell the difference.
+                if response.status >= 400:
+                    flash = await _page_flash(page)
                     return BuildResult(
-                        False, None, "built, but could not detect the new building id"
+                        False, None,
+                        f"MissionChief rejected the build (HTTP {response.status})"
+                        + (f": {flash}" if flash else ""),
+                    )
+
+                # Let the redirect (if any) land before inspecting the URL.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:  # noqa: BLE001 - URL check below still runs
+                    pass
+                import re
+
+                building_id = None
+                match = re.search(
+                    r"/(?:alliance_)?buildings/(\d+)", response.url
+                ) or re.search(r"/(?:alliance_)?buildings/(\d+)", str(page.url))
+                if match:
+                    building_id = int(match.group(1))
+
+                if building_id is None:
+                    # Alliance builds don't redirect to /buildings/<id>, so a
+                    # missing id here proves nothing either way — and a red
+                    # banner on the landing page may be about something else
+                    # entirely. Pass any flash text along as context and let
+                    # the caller's API check deliver the verdict.
+                    flash = await _page_flash(page)
+                    return BuildResult(
+                        True, None,
+                        f"submitted (HTTP {response.status})"
+                        + (f"; page shows: {flash}" if flash else "")
+                        + " — needs API confirmation",
                     )
                 return BuildResult(True, building_id, "created")
             finally:

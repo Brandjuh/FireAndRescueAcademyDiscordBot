@@ -14,6 +14,7 @@ Safety:
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -33,8 +34,13 @@ from ..geo.overpass import (
     parse_candidates,
 )
 from ..geo.world_locations import random_world_location
-from ..mc.browser_builder import BrowserBuilder, BrowserUnavailable
-from ..mc.buildings_api import nearest_duplicate, parse_api_buildings
+from ..mc.browser_builder import BrowserBuilder, BrowserUnavailable, BuildResult
+from ..mc.buildings_api import (
+    BUILDING_TYPE_IDS as API_TYPE_IDS,
+    haversine_meters,
+    nearest_duplicate,
+    parse_api_buildings,
+)
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.board import BoardPost
@@ -55,6 +61,14 @@ DUPLICATE_RADIUS_M = 250                      # skip a spot within this of a sam
 OVERPASS_BBOX_DELTA = 0.18                    # ~20 km box around a chosen city
 MAX_CITY_ATTEMPTS = 6                         # cities to try before giving up on a type
 DAILY_BUILD_STATE_KEY = "daily_build_last_date"
+
+# Post-build verification: an alliance build doesn't redirect to
+# /buildings/<id>, so after a submit we look for a NEW same-type building
+# near the pin on the building APIs. Loose radius is safe — pre-existing
+# buildings are excluded by the before/after diff.
+CONFIRM_RADIUS_M = 300.0
+CONFIRM_ATTEMPTS = 3
+CONFIRM_RETRY_SECONDS = 10.0
 
 # OSM feature types (amenity/…) that ARE the building — the strongest,
 # language-independent signal.
@@ -329,6 +343,12 @@ class BuildingsService(BoardRequestService):
 
         name = location.address.split(",")[0] if location.address else f"{building_type}"
 
+        # Snapshot the same-type buildings near the pin BEFORE building, so
+        # the after-the-fact API check can tell a genuinely new building from
+        # one that was already there.
+        before = await self._same_type_near(
+            building_type, location.latitude, location.longitude
+        )
         try:
             result = await self._builder.build(
                 building_type=building_type,
@@ -343,28 +363,50 @@ class BuildingsService(BoardRequestService):
             )
             return
 
+        if result.ok and result.building_id is None:
+            # Alliance builds don't redirect to /buildings/<id>, so the
+            # browser can't tell whether the game accepted the build. The
+            # API can: a NEW same-type building at the pin proves it landed;
+            # its absence proves the game silently refused it. Keep the
+            # submit note (HTTP status / page flash) — it carries the WHY
+            # when the confirmation comes back empty.
+            submit_note = result.detail
+            result = await self._confirm_build(
+                building_type, location.latitude, location.longitude, before
+            )
+            if not result.ok and submit_note:
+                result = BuildResult(
+                    False, None, f"{result.detail} [{submit_note}]"
+                )
+
         if result.ok:
             payload["building_id"] = result.building_id
+            link = (
+                f"https://www.missionchief.com/buildings/{result.building_id}"
+                if result.building_id
+                else "see the alliance buildings list"
+            )
             await self.requests.set_status(
                 request_id, "done",
-                f"built {building_type} #{result.building_id}",
+                f"built {building_type}"
+                + (f" #{result.building_id}" if result.building_id else " (id unknown)"),
                 payload=json.dumps(payload),
             )
             await self.reply_for(
                 request,
                 f"✅ {building_type.capitalize()} built for {requester} at "
-                f"{location.address or 'the pin'} — "
-                f"https://www.missionchief.com/buildings/{result.building_id}"
+                f"{location.address or 'the pin'} — {link}"
             )
         else:
             await self.requests.set_status(
                 request_id, "failed",
-                f"build failed: {result.detail}", payload=json.dumps(payload),
+                f"build failed: {result.detail} — ADMIN ACTION NEEDED",
+                payload=json.dumps(payload),
             )
             await self.reply_for(
                 request,
-                f"@{requester}: I couldn't build the {building_type} automatically "
-                f"({result.detail}). An admin will handle it."
+                f"@{requester}: I couldn't build the {building_type} "
+                f"({result.detail}). An admin has been notified."
             )
 
     async def _live_funds(self) -> tuple[int | None, str | None]:
@@ -406,6 +448,70 @@ class BuildingsService(BoardRequestService):
                 )
         log.warning("No alliance funds figure found on %s", KASSE_PATH)
         return None, "no funds figure found on the kasse page — layout change?"
+
+    async def _same_type_near(
+        self, building_type: str, lat: float, lng: float
+    ) -> dict:
+        """Same-type buildings within :data:`CONFIRM_RADIUS_M` of the pin,
+        from BOTH building APIs, keyed by id (or coords when the API row has
+        none) so before/after snapshots can be diffed. A failing endpoint is
+        skipped — degrade, don't block (same convention as the dedup)."""
+        found: dict = {}
+        type_id = API_TYPE_IDS.get(building_type)
+        for path in (API_BUILDINGS_PATH, API_ALLIANCE_BUILDINGS_PATH):
+            try:
+                rows = parse_api_buildings(await self.client.fetch_page(path))
+            except (MissionChiefError, ValueError) as exc:
+                log.warning("build confirm: could not read %s: %s", path, exc)
+                continue
+            for b in rows:
+                if (
+                    type_id is not None
+                    and b.building_type_id is not None
+                    and b.building_type_id != type_id
+                ):
+                    continue
+                if haversine_meters(lat, lng, b.latitude, b.longitude) > CONFIRM_RADIUS_M:
+                    continue
+                key = (
+                    b.building_id
+                    if b.building_id is not None
+                    else (round(b.latitude, 5), round(b.longitude, 5))
+                )
+                found[key] = b
+        return found
+
+    async def _confirm_build(
+        self, building_type: str, lat: float, lng: float, before: dict
+    ) -> BuildResult:
+        """Resolve a submitted-but-unconfirmed build via the building APIs.
+
+        The game answered the create POST without revealing an id (normal
+        for alliance builds). Only a NEW same-type building near the pin
+        proves it landed; after :data:`CONFIRM_ATTEMPTS` checks without one,
+        the build is reported as refused — never as built."""
+        for attempt in range(CONFIRM_ATTEMPTS):
+            if attempt:
+                await asyncio.sleep(CONFIRM_RETRY_SECONDS)
+            after = await self._same_type_near(building_type, lat, lng)
+            new = [b for key, b in after.items() if key not in before]
+            if new:
+                new.sort(key=lambda b: haversine_meters(lat, lng, b.latitude, b.longitude))
+                winner = new[0]
+                log.info(
+                    "build confirmed via API: %s #%s at %.5f,%.5f",
+                    building_type, winner.building_id, winner.latitude, winner.longitude,
+                )
+                return BuildResult(
+                    True, winner.building_id, "created (confirmed via the API)"
+                )
+        return BuildResult(
+            False, None,
+            f"the game accepted the submit but no new {building_type} appeared "
+            f"near the pin after {CONFIRM_ATTEMPTS} API checks — MissionChief "
+            "most likely refused it silently. Check the bot account's alliance "
+            "permissions and run `!fra testbuild` for a step-by-step trace",
+        )
 
     async def test_build(
         self, building_type: str | None, location_text: str
@@ -550,6 +656,9 @@ class BuildingsService(BoardRequestService):
                 f"at {where} ({coords})"
             )
 
+        before = await self._same_type_near(
+            building_type, candidate.latitude, candidate.longitude
+        )
         try:
             result = await self._builder.build(
                 building_type=building_type,
@@ -560,6 +669,10 @@ class BuildingsService(BoardRequestService):
             )
         except BrowserUnavailable as exc:
             return f"⚠️ {building_type}: {exc}"
+        if result.ok and result.building_id is None:
+            result = await self._confirm_build(
+                building_type, candidate.latitude, candidate.longitude, before
+            )
         if result.ok:
             # Fold the new building into the in-memory list so a same-type
             # second build this run won't land on top of it.
@@ -573,10 +686,12 @@ class BuildingsService(BoardRequestService):
                     }]
                 )[0]
             )
-            return (
-                f"✅ {building_type}: built '{candidate.name}' at {where} — "
+            link = (
                 f"https://www.missionchief.com/buildings/{result.building_id}"
+                if result.building_id
+                else "(id unknown — see the alliance buildings list)"
             )
+            return f"✅ {building_type}: built '{candidate.name}' at {where} — {link}"
         return f"❌ {building_type}: build failed — {result.detail}"
 
     async def _find_osm_candidate(self, building_type: str, existing: list):
