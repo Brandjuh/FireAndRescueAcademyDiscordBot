@@ -438,6 +438,64 @@ async def test_force_guide_repost_deletes_then_recreates(db):
     assert line.startswith("✅") and "overview #77" in line
 
 
+async def test_force_guide_is_quick_and_arms_availability_refresh(db):
+    """The forced sync must not spend minutes walking academy pages: it
+    posts with an availability placeholder and clears the refresh marker so
+    the next poll fills the numbers in."""
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    board = _GuideBoard(existing=None)
+    svc.board = board
+    calls = {"n": 0}
+    orig = svc._collect_availability
+
+    async def counting():
+        calls["n"] += 1
+        return await orig()
+
+    svc._collect_availability = counting
+    line = await svc.force_guide()
+    assert line.startswith("✅")
+    assert calls["n"] == 0                              # no walk during force
+    overview = board.created[0][1]
+    assert "being refreshed" in overview                # placeholder shown
+    # Refresh marker cleared -> the next poll rebuilds with real numbers.
+    assert await svc.state.get(svc._guide_refreshed_key()) is None
+    await svc._ensure_guide()
+    assert calls["n"] == 1
+    assert board.edited and "🚒 Fire Station: 2 classes" in board.edited[-1][1]
+
+
+async def test_force_guide_reports_failure_reason(db):
+    """A section that can't post must say WHY (e.g. no reply form)."""
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+
+    class _DeadBoard:
+        last_error = None
+
+        async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+            return None
+
+        async def create_post_get_id(self, thread_id, content):
+            self.last_error = (
+                "no reply form/token on the thread — can the bot's "
+                "MissionChief account post there?"
+            )
+            return None
+
+        async def edit_post(self, post_id, content):
+            return False
+
+        async def delete_post(self, thread_id, post_id):
+            return True
+
+    svc.board = _DeadBoard()
+    line = await svc.force_guide()
+    assert "❌" in line and "overview ❌" in line
+    assert "no reply form/token" in line                # the actual reason
+
+
 async def test_force_guide_reports_replies_off(db):
     svc, _ = _service(db, dry_run=True)                # reply_to_board=False
     line = await svc.force_guide()
