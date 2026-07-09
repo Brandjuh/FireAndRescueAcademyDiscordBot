@@ -111,8 +111,15 @@ class LogsSyncService:
         rows (deduped by signature) and marking them already-posted so old
         history never floods the feed. Returns True once the walk reaches
         the last page. Resumable across restarts; the global pacer keeps it
-        gentle regardless of chunk size.
+        gentle regardless of chunk size. Runs as BULK traffic: its requests
+        yield to board work on the shared pacer.
         """
+        from ..core.pacing import bulk_traffic
+
+        with bulk_traffic():
+            return await self._backfill_step_paced()
+
+    async def _backfill_step_paced(self) -> bool:
         if await self.backfill_done():
             return True
 

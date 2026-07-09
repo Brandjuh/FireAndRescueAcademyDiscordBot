@@ -111,8 +111,15 @@ class TreasurySyncService:
     async def backfill_step(self) -> bool:
         """Process one chunk of the initial backfill.
 
-        Returns True when the backfill is (now) complete.
+        Returns True when the backfill is (now) complete. Runs as BULK
+        traffic: its requests yield to board work on the shared pacer.
         """
+        from ..core.pacing import bulk_traffic
+
+        with bulk_traffic():
+            return await self._backfill_step_paced()
+
+    async def _backfill_step_paced(self) -> bool:
         if await self.backfill_done():
             return True
 
