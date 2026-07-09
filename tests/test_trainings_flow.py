@@ -358,30 +358,39 @@ async def test_first_post_on_initially_empty_thread_is_processed(db):
 
 # -- board guide: find-or-edit, never duplicate -----------------------------
 
-async def test_training_guide_created_then_skipped(db):
+async def test_training_guide_creates_all_sections_then_skips(db):
+    from fra_bot.services.trainings import _AGENCY_ORDER
+
     svc, _ = _service(db, dry_run=True)
     svc.cfg.automation.reply_to_board = True
     board = _GuideBoard(existing=None)
     svc.board = board
     await svc._ensure_guide()
-    assert len(board.created) == 1                     # first time: created once
+    # Overview + one post per agency, each small enough for the forum.
+    assert len(board.created) == 1 + len(_AGENCY_ORDER)
     assert board.created[0][1].startswith("[FRA] 📋 How to request a TRAINING")
-    assert "HazMat" in board.created[0][1]             # lists the catalog
+    assert "[b]Training Request Guide[/b]" in board.created[0][1]
+    fire_post = board.created[1][1]
+    assert fire_post.startswith("[FRA] 📋 Fire Station training request text")
+    assert "- HazMat (3 days)" in fire_post
+    assert "- Fire Station - Lifeguard Training (5 days) - opens Lifeguard Training" in fire_post
+    assert all(len(content) < 2000 for _, content in board.created)
     assert await svc.state.get(svc._guide_id_key()) == "77"
-    # Same content next poll: no duplicate, no needless edit.
+    assert await svc.state.get(svc._section_id_key("fire")) == "77"
+    # Same content next poll: no duplicates, no needless edits.
     await svc._ensure_guide()
-    assert len(board.created) == 1
+    assert len(board.created) == 1 + len(_AGENCY_ORDER)
     assert board.edited == []
 
 
 async def test_training_guide_edits_existing_instead_of_duplicating(db):
     svc, _ = _service(db, dry_run=True)
     svc.cfg.automation.reply_to_board = True
-    board = _GuideBoard(existing=91)                   # a guide already on the board
+    board = _GuideBoard(existing=91)                   # every marker already posted
     svc.board = board
     await svc._ensure_guide()
-    assert board.created == []                         # found it -> edit, never create
-    assert board.edited and board.edited[0][0] == 91
+    assert board.created == []                         # found -> edit, never create
+    assert len(board.edited) == 5 and board.edited[0][0] == 91
     assert await svc.state.get(svc._guide_id_key()) == "91"
 
 
@@ -393,24 +402,26 @@ async def test_training_guide_suppressed_when_replies_off(db):
     assert board.created == [] and board.edited == []
 
 
-async def test_training_guide_content_has_availability_and_timestamp(db):
+async def test_training_overview_has_availability_and_timestamp(db):
     svc, _ = _service(db, dry_run=True)
-    desired = await svc.guide_content(now_epoch=1000.0)
+    desired = await svc._overview_content(now_epoch=1000.0)
     assert desired.startswith("[FRA] 📋 How to request a TRAINING")
-    assert "[b]Free classrooms right now[/b]" in desired
+    assert "[b]Current academy availability[/b]" in desired
     assert "Last updated:" in desired
     # The fake academy (fire, id 4951748) has 2 free classrooms.
-    assert "🚒 Fire: 2" in desired
+    assert "🚒 Fire Station: 2 classes" in desired
 
 
-async def test_force_guide_creates_and_reports(db):
+async def test_force_guide_creates_and_reports_sections(db):
     svc, _ = _service(db, dry_run=True)
     svc.cfg.automation.reply_to_board = True
     board = _GuideBoard(existing=None)
     svc.board = board
     line = await svc.force_guide()
-    assert line.startswith("✅") and "#77" in line
-    assert len(board.created) == 1 and board.deleted == []
+    assert line.startswith("✅")
+    for part in ("overview #77", "fire #77", "police #77", "ems #77", "coastal #77"):
+        assert part in line
+    assert len(board.created) == 5 and board.deleted == []
 
 
 async def test_force_guide_repost_deletes_then_recreates(db):
@@ -418,11 +429,13 @@ async def test_force_guide_repost_deletes_then_recreates(db):
     svc.cfg.automation.reply_to_board = True
     board = _GuideBoard(existing=None)
     svc.board = board
-    await svc.state.set(svc._guide_id_key(), "55")     # old guide, buried
+    await svc.state.set(svc._guide_id_key(), "55")       # buried overview
+    await svc.state.set(svc._section_id_key("fire"), "56")
     line = await svc.force_guide(repost=True)
-    assert board.deleted == [(5935, 55)]               # old one removed
-    assert len(board.created) == 1                     # fresh one at the bottom
-    assert line.startswith("✅") and "#77" in line
+    assert (5935, 55) in board.deleted                   # old posts removed
+    assert (5935, 56) in board.deleted
+    assert len(board.created) == 5                       # fresh set at the bottom
+    assert line.startswith("✅") and "overview #77" in line
 
 
 async def test_force_guide_reports_replies_off(db):
@@ -433,11 +446,12 @@ async def test_force_guide_reports_replies_off(db):
 
 async def test_training_guide_skips_availability_fetch_when_throttled(db):
     """The expensive availability walk must NOT run on quiet polls: with the
-    guide up-to-date and inside the refresh window, _ensure_guide returns
-    before guide_content is ever built."""
+    overview up-to-date and inside the refresh window, _ensure_guide returns
+    before the availability content is ever built."""
     import hashlib
 
     from fra_bot.mc.board import guide_now
+    from fra_bot.services.trainings import _AGENCY_ORDER, _discipline_guide
 
     svc, _ = _service(db, dry_run=True)
     svc.cfg.automation.reply_to_board = True
@@ -452,18 +466,27 @@ async def test_training_guide_skips_availability_fetch_when_throttled(db):
 
     svc._collect_availability = counting
 
-    # Prime state: guide exists, signature current, refreshed just now.
+    # Prime state: every post exists, signatures current, refreshed just now.
+    now = repr(guide_now())
     signature = hashlib.sha1(svc.guide_body().encode("utf-8")).hexdigest()[:12]
     await svc.state.set(svc._guide_id_key(), "77")
     await svc.state.set(svc._guide_hash_key(), signature)
-    await svc.state.set(svc._guide_refreshed_key(), repr(guide_now()))
+    await svc.state.set(svc._guide_refreshed_key(), now)
+    for key in _AGENCY_ORDER:
+        sig = hashlib.sha1(_discipline_guide(key).encode("utf-8")).hexdigest()[:12]
+        await svc.state.set(svc._section_id_key(key), "78")
+        await svc.state.set(svc._section_hash_key(key), sig)
+        await svc.state.set(svc._section_refreshed_key(key), now)
 
     await svc._ensure_guide()
     assert calls["n"] == 0                              # nothing fetched
     assert board.edited == [] and board.created == []   # nothing written
 
-    # Push the last refresh outside the window -> now it builds + edits once.
+    # Push the overview's refresh outside the window -> it rebuilds ONCE;
+    # the static agency posts stay untouched.
     await svc.state.set(svc._guide_refreshed_key(), repr(guide_now() - 7200))
     await svc._ensure_guide()
     assert calls["n"] == 1
-    assert board.edited and board.edited[0][0] == 77
+    assert board.edited == [(77, await svc._overview_content(0.0))] or (
+        len(board.edited) == 1 and board.edited[0][0] == 77
+    )
