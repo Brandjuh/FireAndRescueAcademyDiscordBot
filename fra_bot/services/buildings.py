@@ -14,6 +14,7 @@ Safety:
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -33,8 +34,13 @@ from ..geo.overpass import (
     parse_candidates,
 )
 from ..geo.world_locations import random_world_location
-from ..mc.browser_builder import BrowserBuilder, BrowserUnavailable
-from ..mc.buildings_api import nearest_duplicate, parse_api_buildings
+from ..mc.browser_builder import BrowserBuilder, BrowserUnavailable, BuildResult
+from ..mc.buildings_api import (
+    BUILDING_TYPE_IDS as API_TYPE_IDS,
+    haversine_meters,
+    nearest_duplicate,
+    parse_api_buildings,
+)
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.board import BoardPost
@@ -55,6 +61,14 @@ DUPLICATE_RADIUS_M = 250                      # skip a spot within this of a sam
 OVERPASS_BBOX_DELTA = 0.18                    # ~20 km box around a chosen city
 MAX_CITY_ATTEMPTS = 6                         # cities to try before giving up on a type
 DAILY_BUILD_STATE_KEY = "daily_build_last_date"
+
+# Post-build verification: an alliance build doesn't redirect to
+# /buildings/<id>, so after a submit we look for a NEW same-type building
+# near the pin on the building APIs. Loose radius is safe — pre-existing
+# buildings are excluded by the before/after diff.
+CONFIRM_RADIUS_M = 300.0
+CONFIRM_ATTEMPTS = 3
+CONFIRM_RETRY_SECONDS = 10.0
 
 # OSM feature types (amenity/…) that ARE the building — the strongest,
 # language-independent signal.
@@ -280,6 +294,13 @@ class BuildingsService(BoardRequestService):
     ) -> None:
         request_id = request["id"]
 
+        # A prior submit whose result couldn't be proven yet: ONLY verify —
+        # never rebuild. A second submit could create a duplicate building.
+        pending = payload.get("pending_confirm")
+        if pending:
+            await self._resolve_pending_confirm(request, requester, payload, pending)
+            return
+
         # Dry-run (or browser-less) never spends credits, so it must not
         # block on the funds gate — resolve and give feedback immediately.
         # A transient kasse hiccup used to park these requests in 'waiting'
@@ -329,6 +350,14 @@ class BuildingsService(BoardRequestService):
 
         name = location.address.split(",")[0] if location.address else f"{building_type}"
 
+        # Snapshot the same-type buildings near the pin BEFORE building, so
+        # the after-the-fact API check can tell a genuinely new building
+        # from one that was already there. The endpoint coverage travels
+        # with the snapshot: a diff against a snapshot that silently MISSED
+        # an endpoint would call every pre-existing building on it "new".
+        before, before_coverage = await self._same_type_near(
+            building_type, location.latitude, location.longitude
+        )
         try:
             result = await self._builder.build(
                 building_type=building_type,
@@ -343,29 +372,120 @@ class BuildingsService(BoardRequestService):
             )
             return
 
-        if result.ok:
-            payload["building_id"] = result.building_id
-            await self.requests.set_status(
-                request_id, "done",
-                f"built {building_type} #{result.building_id}",
-                payload=json.dumps(payload),
+        if result.ok and result.building_id is None:
+            # Alliance builds don't redirect to /buildings/<id>, so the
+            # browser can't tell whether the game accepted the build. Only
+            # the API can prove it — and only a proof may reach the member.
+            payload["pending_confirm"] = {
+                "building_type": building_type,
+                "lat": location.latitude,
+                "lng": location.longitude,
+                "address": location.address,
+                "before": sorted(before),
+                "coverage": sorted(before_coverage),
+                "submit_note": result.detail,
+            }
+            outcome, confirmed = await self._confirm_build(
+                building_type, location.latitude, location.longitude,
+                set(before), before_coverage,
             )
-            await self.reply_for(
-                request,
-                f"✅ {building_type.capitalize()} built for {requester} at "
-                f"{location.address or 'the pin'} — "
-                f"https://www.missionchief.com/buildings/{result.building_id}"
+            if outcome == "confirmed":
+                payload.pop("pending_confirm", None)
+                result = confirmed
+            else:
+                # Not proven either way (API lag, unreachable API, or a
+                # coverage gap). Park the request; the next poll re-enters
+                # via pending_confirm and ONLY verifies — never rebuilds.
+                await self.requests.set_status(
+                    request_id, "waiting",
+                    f"build submitted; API confirmation pending ({outcome})",
+                    payload=json.dumps(payload), bump_attempts=True,
+                    announce=False,
+                )
+                return
+
+        if result.ok:
+            await self._finish_build_done(
+                request, requester, payload, building_type,
+                location.address, result.building_id,
             )
         else:
-            await self.requests.set_status(
-                request_id, "failed",
-                f"build failed: {result.detail}", payload=json.dumps(payload),
+            await self._finish_build_failed(
+                request, requester, payload, building_type, result.detail
             )
-            await self.reply_for(
-                request,
-                f"@{requester}: I couldn't build the {building_type} automatically "
-                f"({result.detail}). An admin will handle it."
+
+    async def _resolve_pending_confirm(
+        self, request, requester: str | None, payload: dict, pending: dict
+    ) -> None:
+        """Re-verify an earlier submit (minutes later — generous to API
+        propagation lag). A terminal 'refused' requires a read window that
+        actually saw the APIs and found nothing new; unreadable APIs keep
+        the request waiting until MAX_ATTEMPTS ends it honestly."""
+        building_type = pending["building_type"]
+        outcome, confirmed = await self._confirm_build(
+            building_type, float(pending["lat"]), float(pending["lng"]),
+            set(pending.get("before") or []), set(pending.get("coverage") or []),
+        )
+        if outcome == "confirmed":
+            payload.pop("pending_confirm", None)
+            await self._finish_build_done(
+                request, requester, payload, building_type,
+                pending.get("address"), confirmed.building_id,
             )
+            return
+        if outcome == "absent":
+            payload.pop("pending_confirm", None)
+            note = pending.get("submit_note") or ""
+            await self._finish_build_failed(
+                request, requester, payload, building_type,
+                "the game accepted the submit but no new building appeared "
+                "on the APIs — MissionChief refused it silently. Check the "
+                "bot account's alliance permissions"
+                + (f" [{note}]" if note else ""),
+            )
+            return
+        await self.requests.set_status(
+            request["id"], "waiting",
+            "build submitted; APIs unreadable — confirmation still pending",
+            payload=json.dumps(payload), bump_attempts=True, announce=False,
+        )
+
+    async def _finish_build_done(
+        self, request, requester: str | None, payload: dict,
+        building_type: str, address: str | None, building_id: int | None,
+    ) -> None:
+        payload["building_id"] = building_id
+        link = (
+            f"https://www.missionchief.com/buildings/{building_id}"
+            if building_id
+            else "see the alliance buildings list"
+        )
+        await self.requests.set_status(
+            request["id"], "done",
+            f"built {building_type}"
+            + (f" #{building_id}" if building_id else " (id unknown)"),
+            payload=json.dumps(payload),
+        )
+        await self.reply_for(
+            request,
+            f"✅ {building_type.capitalize()} built for {requester} at "
+            f"{address or 'the pin'} — {link}"
+        )
+
+    async def _finish_build_failed(
+        self, request, requester: str | None, payload: dict,
+        building_type: str, detail: str,
+    ) -> None:
+        await self.requests.set_status(
+            request["id"], "failed",
+            f"build failed: {detail} — ADMIN ACTION NEEDED",
+            payload=json.dumps(payload),
+        )
+        await self.reply_for(
+            request,
+            f"@{requester}: I couldn't build the {building_type} "
+            f"({detail}). An admin has been notified."
+        )
 
     async def _live_funds(self) -> tuple[int | None, str | None]:
         """Live alliance funds from /verband/kasse, as ``(funds, error)``.
@@ -406,6 +526,101 @@ class BuildingsService(BoardRequestService):
                 )
         log.warning("No alliance funds figure found on %s", KASSE_PATH)
         return None, "no funds figure found on the kasse page — layout change?"
+
+    async def _same_type_near(
+        self, building_type: str, lat: float, lng: float
+    ) -> tuple[dict, set]:
+        """``(buildings, coverage)`` — same-type buildings within
+        :data:`CONFIRM_RADIUS_M` of the pin from BOTH building APIs, keyed
+        by id (or coords) as JSON-safe strings, each valued
+        ``(building, endpoint)``. ``coverage`` records WHICH endpoints
+        actually answered: a before/after diff is only trustworthy for
+        endpoints present in both snapshots — treating a silently-missed
+        endpoint as empty would make every pre-existing building on it
+        look new."""
+        from ..core.pacing import CircuitOpenError
+
+        found: dict = {}
+        coverage: set = set()
+        type_id = API_TYPE_IDS.get(building_type)
+        for path in (API_BUILDINGS_PATH, API_ALLIANCE_BUILDINGS_PATH):
+            try:
+                rows = parse_api_buildings(await self.client.fetch_page(path))
+            except (MissionChiefError, CircuitOpenError, ValueError) as exc:
+                log.warning("build confirm: could not read %s: %s", path, exc)
+                continue
+            coverage.add(path)
+            for b in rows:
+                if (
+                    type_id is not None
+                    and b.building_type_id is not None
+                    and b.building_type_id != type_id
+                ):
+                    continue
+                if haversine_meters(lat, lng, b.latitude, b.longitude) > CONFIRM_RADIUS_M:
+                    continue
+                key = (
+                    str(b.building_id)
+                    if b.building_id is not None
+                    else f"{b.latitude:.5f},{b.longitude:.5f}"
+                )
+                found[key] = (b, path)
+        return found, coverage
+
+    async def _confirm_build(
+        self,
+        building_type: str,
+        lat: float,
+        lng: float,
+        before_keys: set,
+        before_coverage: set,
+    ) -> tuple[str, BuildResult | None]:
+        """Verdict on a submitted-but-unconfirmed build, via the APIs.
+
+        Returns ``(outcome, result)``:
+
+        * ``('confirmed', BuildResult)`` — a NEW same-type building near the
+          pin, on an endpoint the before-snapshot covered. Proof it landed.
+        * ``('absent', None)`` — endpoints read fine and show nothing new.
+        * ``('unknown', None)`` — endpoints unreadable, or the only
+          candidate sits on an endpoint the before-snapshot missed
+          (indistinguishable from a pre-existing building). NEVER treated
+          as a refusal — the caller re-checks later.
+        """
+        saw_reads = False
+        ambiguous = False
+        for attempt in range(CONFIRM_ATTEMPTS):
+            if attempt:
+                await asyncio.sleep(CONFIRM_RETRY_SECONDS)
+            after, coverage = await self._same_type_near(building_type, lat, lng)
+            if not coverage:
+                continue
+            saw_reads = True
+            provable = [
+                b for key, (b, path) in after.items()
+                if key not in before_keys and path in before_coverage
+            ]
+            if provable:
+                provable.sort(
+                    key=lambda b: haversine_meters(lat, lng, b.latitude, b.longitude)
+                )
+                winner = provable[0]
+                log.info(
+                    "build confirmed via API: %s #%s at %.5f,%.5f",
+                    building_type, winner.building_id,
+                    winner.latitude, winner.longitude,
+                )
+                return "confirmed", BuildResult(
+                    True, winner.building_id, "created (confirmed via the API)"
+                )
+            if any(
+                key not in before_keys and path not in before_coverage
+                for key, (b, path) in after.items()
+            ):
+                ambiguous = True
+        if not saw_reads or ambiguous:
+            return "unknown", None
+        return "absent", None
 
     async def test_build(
         self, building_type: str | None, location_text: str
@@ -456,6 +671,15 @@ class BuildingsService(BoardRequestService):
             return "\n".join(lines)
 
         name = location.address.split(",")[0] if location.address else building_type
+        before: set = set()
+        before_coverage: set = set()
+        if not self.dry_run:
+            # Live test builds get the same API confirmation as the real
+            # flow — a ✅ must mean PROVEN built, never just "submitted".
+            found, before_coverage = await self._same_type_near(
+                building_type, location.latitude, location.longitude
+            )
+            before = set(found)
         try:
             result = await self._builder.build(
                 building_type=building_type,
@@ -471,6 +695,26 @@ class BuildingsService(BoardRequestService):
         except Exception as exc:  # noqa: BLE001 - surface it, don't crash the cog
             lines.append(f"❌ Browser build errored: {exc}")
             return "\n".join(lines)
+
+        if result.ok and result.building_id is None and not self.dry_run:
+            outcome, confirmed = await self._confirm_build(
+                building_type, location.latitude, location.longitude,
+                before, before_coverage,
+            )
+            if outcome == "confirmed":
+                result = confirmed
+            elif outcome == "absent":
+                lines.append(
+                    f"❌ [LIVE] submit accepted but NO new {building_type} "
+                    f"appeared on the APIs — the game refused it ({result.detail})"
+                )
+                return "\n".join(lines)
+            else:
+                lines.append(
+                    f"⚠️ [LIVE] submitted, but the APIs could not confirm it — "
+                    f"check the map ({result.detail})"
+                )
+                return "\n".join(lines)
 
         detail = result.detail
         if result.building_id:
@@ -550,6 +794,9 @@ class BuildingsService(BoardRequestService):
                 f"at {where} ({coords})"
             )
 
+        before, before_coverage = await self._same_type_near(
+            building_type, candidate.latitude, candidate.longitude
+        )
         try:
             result = await self._builder.build(
                 building_type=building_type,
@@ -560,6 +807,23 @@ class BuildingsService(BoardRequestService):
             )
         except BrowserUnavailable as exc:
             return f"⚠️ {building_type}: {exc}"
+        if result.ok and result.building_id is None:
+            outcome, confirmed = await self._confirm_build(
+                building_type, candidate.latitude, candidate.longitude,
+                set(before), before_coverage,
+            )
+            if outcome == "confirmed":
+                result = confirmed
+            elif outcome == "absent":
+                return (
+                    f"❌ {building_type}: submit accepted but no new building "
+                    f"appeared on the APIs — likely refused ({result.detail})"
+                )
+            else:
+                return (
+                    f"⚠️ {building_type}: submitted but could not verify via "
+                    f"the APIs — check the map ({result.detail})"
+                )
         if result.ok:
             # Fold the new building into the in-memory list so a same-type
             # second build this run won't land on top of it.
@@ -573,10 +837,12 @@ class BuildingsService(BoardRequestService):
                     }]
                 )[0]
             )
-            return (
-                f"✅ {building_type}: built '{candidate.name}' at {where} — "
+            link = (
                 f"https://www.missionchief.com/buildings/{result.building_id}"
+                if result.building_id
+                else "(id unknown — see the alliance buildings list)"
             )
+            return f"✅ {building_type}: built '{candidate.name}' at {where} — {link}"
         return f"❌ {building_type}: build failed — {result.detail}"
 
     async def _find_osm_candidate(self, building_type: str, existing: list):
