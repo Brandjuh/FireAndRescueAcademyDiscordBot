@@ -68,6 +68,30 @@ class HumanPacer:
         (min_delay/max_delay) — the bot is choking on its own politeness."""
         return self._waiting
 
+    def reconfigure(
+        self,
+        *,
+        min_delay: float | None = None,
+        max_delay: float | None = None,
+        max_per_minute: int | None = None,
+        cooldown_seconds: float | None = None,
+    ) -> None:
+        """Apply new pacing LIVE (used by the runtime settings commands)."""
+        if min_delay is not None:
+            self._min_delay = float(min_delay)
+        if max_delay is not None:
+            self._max_delay = float(max_delay)
+        if max_per_minute is not None:
+            self._max_per_minute = max(1, int(max_per_minute))
+        if cooldown_seconds is not None:
+            self._cooldown_seconds = float(cooldown_seconds)
+        # Don't keep serving a delay armed under the OLD pacing: cap the next
+        # slot to the new maximum so e.g. lowering max_delay from 60 to 9
+        # takes effect on the very next request.
+        self._next_allowed = min(
+            self._next_allowed, time.monotonic() + self._max_delay
+        )
+
     async def wait_turn(self) -> None:
         """Block until it's polite to send the next request."""
         self._waiting += 1
