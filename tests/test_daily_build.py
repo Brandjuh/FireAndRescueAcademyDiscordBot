@@ -234,6 +234,64 @@ async def test_daily_build_skips_when_funds_below_floor(db):
     assert all("below floor" in line and line.startswith("⏳") for line in lines)
 
 
+async def test_live_funds_reports_why_it_failed(db):
+    from fra_bot.mc.errors import FetchError
+
+    svc = _svc(db)
+    svc.client._funds_html = "<div>no numbers anywhere</div>"
+    funds, error = await svc._live_funds()
+    assert funds is None and "no funds figure" in error
+
+    class _DeadClient:
+        async def fetch_page(self, path, *, referer=None):
+            raise FetchError(path, 503)
+
+    svc.client = _DeadClient()
+    funds, error = await svc._live_funds()
+    assert funds is None and "503" in error
+
+
+async def test_daily_build_summary_carries_funds_failure_reason(db):
+    svc = _svc(db, dry_run=True)
+    svc.client._funds_html = "<div>layout changed</div>"
+    lines = await svc.daily_build()
+    assert len(lines) == 2
+    assert all("no funds figure" in line for line in lines)
+
+
+async def test_dry_run_board_request_not_blocked_by_funds_read(db):
+    """A dry-run request spends nothing, so it must NOT wait on the funds
+    gate: even with an unreadable kasse page the member gets the resolved
+    location immediately instead of a silent 'waiting' retry loop."""
+    from fra_bot.db.repos import AutomationRepo
+    from fra_bot.geo.geocoder import GeocodeResult
+
+    svc = _svc(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    svc.client._funds_html = "<div>unreadable</div>"
+    svc.requests = AutomationRepo(db)
+    replies: list[str] = []
+
+    class _Board:
+        async def post_reply(self, thread_id, content):
+            replies.append(content)
+            return True
+
+    svc.board = _Board()
+    rid = await svc.requests.create(
+        kind="building", thread_id=15304, post_id=3,
+        requester_name="Alice", requester_mc_id=42, payload="{}",
+    )
+    request = await svc.requests.get(rid)
+    location = GeocodeResult(63.42, 10.39, "St Olavs hospital, Trondheim", "url")
+    await svc._attempt_build(request, "Alice", "hospital", location, {})
+
+    row = await svc.requests.get(rid)
+    assert row["status"] == "skipped"                  # answered, not waiting
+    assert "resolved to hospital" in row["status_detail"]
+    assert replies and "build it manually" in replies[0]
+
+
 async def test_daily_build_dedups_against_existing(db):
     # An existing hospital ~55 m from the only hospital candidate blocks it;
     # the prison candidate is unaffected.

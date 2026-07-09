@@ -279,11 +279,33 @@ class BuildingsService(BoardRequestService):
         announce: bool = True,
     ) -> None:
         request_id = request["id"]
-        funds = await self._live_funds()
+
+        # Dry-run (or browser-less) never spends credits, so it must not
+        # block on the funds gate — resolve and give feedback immediately.
+        # A transient kasse hiccup used to park these requests in 'waiting'
+        # with no reply, exactly when members expect a quick answer.
+        if self.dry_run or not BrowserBuilder.available():
+            reason = "dry-run" if self.dry_run else "Playwright not installed"
+            await self.requests.set_status(
+                request_id, "skipped",
+                f"{reason}: resolved to {building_type} at "
+                f"{location.latitude:.5f},{location.longitude:.5f}",
+                payload=json.dumps(payload),
+            )
+            await self.reply_for(
+                request,
+                f"@{requester}: {building_type} request resolved to "
+                f"{location.address or 'the pin'} "
+                f"({location.latitude:.5f}, {location.longitude:.5f}). "
+                f"[{reason} — build it manually for now]"
+            )
+            return
+
+        funds, funds_error = await self._live_funds()
         if funds is None:
             await self.requests.set_status(
                 request_id, "waiting",
-                "could not read live alliance funds; will retry",
+                f"could not read live alliance funds ({funds_error}); will retry",
                 payload=json.dumps(payload), bump_attempts=True, announce=False,
             )
             return
@@ -306,23 +328,6 @@ class BuildingsService(BoardRequestService):
             return
 
         name = location.address.split(",")[0] if location.address else f"{building_type}"
-
-        if self.dry_run or not BrowserBuilder.available():
-            reason = "dry-run" if self.dry_run else "Playwright not installed"
-            await self.requests.set_status(
-                request_id, "skipped",
-                f"{reason}: resolved to {building_type} at "
-                f"{location.latitude:.5f},{location.longitude:.5f}",
-                payload=json.dumps(payload),
-            )
-            await self.reply_for(
-                request,
-                f"@{requester}: {building_type} request resolved to "
-                f"{location.address or 'the pin'} "
-                f"({location.latitude:.5f}, {location.longitude:.5f}). "
-                f"[{reason} — build it manually for now]"
-            )
-            return
 
         try:
             result = await self._builder.build(
@@ -362,13 +367,23 @@ class BuildingsService(BoardRequestService):
                 f"({result.detail}). An admin will handle it."
             )
 
-    async def _live_funds(self) -> int | None:
+    async def _live_funds(self) -> tuple[int | None, str | None]:
+        """Live alliance funds from /verband/kasse, as ``(funds, error)``.
+
+        Exactly one side is set — the error string says WHY the read failed
+        (fetch error vs. unparseable page) so waiting requests and daily
+        summaries can show the real reason instead of a bare "could not
+        read"."""
         try:
             html = await self.client.fetch_page(KASSE_PATH)
         except MissionChiefError as exc:
             log.warning("Building funds check failed: %s", exc)
-            return None
-        return parse_total_funds(html)
+            return None, str(exc)
+        funds = parse_total_funds(html)
+        if funds is None:
+            log.warning("No alliance funds figure found on %s", KASSE_PATH)
+            return None, "no funds figure found on the kasse page — layout change?"
+        return funds, None
 
     async def test_build(
         self, building_type: str | None, location_text: str
@@ -403,11 +418,13 @@ class BuildingsService(BoardRequestService):
                 )
                 return "\n".join(lines)
             lines.append(f"🏗️ Detected type: **{building_type}**")
-        funds = await self._live_funds()
+        funds, funds_error = await self._live_funds()
         if funds is not None:
             lines.append(
                 f"💰 Alliance funds: {funds:,} (floor {self._auto.min_alliance_funds:,})"
             )
+        else:
+            lines.append(f"⚠️ Could not read alliance funds: {funds_error}")
 
         if not BrowserBuilder.available():
             lines.append(
@@ -483,9 +500,12 @@ class BuildingsService(BoardRequestService):
         return summary
 
     async def _auto_build_one(self, building_type: str, existing: list) -> str:
-        funds = await self._live_funds()
+        funds, funds_error = await self._live_funds()
         if funds is None:
-            return f"⏳ {building_type}: could not read alliance funds — skipped today"
+            return (
+                f"⏳ {building_type}: could not read alliance funds "
+                f"({funds_error}) — skipped today"
+            )
         if funds < self._auto.min_alliance_funds:
             return (
                 f"⏳ {building_type}: alliance funds {funds:,} below floor "
