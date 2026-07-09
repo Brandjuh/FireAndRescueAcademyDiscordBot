@@ -46,13 +46,37 @@ RETRY_MINUTES = 15              # backoff between busy retries (bounded by MAX_A
 
 GUIDE_MARKER = "[FRA] 📋 How to request a TRAINING"
 
-# Friendly discipline headings for the guide, in display order.
-_DISCIPLINE_TITLES = {
-    "fire": "🚒 Fire",
+# Display order + labels for the per-agency guide posts (the reference bot's
+# split: one overview post + one post per academy type, so no single post
+# grows past what the forum accepts).
+_AGENCY_ORDER = ("fire", "police", "ems", "coastal")
+_AGENCY_TITLES = {
+    "fire": "🚒 Fire Station",
     "police": "🚓 Police",
-    "ems": "🚑 EMS",
+    "ems": "🚑 EMS / Rescue",
     "coastal": "🌊 Water Rescue",
 }
+# Prefix used in request text for courses that exist in several academy
+# types. These resolve in the request parser (DISCIPLINE_PREFIXES).
+_AGENCY_PREFIX = {
+    "fire": "Fire Station",
+    "police": "Police",
+    "ems": "EMS",
+    "coastal": "Water Rescue",
+}
+
+
+def _section_marker(key: str) -> str:
+    return f"[FRA] 📋 {_AGENCY_PREFIX[key]} training request text"
+
+
+def _ambiguous_course_names() -> set[str]:
+    """Course names that exist in more than one academy type."""
+    seen: dict[str, int] = {}
+    for courses in DISCIPLINES.values():
+        for name in courses:
+            seen[name] = seen.get(name, 0) + 1
+    return {name for name, count in seen.items() if count > 1}
 
 
 class TrainingsService(BoardRequestService):
@@ -69,21 +93,123 @@ class TrainingsService(BoardRequestService):
         return self._auto.thread_id
 
     def guide_body(self) -> str:
-        return _training_guide(self._auto.min_contribution_rate)
+        return _overview_guide(self._auto.min_contribution_rate)
 
-    async def guide_content(self, now_epoch: float) -> str:
-        """Static guide + a live "free classrooms per academy type" block +
-        the last-updated line. Expensive (walks the academy pages) — the base
-        only invokes this once the guide throttle has decided to write, never
-        on the quiet polls in between."""
+    async def _overview_content(self, now_epoch: float) -> str:
+        """Overview post: the stable how-to text + the live academy
+        availability + a last-updated line. Expensive (walks the academy
+        pages) — only built once the guide throttle decided to write."""
         from ..mc.board import guide_updated_line
 
-        availability = await self._collect_availability()
-        return "\n".join([
-            self.guide_body(), "",
-            _availability_block(availability), "",
+        counts = await self._collect_availability()
+        lines = [
+            self.guide_body(),
+            "",
+            "[b]Current academy availability[/b]",
             guide_updated_line(now_epoch),
-        ])
+        ]
+        if counts is None:
+            lines.append("- temporarily unavailable — I'll refresh this shortly")
+        else:
+            for key in _AGENCY_ORDER:
+                count = counts.get(key, 0)
+                unit = "class" if count == 1 else "classes"
+                lines.append(f"- {_AGENCY_TITLES[key]}: {count} {unit}")
+        return "\n".join(lines)
+
+    # -- multi-post guide (overview + one post per agency) ----------------
+
+    def _section_id_key(self, key: str) -> str:
+        return f"board_guide_id:training:{self.thread_id}:{key}"
+
+    def _section_hash_key(self, key: str) -> str:
+        return f"board_guide_hash:training:{self.thread_id}:{key}"
+
+    def _section_refreshed_key(self, key: str) -> str:
+        return f"board_guide_refreshed:training:{self.thread_id}:{key}"
+
+    async def _ensure_guide(self) -> None:
+        """Maintain the guide as SEVERAL posts, like the old bot: one
+        overview (with live availability, refreshed hourly) plus one post
+        per academy type listing the exact request text. Splitting keeps
+        every post small enough for the forum. Each post is find-or-edit,
+        never duplicated; a failing section doesn't block the others."""
+        if not self.cfg.automation.reply_to_board:
+            return
+        import hashlib
+
+        from ..mc.board import ensure_guide_post, guide_now
+
+        now = guide_now()
+        body = self.guide_body()
+        try:
+            await ensure_guide_post(
+                self.board, self.state, self.thread_id,
+                id_key=self._guide_id_key(), hash_key=self._guide_hash_key(),
+                refreshed_key=self._guide_refreshed_key(),
+                marker=GUIDE_MARKER,
+                desired=lambda: self._overview_content(now),
+                signature=hashlib.sha1(body.encode("utf-8")).hexdigest()[:12],
+                now_epoch=now,
+            )
+        except MissionChiefError as exc:
+            log.warning("training: could not maintain guide overview: %s", exc)
+        for key in _AGENCY_ORDER:
+            text = _discipline_guide(key)
+            try:
+                await ensure_guide_post(
+                    self.board, self.state, self.thread_id,
+                    id_key=self._section_id_key(key),
+                    hash_key=self._section_hash_key(key),
+                    refreshed_key=self._section_refreshed_key(key),
+                    marker=_section_marker(key),
+                    desired=text,
+                    signature=hashlib.sha1(text.encode("utf-8")).hexdigest()[:12],
+                    now_epoch=now,
+                    # Static content: only rewrite when the catalog changes.
+                    min_refresh_seconds=30 * 24 * 3600,
+                )
+            except MissionChiefError as exc:
+                log.warning("training: could not maintain %s guide: %s", key, exc)
+
+    async def force_guide(self, *, repost: bool = False) -> str:
+        """Section-aware force sync for ``!fra guides`` — reports each of
+        the five posts (overview + four agencies)."""
+        label = f"training (thread {self.thread_id})"
+        if not self.cfg.automation.reply_to_board:
+            return f"➖ {label}: reply_to_board is off"
+        sections: list[tuple[str, str, str, str, str]] = [
+            ("overview", GUIDE_MARKER, self._guide_id_key(),
+             self._guide_hash_key(), self._guide_refreshed_key()),
+        ]
+        for key in _AGENCY_ORDER:
+            sections.append((
+                key, _section_marker(key), self._section_id_key(key),
+                self._section_hash_key(key), self._section_refreshed_key(key),
+            ))
+        try:
+            for _, marker, id_key, hash_key, refreshed_key in sections:
+                if repost:
+                    stored = await self.state.get(id_key)
+                    target = (
+                        int(stored) if stored
+                        else await self.board.find_bot_post(self.thread_id, marker)
+                    )
+                    if target:
+                        await self.board.delete_post(self.thread_id, int(target))
+                    await self.state.delete(id_key)
+                await self.state.delete(hash_key)
+                await self.state.delete(refreshed_key)
+            await self._ensure_guide()
+        except MissionChiefError as exc:
+            return f"❌ {label}: {exc}"
+        parts = []
+        for name, _, id_key, _, _ in sections:
+            post_id = await self.state.get(id_key)
+            parts.append(f"{name} #{post_id}" if post_id else f"{name} ❌")
+        icon = "✅" if all("#" in part for part in parts) else "⚠️"
+        url = self.client.url(f"/alliance_threads/{self.thread_id}")
+        return f"{icon} {label}: " + " · ".join(parts) + f" — {url}"
 
     async def _collect_availability(self) -> dict[str, int] | None:
         """Free classrooms per discipline across all alliance academies.
@@ -105,7 +231,7 @@ class TrainingsService(BoardRequestService):
             log.warning("training availability: could not read academy list: %s", exc)
             return None
 
-        counts = {key: 0 for key in _DISCIPLINE_TITLES}
+        counts = {key: 0 for key in _AGENCY_ORDER}
         seen: set[int] = set()
         for listing in listings:
             if listing.discipline not in counts or listing.building_id in seen:
@@ -441,46 +567,62 @@ class TrainingsService(BoardRequestService):
         return candidates
 
 
-def _training_guide(min_rate: float) -> str:
-    """The STABLE how-to-request post for the training board. Starts with
-    :data:`GUIDE_MARKER` (so it's never re-parsed as a request) and uses forum
-    BBCode headers. The caller appends live availability + a last-updated line."""
-    lines = [
+def _overview_guide(min_rate: float) -> str:
+    """The STABLE overview post, worded like the old bot's Training Request
+    Guide. Starts with :data:`GUIDE_MARKER` so it's never re-parsed as a
+    request; the course lists live in the per-agency posts below it."""
+    return "\n".join([
         GUIDE_MARKER,
+        "[b]Training Request Guide[/b]",
+        "",
+        "This post is maintained automatically by the Fire & Rescue Academy bot.",
         "",
         "[b]How to request[/b]",
-        "Post the training name on its own line. Want several? Put one per line.",
+        "- Type one or more training names from the agency posts below.",
+        "- You can request multiple classes in one post, one per line or "
+        "separated by commas.",
+        "- Small typos are supported, but the exact names below work best.",
+        "- Some trainings exist in more than one academy type. For those, use "
+        "the prefixed text shown in the agency posts.",
+        "- Example: use Fire Station - Lifeguard Training or Water Rescue - "
+        "Lifeguard Training, not only Lifeguard Training.",
+        "- Requests are opened as free alliance classes, 1 class per "
+        "recognized training.",
+        "- A class stays open to the whole alliance for 1 hour to join.",
+        f"- If your alliance contribution is below {min_rate:g}%, the class "
+        "will not be opened automatically.",
         "",
-        "[b]Copy an example[/b]",
+        "[b]Discord requests[/b]",
+        "You can also request trainings through the Discord request panel, "
+        "with an optional reminder when the course should be finished.",
+        "",
+        "[b]Guide posts[/b]",
+        "The bot keeps one post per agency below with the exact names to use.",
+        "",
+        "[b]Examples[/b]",
         "HazMat",
-        "SWAT",
-        "Lifeguard Training",
-        "",
-        "[b]Same course in two academies?[/b]",
-        "Put the academy in front so it opens in the right one:",
-        "Fire - Lifeguard Training",
+        "SWAT, K-9",
+        "Fire Station - Lifeguard Training",
         "Water Rescue - Lifeguard Training",
+    ])
+
+
+def _discipline_guide(key: str) -> str:
+    """One agency's request-text post (the old bot's per-agency guide):
+    every course with its duration, with the disambiguating prefix spelled
+    out for courses that exist in several academy types."""
+    ambiguous = _ambiguous_course_names()
+    prefix = _AGENCY_PREFIX[key]
+    lines = [
+        _section_marker(key),
+        f"[b]{_AGENCY_TITLES[key]} trainings[/b]",
         "",
-        "[b]Good to know[/b]",
-        "- Classes open FREE, one class per recognised course.",
-        "- A class stays open to the whole alliance for 1 hour to sign up.",
-        f"- Members below {min_rate:g}% alliance contribution are skipped.",
-        "",
-        "[b]Courses you can request[/b]",
+        "Use one of these names in this topic to request a class:",
     ]
-    for key, title in _DISCIPLINE_TITLES.items():
-        courses = DISCIPLINES.get(key) or {}
-        if courses:
-            lines.append(f"{title}: {', '.join(sorted(courses))}")
-    return "\n".join(lines)
-
-
-def _availability_block(counts: dict[str, int] | None) -> str:
-    """The live "free classrooms per academy type" section for the guide."""
-    lines = ["[b]Free classrooms right now[/b]"]
-    if counts is None:
-        lines.append("Temporarily unavailable — I'll refresh this shortly.")
-        return "\n".join(lines)
-    for key, title in _DISCIPLINE_TITLES.items():
-        lines.append(f"{title}: {counts.get(key, 0)}")
+    for name, days in sorted(DISCIPLINES.get(key, {}).items()):
+        unit = "day" if days == 1 else "days"
+        if name in ambiguous:
+            lines.append(f"- {prefix} - {name} ({days} {unit}) - opens {name}")
+        else:
+            lines.append(f"- {name} ({days} {unit})")
     return "\n".join(lines)
