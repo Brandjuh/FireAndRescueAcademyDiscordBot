@@ -118,3 +118,26 @@ async def test_requeue_resets_failed_request(db):
     other = await repo.create(kind="building", thread_id=1, post_id=2,
                               requester_name="A", requester_mc_id=9, payload="{}")
     assert await repo.requeue(other) is False
+
+
+def test_built_detail_becomes_clickable_link():
+    """The 'built prison #id' embed line links to the building; the payload
+    summary links the id too (embed titles can't carry links, so the linked
+    text leads the description)."""
+    import re
+
+    from fra_bot.cogs.automation import AutomationCog
+
+    detail = "built prison #5561931"
+    built = re.match(r"built (\w+) #(\d+)\b", detail)
+    assert built is not None
+    linked = (
+        f"**[Built {built.group(1)} #{built.group(2)}]"
+        f"(https://www.missionchief.com/buildings/{built.group(2)})**"
+    )
+    assert "buildings/5561931" in linked
+
+    summary = AutomationCog._payload_summary(
+        '{"building_type": "prison", "building_id": 5561931}'
+    )
+    assert "[#5561931](https://www.missionchief.com/buildings/5561931)" in summary
