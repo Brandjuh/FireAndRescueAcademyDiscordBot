@@ -235,3 +235,64 @@ async def test_level_upgrade_that_does_not_stick_is_reported(db):
     report = await svc.upgrade_all(execute=True)
     assert report.levels_raised == 0                    # did not take
     assert any("did not take" in line for line in report.lines)
+
+
+async def test_upgrade_one_levels_repeatedly_to_max(db):
+    """Post-creation: upgrade_one raises the level step by step until the
+    maximum, then buys the eligible extensions (never the large one)."""
+
+    class _SteppingClient(FakeClient):
+        """Each level GET advances the page by ONE level (real behaviour),
+        instead of jumping straight to max."""
+
+        def __init__(self):
+            super().__init__()
+            self.level = 17
+
+        async def fetch_page(self, path, *, referer=None):
+            if "expand_do/credits" in path:
+                self.gets.append(path)
+                self.level += 1
+                return "<html>ok</html>"
+            if path == "/buildings/10":
+                page = (
+                    '<meta name="csrf-token" content="tok">'
+                    f"<dt><strong>Level:</strong></dt><dd>{self.level}</dd>"
+                )
+                if "/buildings/10/extension/credits/1" not in self.posts:
+                    page += '<a href="/buildings/10/extension/credits/1">Ward (10,000 Credits)</a>'
+                page += '<a href="/buildings/10/extension/credits/9">Large Hospital (200,000 Credits)</a>'
+                return page
+            return await super().fetch_page(path, referer=referer)
+
+    client = _SteppingClient()
+    svc = _svc(db, client, dry_run=False)
+    report = await svc.upgrade_one(10, kind="hospital", name="New Hospital")
+    assert report.levels_raised == 3            # 17 -> 18 -> 19 -> 20 (max)
+    assert report.extensions_bought == 1        # ward bought, large skipped
+    assert not any("credits/9" in p for p in client.posts)
+    assert report.errors == 0
+
+
+async def test_upgrade_one_stops_leveling_after_refused_raise(db):
+    """A raise that 'did not take' (funds/refused, 200 re-render) must stop
+    further level attempts instead of burning the action budget."""
+
+    class _StuckClient(FakeClient):
+        async def fetch_page(self, path, *, referer=None):
+            if "expand_do/credits" in path:
+                self.gets.append(path)
+                return "<html>refused</html>"    # page level never moves
+            if path == "/buildings/10":
+                return (
+                    '<meta name="csrf-token" content="tok">'
+                    "<dt><strong>Level:</strong></dt><dd>5</dd>"
+                    '<a href="/buildings/10/extension/credits/9">Large Hospital (200,000 Credits)</a>'
+                )
+            return await super().fetch_page(path, referer=referer)
+
+    client = _StuckClient()
+    svc = _svc(db, client, dry_run=False)
+    report = await svc.upgrade_one(10, kind="hospital")
+    assert len(client.gets) == 1                # exactly one attempt
+    assert report.levels_raised == 0 and report.errors == 1

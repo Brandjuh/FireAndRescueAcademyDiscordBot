@@ -174,9 +174,36 @@ class BuildingUpgradeService:
 
     # -- live ------------------------------------------------------------
 
+    async def upgrade_one(
+        self,
+        building_id: int,
+        *,
+        kind: str,
+        name: str | None = None,
+        max_actions: int = DEFAULT_MAX_ACTIONS,
+    ) -> UpgradeReport:
+        """Post-creation automation for ONE building: raise the level to the
+        maximum and buy every extension except the large one. Runs as BULK
+        traffic so board work keeps priority on the shared pacer."""
+        from types import SimpleNamespace
+
+        from ..core.pacing import bulk_traffic
+
+        report = UpgradeReport(mode="LIVE")
+        target = SimpleNamespace(
+            building_id=building_id, kind=kind, name=name or f"#{building_id}"
+        )
+        with bulk_traffic():
+            try:
+                await self._upgrade_live(target, report, max_actions)
+            except MissionChiefError as exc:
+                report.errors += 1
+                report.lines.append(f"❌ {target.name}: {exc}")
+        return report
+
     async def _upgrade_live(self, b, report: UpgradeReport, max_actions: int) -> None:
         attempted: set[int] = set()
-        raised_level = False
+        level_blocked = False
         level_before: int | None = None
         guard = 0
         while report.actions < max_actions and guard < _PER_BUILDING_GUARD:
@@ -201,9 +228,11 @@ class BuildingUpgradeService:
                         f"(still {level_after if level_after is not None else '?'}) "
                         "— check alliance funds"
                     )
+                    # Don't burn the action budget retrying a refused raise.
+                    level_blocked = True
                 level_before = None
 
-            if b.kind == "hospital" and not raised_level:
+            if b.kind == "hospital" and not level_blocked:
                 level = parse_current_level(html)
                 if level is not None and level < self._max_level:
                     if not await self._funds_ok(report):
@@ -217,8 +246,7 @@ class BuildingUpgradeService:
                         report.errors += 1
                         report.lines.append(f"❌ {b.name}: level upgrade rejected")
                         return
-                    raised_level = True
-                    continue  # re-fetch with the new level
+                    continue  # re-fetch: verify, then raise further toward max
 
             offers = self._eligible(parse_extension_offers(html, b.building_id), b.kind)
             offers = [o for o in offers if o.ext_id not in attempted]

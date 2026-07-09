@@ -226,6 +226,10 @@ class BuildingsService(BoardRequestService):
         )
         self._overpass = OverpassClient()
         self._rng = random.Random()
+        # Post-creation automation: tax + level + extensions on new builds.
+        from .building_upgrade import BuildingUpgradeService
+
+        self._upgrader = BuildingUpgradeService(cfg, client, db)
 
     @property
     def thread_id(self) -> int:
@@ -519,6 +523,48 @@ class BuildingsService(BoardRequestService):
             await self._notify_ingame_built(
                 requester, building_type, name, coords, address, link
             )
+        # Post-creation automation (reference-bot behaviour): tax to the
+        # configured percentage, level to max, every extension except the
+        # large one. Feedback lands as a follow-up board reply.
+        note = await self._post_creation(building_id, building_type, name)
+        if note:
+            await self.reply_for(
+                request,
+                f"Post-creation for {building_type}"
+                + (f" #{building_id}" if building_id else "")
+                + f":\n{note}",
+            )
+
+    async def _post_creation(
+        self, building_id: int | None, building_type: str, name: str | None
+    ) -> str:
+        """Tax + level-to-max + extensions (except large) for a NEW
+        building. Returns a short human summary ('' when skipped)."""
+        if not building_id or self.dry_run:
+            return ""
+        from ..mc.building_tax import set_building_tax
+
+        notes: list[str] = []
+        percent = self._auto.set_tax_percent
+        if percent:
+            ok, detail = await set_building_tax(self.client, building_id, percent)
+            notes.append(("✅ " if ok else "⚠️ ") + detail)
+            if not ok:
+                log.warning("post-creation: %s #%s: %s", building_type,
+                            building_id, detail)
+        report = await self._upgrader.upgrade_one(
+            building_id, kind=building_type, name=name,
+        )
+        notes.append(
+            f"levels raised: {report.levels_raised} · "
+            f"extensions bought: {report.extensions_bought}"
+            + (" · stopped at the funds floor" if report.funds_blocked else "")
+            + (" · action cap reached — an admin can run `!fra "
+               "upgradebuildings confirm` for the rest" if report.truncated else "")
+        )
+        log.info("post-creation %s #%s: %s", building_type, building_id,
+                 " | ".join(notes))
+        return "\n".join(notes)
 
     async def _notify_ingame_built(
         self, requester: str | None, building_type: str, name: str | None,
@@ -921,7 +967,14 @@ class BuildingsService(BoardRequestService):
                 if result.building_id
                 else "(id unknown — see the alliance buildings list)"
             )
-            return f"✅ {building_type}: built '{candidate.name}' at {where} — {link}"
+            note = await self._post_creation(
+                result.building_id, building_type, candidate.name
+            )
+            suffix = f" · {note.replace(chr(10), ' · ')}" if note else ""
+            return (
+                f"✅ {building_type}: built '{candidate.name}' at {where} — "
+                f"{link}{suffix}"
+            )
         return f"❌ {building_type}: build failed — {result.detail}"
 
     async def _find_osm_candidate(self, building_type: str, existing: list):

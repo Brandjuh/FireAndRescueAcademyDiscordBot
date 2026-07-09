@@ -163,14 +163,22 @@ def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", alliance_json="[]"
     )
     svc._auto = SimpleNamespace(
         daily_build_enabled=enabled, min_alliance_funds=min_funds,
-        daily_build_time="03:00", thread_id=15304,
+        daily_build_time="03:00", thread_id=15304, set_tax_percent=0,
     )
+
+    class _NullUpgrader:
+        async def upgrade_one(self, building_id, *, kind, name=None,
+                              max_actions=25):
+            from fra_bot.services.building_upgrade import UpgradeReport
+            return UpgradeReport(mode="LIVE")
+
     svc.client = FakeClient(funds=funds, api_json=api_json, alliance_json=alliance_json)
     svc.state = StateRepo(db)
     svc.runs = RunsRepo(db)
     svc._geocoder = FakeGeo()
     svc._overpass = FakeOverpass(OVERPASS_DATA if overpass_data is None else overpass_data)
     svc._builder = FakeBuilder()
+    svc._upgrader = _NullUpgrader()
     svc._rng = random.Random(seed)
     return svc
 
@@ -558,4 +566,5 @@ async def test_board_build_pending_confirms_on_late_api(db, monkeypatch):
     row = await svc.requests.get(rid)
     assert row["status"] == "done"
     assert "built hospital #88" in row["status_detail"]
-    assert replies and "buildings/88" in replies[-1]
+    assert any("buildings/88" in r for r in replies)
+    assert any("Post-creation" in r for r in replies)   # tax/upgrade follow-up
