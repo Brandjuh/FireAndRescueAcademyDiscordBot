@@ -1041,6 +1041,125 @@ class AdminCog(commands.Cog):
             return
         await ctx.send(result[:1900])
 
+    @fra.command(name="diag", aliases=["diagnose", "doctor"])
+    async def diag(self, ctx: commands.Context) -> None:
+        """One-shot health check of every automation path.
+
+        Fetches the real MissionChief pages and reports exactly where a
+        flow breaks: session, alliance funds parse, academy list, education
+        form, and whether Playwright (needed for building) is installed.
+        """
+        await ctx.send("⏳ Running diagnostics… (a few MissionChief fetches)")
+        try:
+            lines = await self._run_diagnostics()
+        except Exception as exc:  # noqa: BLE001 - a diagnostic must not crash
+            log.exception("diagnostics failed")
+            await ctx.send(f"❌ Diagnostics errored: {exc}")
+            return
+        await ctx.send("```\n" + "\n".join(lines)[:1900] + "\n```")
+
+    async def _run_diagnostics(self) -> list[str]:
+        import html as html_lib
+        import re
+
+        from ..mc.browser_builder import BrowserBuilder
+        from ..mc.errors import MissionChiefError
+        from ..mc.parsers.academy import (
+            parse_academy_page,
+            parse_alliance_buildings_page,
+        )
+        from ..mc.parsers.treasury import parse_total_funds
+
+        cfg = self.bot.cfg
+        lines = [
+            f"dry_run: {'ON' if cfg.automation.dry_run else 'OFF'}",
+            "playwright: " + (
+                "installed"
+                if BrowserBuilder.available()
+                else "NOT INSTALLED — building can never run without it "
+                     "(see README: pip install playwright)"
+            ),
+        ]
+
+        # Alliance funds: fetch + parse, and show what the page actually
+        # says when the parse finds nothing.
+        try:
+            kasse = await self.bot.mc.fetch_page("/verband/kasse")
+        except MissionChiefError as exc:
+            kasse = None
+            lines.append(f"kasse fetch: FAILED — {exc}")
+        if kasse is not None:
+            funds = parse_total_funds(kasse)
+            if funds is not None:
+                lines.append(f"alliance funds: {funds:,} (plain HTML parse OK)")
+            else:
+                text = re.sub(
+                    r"\s+", " ", html_lib.unescape(re.sub(r"<[^>]+>", " ", kasse))
+                )
+                pos = text.lower().find("credits")
+                around = (
+                    "…" + text[max(0, pos - 90): pos + 30].strip() + "…"
+                    if pos >= 0 else "no 'Credits' text on the page at all"
+                )
+                lines.append(
+                    f"alliance funds: NOT FOUND in plain HTML ({len(kasse):,} chars)"
+                )
+                lines.append(f"  around first 'Credits': {around}")
+
+        # Academy list: what the trainings flow can actually see.
+        try:
+            listing_html = await self.bot.mc.fetch_page("/verband/gebauede")
+        except MissionChiefError as exc:
+            listing_html = None
+            lines.append(f"academy list fetch: FAILED — {exc}")
+        first = None
+        if listing_html is not None:
+            listings = parse_alliance_buildings_page(listing_html)
+            per: dict[str, list[int]] = {}
+            for a in listings:
+                stats = per.setdefault(a.discipline or "?", [0, 0])
+                stats[0] += 1
+                if a.has_start_button:
+                    stats[1] += 1
+            if listings:
+                lines.append(
+                    "academies (page 1): " + ", ".join(
+                        f"{d}: {n} ({s} startable)"
+                        for d, (n, s) in sorted(per.items())
+                    )
+                )
+                first = next((a for a in listings if a.has_start_button), None)
+            else:
+                hint = (
+                    "start-course text IS on the page — parser mismatch"
+                    if "start a new training course" in listing_html.lower()
+                    else "no start-course text — wrong page or no permissions?"
+                )
+                lines.append(
+                    f"academies (page 1): NONE PARSED "
+                    f"({len(listing_html):,} chars; {hint})"
+                )
+
+        # Education form on the first startable academy.
+        if first is not None:
+            try:
+                page = parse_academy_page(
+                    await self.bot.mc.fetch_page(f"/buildings/{first.building_id}")
+                )
+                free_ok = not page.costs or 0 in page.costs
+                lines.append(
+                    f"academy {first.building_id} ({first.name or first.discipline}): "
+                    f"form={'yes' if page.action else 'NO'}, "
+                    f"token={'yes' if page.authenticity_token else 'NO'}, "
+                    f"free rooms={page.available_rooms}, "
+                    f"courses={len(page.courses)}, "
+                    f"free class={'yes' if free_ok else 'NO'}"
+                )
+            except MissionChiefError as exc:
+                lines.append(f"academy {first.building_id}: fetch FAILED — {exc}")
+
+        return lines
+
     @fra.command(name="dump")
     async def dump(
         self, ctx: commands.Context, path: str, mode: str = "http"
