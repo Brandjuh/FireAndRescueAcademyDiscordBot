@@ -845,6 +845,32 @@ class AdminCog(commands.Cog):
         for start in range(1990, len(summary), 1990):
             await ctx.send(summary[start : start + 1990])
 
+    @fra.command(name="settax")
+    async def set_tax(
+        self, ctx: commands.Context, building_id: int, percent: int | None = None
+    ) -> None:
+        """Set an alliance building's tax, e.g. `!fra settax 5561931 20`.
+
+        Without a percentage the configured default
+        (`automation.building.set_tax_percent`) is used. The result is
+        verified against the building page.
+        """
+        from ..mc.building_tax import set_building_tax
+
+        target = percent if percent is not None else (
+            self.bot.cfg.automation.building.set_tax_percent
+        )
+        if target not in (0, 10, 20, 30, 40, 50):
+            await ctx.send("⚠️ Tax must be one of 0/10/20/30/40/50.")
+            return
+        message = await ctx.send(
+            f"⏳ Setting tax of building {building_id} to {target}%…"
+        )
+        ok, detail = await set_building_tax(self.bot.mc, building_id, target)
+        await message.edit(
+            content=f"{'✅' if ok else '❌'} Building {building_id}: {detail}"
+        )
+
     @fra.command(name="nextmission")
     async def next_mission(self, ctx: commands.Context) -> None:
         """Show which mission/event is up next and where (for the eventpinger)."""
