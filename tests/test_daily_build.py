@@ -568,3 +568,82 @@ async def test_board_build_pending_confirms_on_late_api(db, monkeypatch):
     assert "built hospital #88" in row["status_detail"]
     assert any("buildings/88" in r for r in replies)
     assert any("Post-creation" in r for r in replies)   # tax/upgrade follow-up
+
+
+# -- the finisher: completing fresh builds over time --------------------------
+
+async def test_finisher_retries_tax_and_retires_when_complete(db, monkeypatch):
+    import json as _json
+
+    from fra_bot.services.buildings import (
+        COMPLETION_IDLE_LIMIT,
+        PENDING_COMPLETION_KEY,
+    )
+
+    svc = _svc(db, dry_run=False)
+    svc._auto.set_tax_percent = 20
+    tax_calls = {"n": 0}
+
+    async def fake_tax(client, building_id, percent):
+        tax_calls["n"] += 1
+        # First attempt fails (page hiccup), second sticks.
+        return (tax_calls["n"] >= 2), f"tax set to {percent}%"
+
+    monkeypatch.setattr("fra_bot.mc.building_tax.set_building_tax", fake_tax)
+    await svc._register_completion(5561931, "prison", "L'Oudaya", tax_done=False)
+
+    # Pass 1: tax fails, no upgrade progress -> entry stays, idle grows.
+    await svc.finish_pending()
+    data = _json.loads(await svc.state.get(PENDING_COMPLETION_KEY))
+    assert data["5561931"]["tax_done"] is False
+
+    # Pass 2: tax sticks -> progress, idle resets.
+    await svc.finish_pending()
+    data = _json.loads(await svc.state.get(PENDING_COMPLETION_KEY))
+    assert data["5561931"]["tax_done"] is True
+    assert data["5561931"]["idle"] == 0
+
+    # Then only idle passes: after the limit the building retires.
+    for _ in range(COMPLETION_IDLE_LIMIT):
+        await svc.finish_pending()
+    data = _json.loads(await svc.state.get(PENDING_COMPLETION_KEY))
+    assert data == {}
+
+
+async def test_finisher_counts_upgrade_progress(db):
+    import json as _json
+
+    from fra_bot.services.buildings import PENDING_COMPLETION_KEY
+
+    svc = _svc(db, dry_run=False)          # set_tax_percent=0: tax skipped
+
+    class _ProgressingUpgrader:
+        def __init__(self):
+            self.calls = 0
+
+        async def upgrade_one(self, building_id, *, kind, name=None,
+                              max_actions=50):
+            from fra_bot.services.building_upgrade import UpgradeReport
+            self.calls += 1
+            report = UpgradeReport(mode="LIVE")
+            if self.calls == 1:            # new extension became available
+                report.actions = 1
+                report.extensions_bought = 1
+            return report
+
+    svc._upgrader = _ProgressingUpgrader()
+    await svc._register_completion(777, "prison", None, tax_done=True)
+    lines = await svc.finish_pending()
+    assert any("+1 extensions" in line for line in lines)
+    data = _json.loads(await svc.state.get(PENDING_COMPLETION_KEY))
+    assert data["777"]["idle"] == 0
+    await svc.finish_pending()             # no progress this time
+    data = _json.loads(await svc.state.get(PENDING_COMPLETION_KEY))
+    assert data["777"]["idle"] == 1
+
+
+async def test_finisher_noop_in_dry_run_and_when_empty(db):
+    svc = _svc(db, dry_run=True)
+    assert await svc.finish_pending() == []
+    live = _svc(db, dry_run=False)
+    assert await live.finish_pending() == []

@@ -289,6 +289,12 @@ class FRABot(commands.Bot):
             initial_delay_seconds=300.0,
         )
         sched.add_interval_job(
+            self._guarded(self.buildings.finish_pending, "building-finisher"),
+            minutes=30,
+            name="building-finisher",
+            initial_delay_seconds=420.0,
+        )
+        sched.add_interval_job(
             self._guarded(self.treasury_sync.backfill_step, "expenses-backfill"),
             minutes=sync.expenses_backfill_interval,
             name="expenses-backfill",
