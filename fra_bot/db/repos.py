@@ -1275,6 +1275,19 @@ class MissionsRepo:
         ) as cur:
             return await cur.fetchone()
 
+    async def open_recurring_unpromoted(self, *, limit: int = 25) -> list[aiosqlite.Row]:
+        """Open recurring requests not yet in the rotation — promoted at
+        intake so the schedule reflects them immediately, instead of only
+        after their first start."""
+        async with self._db.conn.execute(
+            "SELECT * FROM scheduled_missions "
+            "WHERE recurring = 1 AND rotation_id IS NULL "
+            "AND status IN ('pending', 'waiting', 'processing') "
+            "ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
     async def open_for_kind(self, kind: str, *, limit: int = 15) -> list[aiosqlite.Row]:
         """Open (queued) requests of one kind, oldest first — the board's
         'what is on the schedule' post."""

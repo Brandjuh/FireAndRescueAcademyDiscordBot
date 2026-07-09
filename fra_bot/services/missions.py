@@ -347,12 +347,13 @@ class MissionScheduler:
             lines.append("- none yet")
         lines.append("")
         lines.append("[b]Waiting in the queue[/b]")
-        queued = await self.missions.open_for_kind(default_kind)
+        queued = [
+        row for row in await self.missions.open_for_kind(default_kind)
+            if not row["rotation_id"]      # recurring ones show under rotation
+        ]
         if queued:
             for row in queued:
-                where = row["address"] or row["location_text"] or "?"
-                who = row["requester_name"] or "admin"
-                lines.append(f"- {where} — requested by {who}")
+                lines.append(f"- {row['address'] or row['location_text'] or '?'}")
         else:
             lines.append("- empty — post a location to add one")
         lines.append("")
@@ -531,10 +532,26 @@ class MissionScheduler:
         Member requests are served first (priority A). Only when no member
         request is claimable does the rotation get to fill the free slot.
         """
+        await self._promote_pending_recurring()
         handled = await self._process_queue()
         if handled:
             return handled
         return await self._process_rotation()
+
+    async def _promote_pending_recurring(self) -> None:
+        """Recurring requests join the rotation AT INTAKE (not only after
+        their first start): with a busy queue they would otherwise sit
+        invisible for hours while the member asked for a recurring spot.
+        The queue item stays for the prompt first start; rotation_id links
+        the two so nothing promotes twice."""
+        for mission in await self.missions.open_recurring_unpromoted():
+            try:
+                await self._maybe_promote(
+                    mission, mission["latitude"], mission["longitude"],
+                    mission["address"] or "",
+                )
+            except Exception:  # noqa: BLE001 - never block the queue on this
+                log.exception("mission %s: rotation promotion failed", mission["id"])
 
     async def _process_queue(self) -> int:
         for mission in await self.missions.claimable():
@@ -712,6 +729,11 @@ class MissionScheduler:
             return
         # started
         await self.missions.set_status(mid, "done", outcome.detail)
+        if mission["rotation_id"]:
+            await self.rotation.mark_started(
+                mission["rotation_id"], latitude=lat, longitude=lng,
+                address=address or None,
+            )
         await self._notify_board(mission,
             f"Event request processed for {requester}.\n\n"
             f"[b]Started[/b]: {kind_label} at "
