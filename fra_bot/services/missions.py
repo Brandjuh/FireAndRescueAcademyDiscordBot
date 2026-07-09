@@ -83,6 +83,24 @@ _TERMINAL_STATUSES = frozenset({"done", "failed", "skipped"})
 # waits for the cooldown don't count).
 MAX_ATTEMPTS = 12
 
+# Member-facing names for the two request boards.
+_KIND_LABELS = {
+    "large": "Large Scale Alliance Mission",
+    "event": "Alliance Event",
+}
+
+
+def _event_error_reply(requester: str | None, reason: str) -> str:
+    """The reference bot's 'could not be processed' event reply, verbatim
+    structure."""
+    return (
+        f"Event request could not be processed for {requester or 'member'}.\n\n"
+        f"[b]Reason[/b]: {reason}\n\n"
+        "[b]Post one clear location, for example[/b]\n"
+        "Kansas City, Kansas\n"
+        "Amsterdam, Netherlands"
+    )
+
 
 @dataclass
 class StartOutcome:
@@ -347,9 +365,7 @@ class MissionScheduler:
                 log.info("mission: post %s needs clarification (%s)", post.post_id, exc)
                 await self._reply_to(
                     thread_id,
-                    f"@{post.author_name or 'there'}: I couldn't use that request — "
-                    f"{exc}. Post a location (e.g. \"New York City\"); see the pinned "
-                    "how-to for the options.",
+                    _event_error_reply(post.author_name, str(exc)),
                 )
                 continue
             except Exception:
@@ -381,8 +397,10 @@ class MissionScheduler:
                 created += 1
                 await self._reply_to(
                     thread_id,
-                    f"@{post.author_name or 'there'}: got it — {spec.describe()} at "
-                    f"{spec.location_text}. It'll start at the next free alliance slot.",
+                    f"Event request received for {post.author_name or 'member'}.\n\n"
+                    f"[b]Location[/b]: {spec.location_text}\n"
+                    f"[b]Type[/b]: {spec.describe()}\n\n"
+                    "It will start at the next free alliance mission slot.",
                 )
 
         # Advance the cursor only after the whole page is handled; a crash
@@ -491,11 +509,11 @@ class MissionScheduler:
                         mission["id"], "skipped",
                         f"contribution {rate:g}% below {self._auto.min_contribution_rate:g}%",
                     )
-                    await self._notify_board(mission,
-                        f"@{requester}: mission not accepted — your alliance "
-                        f"contribution ({rate:g}%) is below "
-                        f"{self._auto.min_contribution_rate:g}%."
-                    )
+                    await self._notify_board(mission, _event_error_reply(
+                        requester,
+                        f"Latest alliance donation is {rate:.1f}%, below the "
+                        f"required {self._auto.min_contribution_rate:.1f}%.",
+                    ))
                     return
             try:
                 resolved = await self._resolve(mission["location_text"] or "")
@@ -513,11 +531,11 @@ class MissionScheduler:
                     await self.missions.set_status(
                         mission["id"], "failed", f"geocoding failed: {exc}",
                     )
-                    await self._notify_board(mission,
-                        f"@{requester}: I couldn't find that location "
-                        f"({exc}). Please try a different link, or post the "
-                        "place name / address as plain text."
-                    )
+                    await self._notify_board(mission, _event_error_reply(
+                        requester,
+                        "Location could not be resolved to GPS coordinates. "
+                        f"({exc})",
+                    ))
                 return
             lat, lng, address = resolved.latitude, resolved.longitude, resolved.address or ""
             await self.missions.set_status(
@@ -547,6 +565,7 @@ class MissionScheduler:
         lat: float, lng: float, address: str, *, announce: bool,
     ) -> None:
         mid = mission["id"]
+        kind_label = _KIND_LABELS.get(mission["kind"], mission["kind"])
         if outcome.state == "waiting":
             await self.missions.set_status(
                 mid, "waiting", outcome.detail,
@@ -554,9 +573,11 @@ class MissionScheduler:
             )
             if announce:
                 await self._notify_board(mission,
-                    f"@{requester}: your {mission['kind']} at "
-                    f"{address or 'the location'} is queued — next free alliance "
-                    f"mission at {outcome.eligible_at} UTC."
+                    f"Event request received for {requester}.\n\n"
+                    f"[b]Location[/b]: {address or 'the location'}\n"
+                    f"[b]Type[/b]: {kind_label}\n\n"
+                    "Queued — the next free alliance mission slot opens at "
+                    f"{outcome.eligible_at} UTC."
                 )
             return
         if outcome.state == "form_error":
@@ -574,33 +595,59 @@ class MissionScheduler:
             return
         if outcome.state == "not_found":
             await self.missions.set_status(mid, "failed", outcome.detail)
-            await self._notify_board(mission,
-                f"@{requester}: {outcome.detail}. An admin will handle it."
-            )
+            await self._notify_board(mission, _event_error_reply(
+                requester, f"{outcome.detail}. Admins have been notified."
+            ))
             return
         if outcome.state == "dry_run":
             await self.missions.set_status(mid, "skipped", outcome.detail)
             await self._notify_board(mission,
-                f"@{requester}: {mission['kind']} resolved to "
-                f"{address or 'the location'} ({lat:.5f}, {lng:.5f}). "
-                f"[dry-run — not started]"
+                f"Event request processed for {requester}.\n\n"
+                f"[b]Resolved[/b]: {address or 'the location'} "
+                f"({lat:.5f}, {lng:.5f})\n"
+                f"[b]Type[/b]: {kind_label}\n\n"
+                "[dry-run — not started]"
             )
             await self._maybe_promote(mission, lat, lng, address)
             return
         if outcome.state == "unverified":
             await self.missions.set_status(mid, "failed", outcome.detail)
-            await self._notify_board(mission,
-                f"@{requester}: I submitted the mission but couldn't confirm it "
-                "started. An admin will check."
-            )
+            await self._notify_board(mission, _event_error_reply(
+                requester,
+                "The start was submitted but could not be confirmed. "
+                "Admins have been notified.",
+            ))
             return
         # started
         await self.missions.set_status(mid, "done", outcome.detail)
         await self._notify_board(mission,
-            f"🚨 {mission['kind'].capitalize()} started for {requester} at "
-            f"{address or 'the requested location'}!"
+            f"Event request processed for {requester}.\n\n"
+            f"[b]Started[/b]: {kind_label} at "
+            f"{address or 'the requested location'}"
         )
+        if mission["source"] == "board" and not self.dry_run:
+            await self._notify_ingame_started(
+                requester, kind_label, address or "the requested location"
+            )
         await self._maybe_promote(mission, lat, lng, address)
+
+    async def _notify_ingame_started(
+        self, requester: str | None, kind_label: str, address: str
+    ) -> None:
+        """The personal success notification for board requesters — an
+        in-game MissionChief PM, like the reference bot sends."""
+        from ..mc.messages import send_ingame_message
+
+        if not requester or requester == "member":
+            return
+        try:
+            await send_ingame_message(
+                self.client, requester, "Event request",
+                f"Your event request has been started: {kind_label} at "
+                f"{address}. Have fun!",
+            )
+        except Exception:  # noqa: BLE001 - a PM must never fail the start
+            log.exception("mission: in-game PM to %s failed", requester)
 
     async def _maybe_promote(
         self, mission: aiosqlite.Row, lat: float, lng: float, address: str

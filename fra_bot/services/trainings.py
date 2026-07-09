@@ -79,6 +79,97 @@ def _ambiguous_course_names() -> set[str]:
     return {name for name, count in seen.items() if count > 1}
 
 
+# The reference bot's "how to join" instructions, appended to every success
+# notification (board reply and in-game PM).
+COURSE_JOIN_INSTRUCTIONS = (
+    "How to add people to the course\n"
+    "Browser/Desktop: open the academy link, open the active training "
+    "course, then add the required personnel.\n"
+    "Phone: open the same academy link in your mobile browser, open the "
+    "active course, then add personnel from the course page."
+)
+
+
+def _friendly_failure(discipline: str, reason: str) -> str:
+    """The reference bot's member-facing rewrite of internal failure text."""
+    lowered = (reason or "").lower()
+    if "no free classroom" in lowered or "classrooms busy" in lowered or (
+        "no available" in lowered and "academy" in lowered
+    ):
+        return (
+            f"No free {discipline} classrooms are available right now. "
+            "The current classes are likely full. Please try again later."
+        )
+    return reason
+
+
+def _board_reply(
+    requester: str | None,
+    opened: list[dict],
+    could_not: list[str],
+    ambiguous_reasons: list[str],
+    *,
+    pending: list[str],
+) -> str:
+    """Assemble the board reply in the reference bot's format."""
+    who = requester or "member"
+    real = [o for o in opened if not o["dry_run"]]
+    dry = [o for o in opened if o["dry_run"]]
+
+    # Nothing recognized / nothing possible: the error format.
+    if not opened and not pending and (could_not or ambiguous_reasons):
+        reasons = [line[2:] if line.startswith("- ") else line for line in could_not]
+        reasons.extend(ambiguous_reasons)
+        return (
+            f"Training request could not be processed for {who}.\n\n"
+            "Reason: " + "\n".join(reasons)
+        )
+
+    parts: list[str] = [f"Training request processed for {who}."]
+    if real:
+        parts.append("")
+        parts.append("Opened:")
+        for entry in real:
+            parts.append(
+                f"- {entry['name']}: opened 1 class(es) in academy "
+                f"{entry['building_id']}"
+            )
+        parts.append("")
+        parts.append("Where to find and join the class:")
+        for entry in real:
+            parts.append(
+                f"- Academy {entry['building_id']}: "
+                f"https://www.missionchief.com/buildings/{entry['building_id']}"
+            )
+        parts.append(
+            "- Browser/Desktop: open the academy link, open the active "
+            "training course, then add the required personnel."
+        )
+        parts.append(
+            "- Phone: open the same academy link in your mobile browser, "
+            "open the active course, then add personnel from the course page."
+        )
+    if dry:
+        parts.append("")
+        parts.append("Would open (dry-run — nothing was started):")
+        for entry in dry:
+            parts.append(f"- {entry['name']}: academy {entry['building_id']}")
+    if pending:
+        parts.append("")
+        parts.append("Still working on (no free classroom yet, will retry):")
+        for name in pending:
+            parts.append(f"- {name}")
+    if could_not or ambiguous_reasons:
+        parts.append("")
+        parts.append("Could not open automatically:")
+        parts.extend(could_not)
+        for reason in ambiguous_reasons:
+            parts.append(f"- {reason}")
+    if len(parts) == 1:
+        return ""
+    return "\n".join(parts)
+
+
 class TrainingsService(BoardRequestService):
     kind = "training"
     guide_marker = GUIDE_MARKER
@@ -329,48 +420,45 @@ class TrainingsService(BoardRequestService):
     ) -> None:
         request_id = request["id"]
         requester = request["requester_name"]
-        lines: list[str] = []
         results: list[dict] = []
+        opened: list[dict] = []       # {name, building_id, dry_run}
+        could_not: list[str] = []     # "- {name}: {friendly reason}" lines
+        pending: list[dict] = []      # transient failures worth retrying
         opened_any = False
-        pending: list[dict] = []  # transient failures worth retrying
 
-        for ambiguity in ambiguous:
-            lines.append(self._ambiguity_help(ambiguity))
+        ambiguous_reasons = [self._ambiguity_help(a) for a in ambiguous]
 
         for match in matches:
             outcome = await self._open_training(match)
-            results.append({"training": match.name, "outcome": outcome["status"]})
+            results.append({
+                "training": match.name,
+                "outcome": outcome["status"],
+                "building_id": outcome.get("building_id"),
+            })
             if outcome["status"] == "opened":
                 opened_any = True
-                if outcome.get("dry_run"):
-                    # Honest feedback: nothing was actually started.
-                    lines.append(
-                        f"🧪 {match.name}: [dry-run] I would open a class in "
-                        f"academy {outcome['building_id']} — no class was "
-                        "actually started."
-                    )
-                else:
-                    lines.append(
-                        f"✅ {match.name}: class opened in academy "
-                        f"{outcome['building_id']} — "
-                        f"https://www.missionchief.com/buildings/{outcome['building_id']} "
-                        f"(free, join within 1 hour)"
-                    )
+                opened.append({
+                    "name": match.name,
+                    "building_id": outcome["building_id"],
+                    "dry_run": bool(outcome.get("dry_run")),
+                })
                 await self._maybe_schedule_reminder(request_id, payload, match)
             elif outcome["status"] == "uncertain":
                 opened_any = True
-                lines.append(
-                    f"⚠️ {match.name}: submitted to academy "
-                    f"{outcome['building_id']} but I couldn't confirm it opened — "
-                    "please double-check."
+                could_not.append(
+                    f"- {match.name}: submitted to academy "
+                    f"{outcome['building_id']} but the opening could not be "
+                    "confirmed — please double-check."
                 )
             elif outcome["status"] == "busy":
                 pending.append(
                     {"discipline": match.discipline, "name": match.name}
                 )
-                lines.append(f"⏳ {match.name}: {outcome['reason']} (will retry)")
             else:  # failed
-                lines.append(f"❌ {match.name}: {outcome['reason']}")
+                could_not.append(
+                    f"- {match.name}: "
+                    f"{_friendly_failure(match.discipline, outcome['reason'])}"
+                )
 
         next_attempt_at: str | None = None
         bump = False
@@ -409,11 +497,23 @@ class TrainingsService(BoardRequestService):
             announce=announce or status in ("done", "failed"),
         )
 
-        if lines and (announce or opened_any):
-            await self.reply_for(
-                request,
-                f"Training request from {requester}:\n" + "\n".join(lines)
+        # Board feedback in the reference bot's format. Interim (busy)
+        # states stay quiet after the first notice; terminal states and
+        # successes always report.
+        if announce or opened_any or could_not:
+            reply = _board_reply(
+                requester, opened, could_not, ambiguous_reasons,
+                pending=[p["name"] for p in pending] if pending and announce else [],
             )
+            if reply:
+                await self.reply_for(request, reply)
+
+        # A board requester gets the reference bot's success notification as
+        # an in-game PM (board posts carry no Discord identity). Only real
+        # opens — never dry-run — and only for board-sourced requests.
+        real_opened = [o for o in opened if not o["dry_run"]]
+        if real_opened and not self.is_discord_request(request) and not self.dry_run:
+            await self._notify_ingame(requester, real_opened)
 
     async def _maybe_schedule_reminder(
         self, request_id: int, payload: dict, match: TrainingMatch
@@ -440,12 +540,42 @@ class TrainingsService(BoardRequestService):
     # ------------------------------------------------------------------
 
     def _ambiguity_help(self, ambiguity: AmbiguousMatch) -> str:
-        options = ", ".join(sorted(ambiguity.disciplines))
-        return (
-            f"⚠️ \"{ambiguity.name}\" exists in multiple academy types "
-            f"({options}). Please repost with a prefix, e.g. "
-            f"\"Fire - {ambiguity.name}\" or \"Water Rescue - {ambiguity.name}\"."
+        # The reference bot's ambiguity description, verbatim structure.
+        options = ", ".join(
+            f"{_AGENCY_PREFIX.get(d, d)} - {ambiguity.name}"
+            for d in sorted(ambiguity.disciplines)
         )
+        return (
+            f"{ambiguity.name} exists in multiple academy types. "
+            f"Use one of: {options}."
+        )
+
+    async def _notify_ingame(self, requester: str | None, opened: list[dict]) -> None:
+        """The reference bot's success notification for board requesters:
+        an in-game MissionChief PM (board posts carry no Discord identity)."""
+        from ..mc.messages import send_ingame_message
+
+        if not requester:
+            return
+        lines: list[str] = []
+        for entry in opened:
+            lines.append(
+                "Your training has been started automatically: "
+                f"{entry['name']} (1 class, free)."
+            )
+            if entry.get("building_id"):
+                lines.append(
+                    "Academy: https://www.missionchief.com/buildings/"
+                    f"{entry['building_id']}"
+                )
+        lines.append("")
+        lines.append(COURSE_JOIN_INSTRUCTIONS)
+        try:
+            await send_ingame_message(
+                self.client, requester, "Training request", "\n".join(lines)
+            )
+        except Exception:  # noqa: BLE001 - a PM must never fail the request
+            log.exception("training: in-game PM to %s failed", requester)
 
     async def _open_training(self, match: TrainingMatch) -> dict:
         """Try to open one class.

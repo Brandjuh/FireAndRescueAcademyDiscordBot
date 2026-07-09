@@ -60,6 +60,8 @@ class DiscordChannels:
     member_events: int
     alliance_logs: int
     reports: int
+    # Approve/deny embeds for requests that need a staff decision.
+    admin_approvals: int = 0
 
 
 @dataclass(frozen=True)
@@ -282,6 +284,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 member_events=int(channels.get("member_events", 0)),
                 alliance_logs=int(channels.get("alliance_logs", 0)),
                 reports=int(channels.get("reports", 0)),
+                admin_approvals=int(channels.get("admin_approvals", 0)),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])

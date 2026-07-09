@@ -890,6 +890,26 @@ class AutomationRepo:
         )
         return n == 1
 
+    async def requeue(self, request_id: int, *, payload: str | None = None) -> bool:
+        """Admin-approved retry: back to 'pending' with a clean attempt
+        budget. Only terminal requests can be re-queued (an open one is
+        already being worked on)."""
+        sets = (
+            "status = 'pending', status_detail = 're-queued by admin', "
+            "attempts = 0, next_attempt_at = NULL, updated_at = ?"
+        )
+        params: list = [utcnow_iso()]
+        if payload is not None:
+            sets += ", payload = ?"
+            params.append(payload)
+        params.append(request_id)
+        n = await self._db.execute(
+            f"UPDATE automation_requests SET {sets} "
+            "WHERE id = ? AND status IN ('failed', 'skipped')",
+            tuple(params),
+        )
+        return n == 1
+
     async def sweep_processing(self, *, requeue: bool = False) -> int:
         """A request left 'processing' was interrupted mid-action by a
         crash/restart. Re-running could repeat a non-idempotent
