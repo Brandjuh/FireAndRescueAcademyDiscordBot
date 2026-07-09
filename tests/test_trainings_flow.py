@@ -165,6 +165,36 @@ async def test_execute_dry_run_reaches_done_without_posting(db):
     assert client.posts == []  # dry-run performed NO education POST
 
 
+async def test_dry_run_board_reply_says_would_open(db):
+    """Dry-run feedback still posts to the board, but must be honest: it
+    says what WOULD happen instead of claiming a class was opened."""
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    replies: list[str] = []
+
+    class _Recorder:
+        async def post_reply(self, thread_id, content):
+            replies.append(content)
+            return True
+
+    svc.board = _Recorder()
+    rid = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=8,
+        requester_name="Alice", requester_mc_id=42,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat", "duration": 3}],
+            "ambiguous": [],
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+
+    assert replies, "dry-run must still post board feedback"
+    text = "\n".join(replies)
+    assert "[dry-run]" in text and "would open" in text
+    assert "class opened" not in text
+
+
 async def test_busy_retry_is_bounded_with_backoff(db):
     """A request that can't proceed (no academy of that discipline) must
     retry with a bumped attempt count and a future next_attempt_at — so

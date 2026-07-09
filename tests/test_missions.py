@@ -743,6 +743,40 @@ async def test_board_scan_clarifies_bad_field(db):
     assert any("couldn't use" in c for _, c in board.replies)
 
 
+async def test_board_replies_post_in_dry_run_too(db):
+    """Feedback replies are informational posts on our own request topics —
+    dry-run gates game actions, not member feedback."""
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    await _prime_board(sched, 15307)
+    board = FakeBoard([_post(101, "New York City")])
+    sched.board = board
+    assert await sched._scan_board(15307, "large") == 1
+    assert any("got it" in c for _, c in board.replies)
+
+
+async def test_geocode_permanent_failure_notifies_board(db):
+    from fra_bot.geo.geocoder import GeocodeError
+
+    class DeadGeo(FakeGeo):
+        async def search(self, query):
+            raise GeocodeError("Nominatim found nothing for 'Atlantis'")
+
+    sched = MissionScheduler(_cfg(dry_run=True), FakeClient(), db, DeadGeo())
+    board = FakeBoard([])
+    sched.board = board
+    mid = await _enqueue(
+        sched, source="board", board_thread_id=15307, board_post_id=101,
+        requester_name="Alice", location_text="Atlantis",
+    )
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "failed"
+    assert any(
+        "couldn't find that location" in c and "Alice" in c
+        for _, c in board.replies
+    )
+
+
 async def test_board_scan_skips_own_and_baseline(db):
     sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
     await sched.state.set("mission_board_guide_id:15307", "1")

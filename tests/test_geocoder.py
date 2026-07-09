@@ -106,6 +106,37 @@ async def test_search_no_results_raises(geo):
         await geo.search("nowhere at all")
 
 
+async def test_search_retries_with_simplified_punctuation(geo):
+    # OSM names often lack the dots/apostrophes people (and Google) use:
+    # "St. Olav's University Hospital" exists as "St Olavs hospital".
+    queries = []
+
+    async def fake_nominatim(path, params):
+        queries.append(params["q"])
+        if "." in params["q"] or "'" in params["q"]:
+            return []  # exact form unknown to OSM
+        return [{"lat": "63.42", "lon": "10.39", "display_name": "St Olavs hospital",
+                 "type": "hospital"}]
+
+    geo._nominatim = fake_nominatim
+    result = await geo.search("St. Olav's University Hospital")
+    assert queries == [
+        "St. Olav's University Hospital",
+        "St Olavs University Hospital",
+    ]
+    assert abs(result.latitude - 63.42) < 1e-6
+    assert result.place_type == "hospital"
+
+
+async def test_search_simplified_retry_still_raises_when_empty(geo):
+    async def fake_nominatim(path, params):
+        return []
+
+    geo._nominatim = fake_nominatim
+    with pytest.raises(GeocodeError, match="found nothing"):
+        await geo.search("St. Nowhere's Clinic")
+
+
 def test_default_geocoder_uses_nominatim_without_key(db):
     g = Geocoder(StateRepo(db))
     url = g._geocode_url("/search", {"q": "NYC"})

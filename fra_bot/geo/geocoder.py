@@ -35,6 +35,15 @@ _USER_AGENT = "FireAndRescueAcademyBot/1.0 (alliance admin tooling; contact via 
 _MIN_INTERVAL = 1.1  # Nominatim policy: max 1 req/s
 
 
+def _simplify_query(query: str) -> str:
+    """Strip punctuation that commonly differs between colloquial names and
+    OSM's ("St. Olav's University Hospital" → "St Olavs University Hospital")."""
+    simplified = query.replace("+", " ")
+    for char in ".'’`\"":
+        simplified = simplified.replace(char, "")
+    return " ".join(simplified.split())
+
+
 class GeocodeError(RuntimeError):
     """A geocoding lookup failed. ``transient`` marks errors worth retrying
     (network blips, rate limits, 5xx); auth (401/403) and 'not found' are
@@ -157,6 +166,15 @@ class Geocoder:
         data = await self._nominatim(
             "/search", {"q": query, "format": "jsonv2", "limit": "1"}
         )
+        if not data:
+            # Names copied out of URLs or typed by members often carry
+            # punctuation OSM doesn't use ("St. Olav's" vs "St Olavs") —
+            # one retry with the punctuation stripped rescues those.
+            cleaned = _simplify_query(query)
+            if cleaned and cleaned != query:
+                data = await self._nominatim(
+                    "/search", {"q": cleaned, "format": "jsonv2", "limit": "1"}
+                )
         if not data:
             raise GeocodeError(f"Nominatim found nothing for {query!r}")
         result = GeocodeResult(
