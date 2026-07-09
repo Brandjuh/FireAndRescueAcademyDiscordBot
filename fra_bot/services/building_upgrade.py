@@ -14,9 +14,12 @@ Real endpoints (from the reference bot):
 * extensions: ``POST /buildings/<id>/extension/credits/<extId>`` (CSRF token),
 * hospital level: ``GET /buildings/<id>/expand_do/credits?level=<max-1>``.
 
-Safety: spends alliance credits, so it is gated on the live funds floor
-(``min_alliance_funds``) before every purchase and previews (no writes)
-unless the caller explicitly executes. Bounded by an action cap per run.
+Safety: spends alliance credits, so the on-command sweep is gated on the
+live funds floor (``min_alliance_funds``) before every purchase and
+previews (no writes) unless the caller explicitly executes. Bounded by an
+action cap per run. Post-creation (``upgrade_one``) deliberately IGNORES
+the floor: a freshly approved building is finished in one go — the floor
+gates new build requests, not their completion.
 """
 
 from __future__ import annotations
@@ -51,6 +54,9 @@ PRISON_LARGE_PRICE = 200_000
 
 DEFAULT_MAX_HOSPITAL_LEVEL = 20
 DEFAULT_MAX_ACTIONS = 25          # bounded chunk per invocation; re-run for more
+# A fresh build must be finished in ONE go (explicit policy): enough budget
+# for every level plus every non-large extension.
+POST_CREATION_MAX_ACTIONS = 50
 _PER_BUILDING_GUARD = 60          # hard stop against a stuck re-fetch loop
 
 
@@ -180,11 +186,18 @@ class BuildingUpgradeService:
         *,
         kind: str,
         name: str | None = None,
-        max_actions: int = DEFAULT_MAX_ACTIONS,
+        max_actions: int = POST_CREATION_MAX_ACTIONS,
+        enforce_floor: bool = False,
     ) -> UpgradeReport:
         """Post-creation automation for ONE building: raise the level to the
-        maximum and buy every extension except the large one. Runs as BULK
-        traffic so board work keeps priority on the shared pacer."""
+        maximum and buy every extension except the large one, in one go.
+
+        Explicit policy: a fresh build is FINISHED even when that dips the
+        treasury below the configured floor — the floor gates new build
+        REQUESTS (they wait for funds), not the completion of a building
+        that was already approved. The game itself refuses when the funds
+        truly run out, which the per-step verification reports. Runs as
+        BULK traffic so board work keeps priority on the shared pacer."""
         from types import SimpleNamespace
 
         from ..core.pacing import bulk_traffic
@@ -195,13 +208,18 @@ class BuildingUpgradeService:
         )
         with bulk_traffic():
             try:
-                await self._upgrade_live(target, report, max_actions)
+                await self._upgrade_live(
+                    target, report, max_actions, enforce_floor=enforce_floor
+                )
             except MissionChiefError as exc:
                 report.errors += 1
                 report.lines.append(f"❌ {target.name}: {exc}")
         return report
 
-    async def _upgrade_live(self, b, report: UpgradeReport, max_actions: int) -> None:
+    async def _upgrade_live(
+        self, b, report: UpgradeReport, max_actions: int, *,
+        enforce_floor: bool = True,
+    ) -> None:
         attempted: set[int] = set()
         level_blocked = False
         level_before: int | None = None
@@ -235,7 +253,7 @@ class BuildingUpgradeService:
             if b.kind == "hospital" and not level_blocked:
                 level = parse_current_level(html)
                 if level is not None and level < self._max_level:
-                    if not await self._funds_ok(report):
+                    if enforce_floor and not await self._funds_ok(report):
                         report.funds_blocked = True
                         report.lines.append(f"⏳ {b.name}: funds below floor — stopped")
                         return
@@ -253,7 +271,7 @@ class BuildingUpgradeService:
             if not offers:
                 return  # nothing eligible left on this building
             nxt = offers[0]
-            if not await self._funds_ok(report, price=nxt.price):
+            if enforce_floor and not await self._funds_ok(report, price=nxt.price):
                 report.funds_blocked = True
                 report.lines.append(f"⏳ {b.name}: funds below floor — stopped")
                 return

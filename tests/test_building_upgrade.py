@@ -296,3 +296,15 @@ async def test_upgrade_one_stops_leveling_after_refused_raise(db):
     report = await svc.upgrade_one(10, kind="hospital")
     assert len(client.gets) == 1                # exactly one attempt
     assert report.levels_raised == 0 and report.errors == 1
+
+
+async def test_upgrade_one_ignores_the_funds_floor(db):
+    """Explicit policy: a fresh build is completed even below the floor —
+    the floor gates new REQUESTS, not the completion of an approved one."""
+    client = FakeClient(funds="<div>Alliance Funds: 100,000 Credits</div>")
+    svc = _svc(db, client, dry_run=False, min_funds=2_000_000)
+    report = await svc.upgrade_one(10, kind="hospital", name="Fresh Hospital")
+    assert not report.funds_blocked
+    assert report.levels_raised == 1            # 5 -> 20 jump page fixture
+    assert report.extensions_bought == 1        # ward bought despite low funds
+    assert not any("credits/9" in p for p in client.posts)  # large still skipped
