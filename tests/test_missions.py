@@ -993,18 +993,71 @@ async def test_waiting_event_does_not_starve_free_large(db):
     assert (await sched.missions.get(large_id))["status"] == "skipped"  # dry-run start
 
 
-async def test_recheck_loop_is_bounded(db):
-    """A queue of only-waiting items stops after a few form re-checks per
-    poll instead of walking the whole queue."""
-    from fra_bot.services.missions import _MAX_RECHECKS_PER_POLL
+async def test_closed_cooldown_checks_one_form_per_kind(db):
+    """The cooldown is per kind and alliance-wide: once one queued item
+    hears 'window closed', the rest of that kind is skipped this poll —
+    not re-fetched one by one."""
     client = FakeClient(_WAITING, _EVENT_WAITING)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    for i in range(8):
+        await _enqueue(sched, location_text=f"Spot {i}")
+    await sched._advance()
+    form_fetches = [p for p in client.fetched if "tlat" in p]
+    assert len(form_fetches) == 1                       # one answer serves all
+
+
+async def test_transient_rechecks_are_bounded(db):
+    """Transient failures (form unreadable) don't share a cooldown, so each
+    item retries individually — but bounded, so one poll can't walk the
+    whole queue."""
+    from fra_bot.services.missions import _MAX_RECHECKS_PER_POLL
+    client = FakeClient("<html><body>maintenance</body></html>")
     sched = _scheduler(_cfg(dry_run=True), client, db)
     for i in range(_MAX_RECHECKS_PER_POLL + 3):
         await _enqueue(sched, location_text=f"Spot {i}")
     await sched._advance()
-    # Only the bounded number of forms was fetched this poll.
     form_fetches = [p for p in client.fetched if "tlat" in p]
     assert len(form_fetches) == _MAX_RECHECKS_PER_POLL
+
+
+async def test_queued_events_dont_starve_large_in_same_poll(db):
+    """The exact live situation: five pending recurring events ahead of a
+    large request (lower ids). One poll checks the event window ONCE, skips
+    the other events, and still starts the free large mission."""
+    client = FakeClient(_ELIGIBLE, _EVENT_WAITING)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    event_ids = [
+        await _enqueue(sched, kind="event", event_type_id=1, recurring=1,
+                       location_text=f"Event {i}")
+        for i in range(5)
+    ]
+    large_id = await _enqueue(sched, location_text="New York City")
+    await sched._advance()                              # ONE poll
+    assert (await sched.missions.get(event_ids[0]))["status"] == "waiting"
+    for eid in event_ids[1:]:                           # skipped, not walked
+        assert (await sched.missions.get(eid))["status"] == "pending"
+    assert (await sched.missions.get(large_id))["status"] == "skipped"  # dry-run start
+    event_fetches = [p for p in client.fetched if "Event" in p]
+    assert len(event_fetches) == 1
+
+
+async def test_preexisting_far_wait_is_reverified(db):
+    """Rows parked far out by older code (which trusted the computed
+    eligible_at outright) are pulled back within the re-verify horizon."""
+    import datetime as dt
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(_WAITING), db)
+    mid = await _enqueue(sched)
+    await sched.missions.claim(mid)
+    await sched.missions.set_status(
+        mid, "waiting", "next free mission at 2026-07-11T20:07:18+00:00; queued",
+        next_attempt_at="2026-07-11T20:07:18+00:00", announce=False,
+    )
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "waiting"
+    parked = dt.datetime.fromisoformat(row["next_attempt_at"])
+    horizon = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=31)
+    assert parked <= horizon
 
 
 async def test_waiting_next_attempt_capped_at_30_minutes(db):

@@ -1275,6 +1275,16 @@ class MissionsRepo:
         ) as cur:
             return await cur.fetchone()
 
+    async def reverify_waiting(self, cap_iso: str) -> int:
+        """Pull every waiting row's next retry within the cap, so parked
+        requests are re-verified against the live form at least that often
+        — including rows parked far out by older code or a skewed clock."""
+        return await self._db.execute(
+            "UPDATE scheduled_missions SET next_attempt_at = ?, updated_at = ? "
+            "WHERE status = 'waiting' AND next_attempt_at > ?",
+            (cap_iso, utcnow_iso(), cap_iso),
+        )
+
     async def open_recurring_unpromoted(self, *, limit: int = 25) -> list[aiosqlite.Row]:
         """Open recurring requests not yet in the rotation — promoted at
         intake so the schedule reflects them immediately, instead of only

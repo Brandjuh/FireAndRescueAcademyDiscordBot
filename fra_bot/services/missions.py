@@ -564,6 +564,12 @@ class MissionScheduler:
         request is claimable does the rotation get to fill the free slot.
         """
         await self._promote_pending_recurring()
+        # Self-healing: rows parked beyond the re-verify horizon (older code
+        # trusted the computed eligible_at outright) are pulled back in.
+        reverified = await self.missions.reverify_waiting(_capped_wait(None))
+        if reverified:
+            log.info("missions: %d parked wait(s) pulled within %d min for "
+                     "re-verification", reverified, MAX_WAIT_MINUTES)
         handled = await self._process_queue()
         if handled:
             return handled
@@ -586,6 +592,7 @@ class MissionScheduler:
 
     async def _process_queue(self) -> int:
         rechecks = 0
+        blocked_kinds: set[str] = set()
         for mission in await self.missions.claimable():
             if mission["attempts"] >= MAX_ATTEMPTS:
                 if await self.missions.claim(mission["id"]):
@@ -595,11 +602,18 @@ class MissionScheduler:
                     )
                     await self._schedule_cleanup(mission["id"])
                 continue
+            # The cooldown is per KIND and alliance-wide: once one event
+            # answered "window closed", checking the other queued events is
+            # pointless this poll — skip straight to the large items (and
+            # vice versa), so neither kind can starve the other.
+            if mission["kind"] in blocked_kinds:
+                continue
             if not await self.missions.claim(mission["id"]):
                 continue  # another poll won the claim
             first_attempt = mission["status"] == "pending"
+            state: str | None = None
             try:
-                await self._execute(mission, announce=first_attempt)
+                state = await self._execute(mission, announce=first_attempt)
             except MissionChiefError as exc:
                 await self.missions.set_status(
                     mission["id"], "waiting",
@@ -617,10 +631,14 @@ class MissionScheduler:
             # A recheck that ended in 'waiting' started NOTHING — it must
             # not consume this poll's one start: a queue full of waiting
             # events would otherwise starve a large mission whose separate
-            # cooldown is free right now. Bounded so one poll can't walk
-            # the whole queue's forms.
+            # cooldown is free right now. Cooldown answers block the whole
+            # kind (shared window); transient retries (geocode/HTTP/form)
+            # are bounded so one poll can't walk the whole queue.
             current = await self.missions.get(mission["id"])
             if current is not None and current["status"] == "waiting":
+                if state == "waiting":  # the kind's shared cooldown is closed
+                    blocked_kinds.add(mission["kind"])
+                    continue
                 rechecks += 1
                 if rechecks >= _MAX_RECHECKS_PER_POLL:
                     return 0
@@ -647,7 +665,10 @@ class MissionScheduler:
             due_at=deletion_due_at(), reason="handled mission request",
         )
 
-    async def _execute(self, mission: aiosqlite.Row, *, announce: bool) -> None:
+    async def _execute(self, mission: aiosqlite.Row, *, announce: bool) -> str | None:
+        """Run one queued mission attempt. Returns the start engine's
+        outcome state ('waiting' = the kind's shared cooldown is closed),
+        or None when the attempt never reached the mission form."""
         requester = mission["requester_name"] or "member"
 
         lat, lng = mission["latitude"], mission["longitude"]
@@ -666,7 +687,7 @@ class MissionScheduler:
                         f"Latest alliance donation is {rate:.1f}%, below the "
                         f"required {self._auto.min_contribution_rate:.1f}%.",
                     ))
-                    return
+                    return None
             try:
                 resolved = await self._resolve(mission["location_text"] or "")
             except GeocodeError as exc:
@@ -688,7 +709,7 @@ class MissionScheduler:
                         "Location could not be resolved to GPS coordinates. "
                         f"({exc})",
                     ))
-                return
+                return None
             lat, lng, address = resolved.latitude, resolved.longitude, resolved.address or ""
             await self.missions.set_status(
                 mission["id"], "processing", "geocoded",
@@ -711,6 +732,7 @@ class MissionScheduler:
         await self._apply_queue_outcome(
             mission, outcome, requester, lat, lng, address, announce=announce
         )
+        return outcome.state
 
     async def _apply_queue_outcome(
         self, mission: aiosqlite.Row, outcome: StartOutcome, requester: str,
