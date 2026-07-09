@@ -31,21 +31,56 @@ _FUNDS_PATTERNS = [
     re.compile(r"([\d.,\s]+)\s+Credits", re.IGNORECASE),
 ]
 _FUNDS_MARKERS = ("alliance funds", "alliance fund", "alliance treasury")
+# The summary panel on the live page: <div id="alliance-finances-summary">
+# <h4>Alliance Funds</h4> … <h1>23,955,983 Credits</h1>.
+_FUNDS_PANEL_ID = "alliance-finances-summary"
+_ANCHORED_FUNDS_RE = re.compile(
+    r"alliance\s+(?:funds|fund|treasury)\s*:?\s*(\d[\d.,\s]*)\s*Credits",
+    re.IGNORECASE,
+)
 
 
 def parse_total_funds(html: str) -> int | None:
-    """Total alliance funds from the kasse page header."""
+    """Total alliance funds from the kasse page.
+
+    Ordered from most to least precise. The nav on the same page contains
+    "Deactivate alliance fund" with no figure near it, so anything loose
+    must never stop at the first marker hit — that exact mistake made the
+    old single-pass scan miss the real summary panel further down.
+
+    1. The summary panel by DOM id.
+    2. An anchored text match (marker immediately followed by the figure).
+    3. The windowed marker scan, over EVERY occurrence of each marker.
+    """
+    panel = BeautifulSoup(html, "lxml").find(id=_FUNDS_PANEL_ID)
+    if panel is not None:
+        match = re.search(
+            r"(\d[\d.,\s]*)\s*Credits", panel.get_text(" ", strip=True), re.IGNORECASE
+        )
+        if match:
+            value = parse_int(match.group(1))
+            if value is not None:
+                return value
+
     text = html_lib.unescape(re.sub(r"<[^>]+>", " ", html))
     text = re.sub(r"\s+", " ", text)
+
+    anchored = _ANCHORED_FUNDS_RE.search(text)
+    if anchored:
+        value = parse_int(anchored.group(1))
+        if value is not None:
+            return value
+
     lowered = text.casefold()
     for marker in _FUNDS_MARKERS:
-        pos = lowered.find(marker)
-        if pos >= 0:
-            window = text[max(0, pos - 200) : pos + 600]
+        for hit in re.finditer(re.escape(marker), lowered):
+            window = text[max(0, hit.start() - 200) : hit.start() + 600]
             for pattern in _FUNDS_PATTERNS:
                 match = pattern.search(window)
                 if match:
-                    return parse_int(match.group(1))
+                    value = parse_int(match.group(1))
+                    if value is not None:
+                        return value
     return None
 
 

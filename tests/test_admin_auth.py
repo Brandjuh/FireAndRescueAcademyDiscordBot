@@ -51,3 +51,64 @@ def test_cog_check_delegates_to_predicate():
     from fra_bot.cogs.admin import AdminCog
 
     assert AdminCog.cog_check.__doc__  # documented gate exists
+
+
+async def test_diag_reports_rendered_funds_fallback(monkeypatch):
+    """When the plain kasse HTML lacks the funds figure (JS-drawn, as on
+    the real page), `!fra diag` must exercise the rendered fallback and
+    report the figure it finds — proving the build flow can read funds."""
+    from types import SimpleNamespace
+
+    from fra_bot.cogs.admin import AdminCog
+
+    kasse = (
+        "<div>Deactivate alliance fund</div>"
+        "<table><tr><td>Name</td><td>Credits</td></tr></table>"
+    )
+    gebauede = (
+        "<table><tr search_attribute='Fire Academy'>"
+        "<td><img building_id='42' src='/img/fire.png' alt='Fire'/></td>"
+        "<td><a href='/buildings/42' class='btn btn-success'>"
+        "Start a new training course</a></td></tr></table>"
+    )
+    academy = (
+        "<form action='/buildings/42/education' method='post'>"
+        "<input type='hidden' name='authenticity_token' value='tok'/>"
+        "<select name='building_rooms_use'><option value='1'>1</option></select>"
+        "<select name='alliance[cost]'><option value='0'>Free</option></select>"
+        "<select name='education_select'><option value='12'>HazMat</option></select>"
+        "</form>"
+    )
+
+    class _MC:
+        session = SimpleNamespace(cookie_jar=[])
+
+        async def fetch_page(self, path, *, referer=None):
+            return {
+                "/verband/kasse": kasse,
+                "/verband/gebauede": gebauede,
+            }.get(path, academy)
+
+    async def fake_render(base, cookies, path, **kwargs):
+        return "<div>Alliance Funds</div><div>4,935,224 Credits</div>"
+
+    monkeypatch.setattr(
+        "fra_bot.mc.browser_builder.BrowserBuilder.available",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr("fra_bot.mc.browser_builder.render_page", fake_render)
+
+    cog = AdminCog.__new__(AdminCog)
+    cog.bot = SimpleNamespace(
+        cfg=SimpleNamespace(
+            automation=SimpleNamespace(dry_run=False),
+            missionchief=SimpleNamespace(base_url="https://www.missionchief.com"),
+        ),
+        mc=_MC(),
+    )
+    lines = await cog._run_diagnostics()
+    text = "\n".join(lines)
+    assert "NOT FOUND in plain HTML" in text
+    assert "alliance funds (rendered): 4,935,224" in text
+    assert "fire: 1 (1 startable)" in text
+    assert "academy 42" in text and "free class=yes" in text

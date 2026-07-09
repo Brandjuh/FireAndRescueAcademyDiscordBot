@@ -326,3 +326,47 @@ def test_infer_expense_event_ats_handles_unparseable():
     out = infer_expense_event_ats(["not a date", "08 Jul 12:00"], current_year=2026)
     assert out[0] is None
     assert out[1].startswith("2026-07-08")
+
+
+def test_parse_total_funds_real_kasse_layout():
+    """Regression: the LIVE kasse page. The nav contains 'Deactivate
+    alliance fund' (no figure near it) and the income table sits before
+    the summary panel — the old single-pass marker scan stopped at the
+    first hit and returned None. The panel id is authoritative."""
+    filler = "".join(
+        f"<tr><td><a href='/profile/{i}'>Member {i}</a></td>"
+        f"<td>{100000 - i}</td></tr>" for i in range(40)
+    )
+    page = f"""
+    <script>var section = "Alliance funds overview";</script>
+    <nav><a href="#">Applicants</a> <a href="#">Event</a>
+    <a href="/verband/kasse/deactivate">Deactivate alliance fund</a>
+    <a href="#">Income</a> <a href="#">Log</a></nav>
+    <div class="col-lg-6">
+      <table><thead><tr><th>Name</th><th>Credits</th></tr></thead>
+      <tbody>{filler}</tbody></table>
+    </div>
+    <div class="col-lg-6">
+      <div class="panel panel-default" id="alliance-finances-summary">
+        <div class="panel-heading"><h4>Alliance Funds</h4></div>
+        <div class="panel-body">
+          <div>
+            <h1>23,955,983 Credits</h1>
+            <a class="btn btn-success" href="/convert_event_credits">
+              Convert your event credits</a>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    assert parse_total_funds(page) == 23955983
+
+
+def test_parse_total_funds_anchored_without_panel_id():
+    # Older/other layouts: no summary panel id, but the figure directly
+    # follows the heading. An early no-figure mention must not eat it.
+    page = (
+        "<div>Alliance funds settings</div>" + "x" * 800 +
+        "<h2>Alliance Funds</h2><h1>4,935,224 Credits</h1>"
+    )
+    assert parse_total_funds(page) == 4935224
