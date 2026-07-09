@@ -64,6 +64,8 @@ class DiscordChannels:
     admin_approvals: int = 0
     # The member-management panel (dossier button).
     member_panel: int = 0
+    # Role pings for alliance mission/event starts (the event pinger).
+    event_pings: int = 1421242306136113254
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,9 @@ class DiscordConfig:
     verified_role_id: int = 0
     # Roles allowed to use the staff console (besides admins).
     staff_role_ids: tuple[int, ...] = ()
+    # Always pinged on a mission/event start (the reference bot's
+    # Notify-Event role); a region role is added when resolvable.
+    notify_event_role_id: int = 669496241591418890
 
 
 @dataclass(frozen=True)
@@ -292,6 +297,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 reports=int(channels.get("reports", 0)),
                 admin_approvals=int(channels.get("admin_approvals", 0)),
                 member_panel=int(channels.get("member_panel", 0)),
+                event_pings=int(
+                    channels.get("event_pings", 1421242306136113254)
+                ),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])
@@ -299,6 +307,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             verified_role_id=int(_get(raw, "discord", "verified_role_id", default=0)),
             staff_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "staff_role_ids", default=[]) or [])
+            ),
+            notify_event_role_id=int(
+                _get(raw, "discord", "notify_event_role_id", default=669496241591418890)
             ),
         ),
         automation=AutomationConfig(

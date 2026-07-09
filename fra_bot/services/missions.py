@@ -35,6 +35,7 @@ from ..config import Config
 from ..db.database import Database, utcnow_iso
 from ..db.repos import (
     BoardDeletionRepo,
+    EventPingsRepo,
     MembersRepo,
     MissionsRepo,
     RotationRepo,
@@ -103,6 +104,19 @@ _KIND_LABELS = {
 SCHEDULE_MARKER = "[FRA] 📅 Scheduled locations"
 
 
+def _transient_backoff(attempts: int) -> str:
+    """Retry time for transient failures (unreadable form, HTTP error,
+    geocode hiccup): grows with the attempt count, capped at the re-verify
+    horizon. Without this the row is due again the very next poll — an
+    hour of game maintenance would burn through MAX_ATTEMPTS and retire a
+    request that was merely waiting out its cooldown."""
+    minutes = min(5 * (attempts + 1), MAX_WAIT_MINUTES)
+    return (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(minutes=minutes)
+    ).isoformat(timespec="seconds")
+
+
 def _capped_wait(eligible_at: str | None) -> str:
     """Never park a cooldown wait further out than MAX_WAIT_MINUTES: the
     availability is re-verified against the live form on the next due poll,
@@ -165,6 +179,7 @@ class MissionScheduler:
         self.geocoder = geocoder
         self.missions = MissionsRepo(db)
         self.rotation = RotationRepo(db)
+        self.event_pings = EventPingsRepo(db)
         self.members = MembersRepo(db)
         self.runs = RunsRepo(db)
         self.state = StateRepo(db)
@@ -571,8 +586,12 @@ class MissionScheduler:
             log.info("missions: %d parked wait(s) pulled within %d min for "
                      "re-verification", reverified, MAX_WAIT_MINUTES)
         handled = await self._process_queue()
-        if handled:
+        if handled > 0:
             return handled
+        if handled < 0:
+            # Recheck budget spent with member requests still unexamined —
+            # the rotation must not jump the queue for the free window.
+            return 0
         return await self._process_rotation()
 
     async def _promote_pending_recurring(self) -> None:
@@ -618,6 +637,7 @@ class MissionScheduler:
                 await self.missions.set_status(
                     mission["id"], "waiting",
                     f"MissionChief error ({exc}); will retry",
+                    next_attempt_at=_transient_backoff(mission["attempts"]),
                     bump_attempts=True, announce=False,
                 )
             except Exception:
@@ -641,7 +661,10 @@ class MissionScheduler:
                     continue
                 rechecks += 1
                 if rechecks >= _MAX_RECHECKS_PER_POLL:
-                    return 0
+                    # Budget spent with items possibly unexamined: -1 tells
+                    # _advance the rotation may NOT take the free window —
+                    # member requests keep priority.
+                    return -1
                 continue
             return 1
         return 0
@@ -698,6 +721,7 @@ class MissionScheduler:
                     await self.missions.set_status(
                         mission["id"], "waiting",
                         f"geocoding failed ({exc}); will retry",
+                        next_attempt_at=_transient_backoff(mission["attempts"]),
                         bump_attempts=True, announce=False,
                     )
                 else:
@@ -741,9 +765,13 @@ class MissionScheduler:
         mid = mission["id"]
         kind_label = _KIND_LABELS.get(mission["kind"], mission["kind"])
         if outcome.state == "waiting":
+            # A healthy cooldown answer also clears the attempt counter:
+            # attempts measure consecutive FAILURES, and this recheck just
+            # succeeded — the request is merely waiting out the window.
             await self.missions.set_status(
                 mid, "waiting", outcome.detail,
                 next_attempt_at=_capped_wait(outcome.eligible_at),
+                reset_attempts=True,
                 announce=announce,
             )
             if announce:
@@ -755,14 +783,11 @@ class MissionScheduler:
                     f"{outcome.eligible_at} UTC."
                 )
             return
-        if outcome.state == "form_error":
+        if outcome.state in ("form_error", "http_error"):
             await self.missions.set_status(
-                mid, "waiting", outcome.detail, bump_attempts=True, announce=False,
-            )
-            return
-        if outcome.state == "http_error":
-            await self.missions.set_status(
-                mid, "waiting", outcome.detail, bump_attempts=True, announce=False,
+                mid, "waiting", outcome.detail,
+                next_attempt_at=_transient_backoff(mission["attempts"]),
+                bump_attempts=True, announce=False,
             )
             return
         if outcome.state == "refused":
@@ -795,6 +820,7 @@ class MissionScheduler:
             return
         # started
         await self.missions.set_status(mid, "done", outcome.detail)
+        await self._queue_event_ping(mission, lat, lng, address)
         if mission["rotation_id"]:
             await self.rotation.mark_started(
                 mission["rotation_id"], latitude=lat, longitude=lng,
@@ -857,9 +883,28 @@ class MissionScheduler:
     # -- rotation --------------------------------------------------------
 
     async def _process_rotation(self) -> int:
-        entry = await self.rotation.next_entry()
-        if entry is None:
-            return 0
+        """Try the rotation heads per KIND, least-recently started first.
+
+        The large and event cooldowns are separate: an event entry at the
+        head of the cycle whose 7-day window is closed must not hide a
+        large entry whose 24h window is free (the same cross-kind
+        starvation the queue guards against with blocked_kinds). One poll
+        still starts at most one entry."""
+        heads = []
+        for kind in _KIND_LABELS:
+            entry = await self.rotation.next_entry(kind=kind)
+            if entry is not None:
+                heads.append(entry)
+        # Preserve the global least-recently-started fairness across kinds.
+        heads.sort(key=lambda e: (e["last_started_at"] is not None,
+                                  e["last_started_at"] or "", e["id"]))
+        for entry in heads:
+            handled = await self._run_rotation_entry(entry)
+            if handled:
+                return 1
+        return 0
+
+    async def _run_rotation_entry(self, entry: aiosqlite.Row) -> int:
         lat, lng = entry["latitude"], entry["longitude"]
         address = entry["address"] or ""
         if lat is None or lng is None:
@@ -902,6 +947,8 @@ class MissionScheduler:
             )
             return 0
         # started / dry_run / unverified all consume the entry's turn.
+        if outcome.state == "started":
+            await self._queue_event_ping(entry, lat, lng, address)
         await self.rotation.mark_started(
             entry["id"], latitude=lat, longitude=lng, address=address
         )
@@ -1146,6 +1193,38 @@ class MissionScheduler:
         if preset_type_id is not None:
             return f"preset {PRESET_TYPE_IDS.get(preset_type_id, preset_type_id)}"
         return "large scale mission"
+
+    @staticmethod
+    def _ping_name(row: aiosqlite.Row) -> str:
+        """Mission/event type name shown in the role-ping embed."""
+        if row["kind"] == "event":
+            if row["event_random"] or row["event_type_id"] is None:
+                return "Surprise event"
+            return EVENT_TYPES.get(row["event_type_id"], "Alliance event")
+        if row["caption"]:
+            return str(row["caption"])
+        if row["saved_name"]:
+            return str(row["saved_name"])
+        if row["preset_type_id"] is not None:
+            return str(PRESET_TYPE_IDS.get(row["preset_type_id"], "Large scale mission"))
+        return "Large scale mission"
+
+    async def _queue_event_ping(
+        self, row: aiosqlite.Row, lat: float | None, lng: float | None,
+        address: str | None,
+    ) -> None:
+        """Record a REAL start in the ping outbox (the EventPinger cog
+        delivers it). Never blocks or fails the start path."""
+        try:
+            await self.event_pings.add(
+                kind=row["kind"],
+                name=self._ping_name(row),
+                address=address or row["location_text"] or None,
+                latitude=lat,
+                longitude=lng,
+            )
+        except Exception:  # noqa: BLE001 — the start itself succeeded
+            log.exception("could not enqueue event ping")
 
     async def _resolve(self, location_text: str):
         if not location_text:
