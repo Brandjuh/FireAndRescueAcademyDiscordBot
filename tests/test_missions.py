@@ -974,3 +974,68 @@ async def test_recurring_promoted_at_intake_while_queued(db):
     # A second poll never promotes twice.
     await sched._advance()
     assert len(await sched.rotation.list_all()) == 1
+
+
+# -- one poll must not be starved by waiting items ---------------------------
+
+async def test_waiting_event_does_not_starve_free_large(db):
+    """The large and event cooldowns are SEPARATE. A queued event whose
+    7-day window is still closed must not consume the poll's one start:
+    a free large mission behind it starts in the same poll. (This was the
+    bug: every poll re-checked one waiting event, returned 'handled', and
+    the startable large mission never got a turn.)"""
+    client = FakeClient(_ELIGIBLE, _EVENT_WAITING)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    event_id = await _enqueue(sched, kind="event", event_type_id=1)
+    large_id = await _enqueue(sched)                    # kind=large, eligible
+    await sched._advance()                              # ONE poll
+    assert (await sched.missions.get(event_id))["status"] == "waiting"
+    assert (await sched.missions.get(large_id))["status"] == "skipped"  # dry-run start
+
+
+async def test_recheck_loop_is_bounded(db):
+    """A queue of only-waiting items stops after a few form re-checks per
+    poll instead of walking the whole queue."""
+    from fra_bot.services.missions import _MAX_RECHECKS_PER_POLL
+    client = FakeClient(_WAITING, _EVENT_WAITING)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    for i in range(_MAX_RECHECKS_PER_POLL + 3):
+        await _enqueue(sched, location_text=f"Spot {i}")
+    await sched._advance()
+    # Only the bounded number of forms was fetched this poll.
+    form_fetches = [p for p in client.fetched if "tlat" in p]
+    assert len(form_fetches) == _MAX_RECHECKS_PER_POLL
+
+
+async def test_waiting_next_attempt_capped_at_30_minutes(db):
+    """The form's 'Last free mission' timestamp is trusted only up to 30
+    minutes: a far-future eligible_at (tz skew, stale page) may not park
+    the request beyond the cap — it re-verifies against the live form."""
+    import datetime as dt
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(_WAITING), db)
+    mid = await _enqueue(sched)                         # form frees in 2100
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "waiting"
+    parked = dt.datetime.fromisoformat(row["next_attempt_at"])
+    horizon = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=31)
+    assert parked <= horizon
+
+
+async def test_rotation_skips_entry_with_open_queue_request(db):
+    """A recurring request is promoted at intake, but until its QUEUED
+    first start happens the rotation must not also start that location —
+    one request would otherwise run twice."""
+    client = FakeClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    mid = await _enqueue(sched, recurring=1, location_text="Sacramento, CA")
+    await sched._promote_pending_recurring()
+    row = await sched.missions.get(mid)
+    assert row["rotation_id"] is not None
+    # Queue item still open -> rotation has nothing to run.
+    assert await sched.rotation.next_entry() is None
+    # Once the queued start completes, the entry rotates normally again.
+    await sched._advance()
+    assert (await sched.missions.get(mid))["status"] == "done"
+    entry = await sched.rotation.next_entry()
+    assert entry is not None and entry["id"] == row["rotation_id"]
