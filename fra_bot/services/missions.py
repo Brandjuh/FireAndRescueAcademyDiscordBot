@@ -117,6 +117,37 @@ def _transient_backoff(attempts: int) -> str:
     ).isoformat(timespec="seconds")
 
 
+# MissionChief silently refuses a start while another alliance mission/event
+# is still running (the POST is accepted but no mission appears). The bot
+# knows what it started, so after any confirmed start — or any such refusal —
+# all free starts back off this long instead of hammering doomed attempts.
+START_BACKOFF_MINUTES = 60
+# A queued request that keeps being refused eventually needs a human.
+REFUSED_GIVE_UP_HOURS = 48
+# State key for the alliance-busy backoff window.
+STATE_START_BACKOFF = "alliance_start_backoff_until"
+
+
+def start_backoff_iso(minutes: int = START_BACKOFF_MINUTES) -> str:
+    return (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(minutes=minutes)
+    ).isoformat(timespec="seconds")
+
+
+def older_than_hours(created_iso: str | None, hours: int) -> bool:
+    if not created_iso:
+        return False
+    try:
+        created = datetime.datetime.fromisoformat(created_iso)
+    except ValueError:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now - created > datetime.timedelta(hours=hours)
+
+
 def _capped_wait(eligible_at: str | None) -> str:
     """Never park a cooldown wait further out than MAX_WAIT_MINUTES: the
     availability is re-verified against the live form on the next due poll,
@@ -811,12 +842,36 @@ class MissionScheduler:
             await self._maybe_promote(mission, lat, lng, address)
             return
         if outcome.state == "unverified":
-            await self.missions.set_status(mid, "failed", outcome.detail)
-            await self._notify_board(mission, _event_error_reply(
-                requester,
-                "The start was submitted but could not be confirmed. "
-                "Admins have been notified.",
-            ))
+            # MissionChief took the POST but no mission appeared — almost
+            # always because another alliance mission/event is still running.
+            # That's a wait, not a failure; only a request stuck this way
+            # for days gets surfaced to a human.
+            if older_than_hours(mission["created_at"], REFUSED_GIVE_UP_HOURS):
+                await self.missions.set_status(
+                    mid, "failed",
+                    f"{outcome.detail}; kept being refused for over "
+                    f"{REFUSED_GIVE_UP_HOURS}h — giving up",
+                )
+                await self._notify_board(mission, _event_error_reply(
+                    requester,
+                    "MissionChief kept refusing the start. "
+                    "Admins have been notified.",
+                ))
+                return
+            retry_at = await self.start_backoff_until() or start_backoff_iso()
+            await self.missions.set_status(
+                mid, "waiting", f"{outcome.detail}; retrying after {retry_at}",
+                next_attempt_at=_capped_wait(retry_at),
+                reset_attempts=True, announce=announce,
+            )
+            if announce:
+                await self._notify_board(mission,
+                    f"Event request received for {requester}.\n\n"
+                    f"[b]Location[/b]: {address or 'the location'}\n"
+                    f"[b]Type[/b]: {kind_label}\n\n"
+                    "Queued — the alliance is busy with another mission/event; "
+                    "it will start as soon as a slot is free."
+                )
             return
         # started
         await self.missions.set_status(mid, "done", outcome.detail)
@@ -934,9 +989,11 @@ class MissionScheduler:
                 **_event_args(entry),
             )
 
-        if outcome.state in ("waiting", "form_error", "http_error"):
-            # Free window not available / transient — retry next poll WITHOUT
-            # advancing the cycle, so this entry keeps its turn.
+        if outcome.state in ("waiting", "form_error", "http_error", "unverified"):
+            # Free window not available / transient / refused by the game
+            # (another alliance mission still running — the start backoff is
+            # armed) — retry later WITHOUT advancing the cycle, so this entry
+            # keeps its turn.
             return 0
         if outcome.state == "not_found":
             await self.rotation.deactivate_with_note(entry["id"], outcome.detail)
@@ -946,7 +1003,7 @@ class MissionScheduler:
                 entry["id"], "paused — form would spend coins"
             )
             return 0
-        # started / dry_run / unverified all consume the entry's turn.
+        # started / dry_run both consume the entry's turn.
         if outcome.state == "started":
             await self._queue_event_ping(entry, lat, lng, address)
         await self.rotation.mark_started(
@@ -988,6 +1045,21 @@ class MissionScheduler:
         command previews unless the owner confirms), else the global switch
         applies."""
         effective_dry = self.dry_run if dry is None else dry
+
+        # The bot knows what it started: while a mission/event it recently
+        # started (or a refused attempt) says the alliance slot is busy,
+        # don't even submit — MissionChief would refuse the start and that
+        # used to surface as a spurious "Mission failed". Coins bypass this.
+        if not allow_coins:
+            backoff = await self.start_backoff_until()
+            if backoff:
+                return StartOutcome(
+                    "waiting",
+                    "the alliance is busy with a mission/event the bot already "
+                    f"started; next attempt after {backoff}",
+                    eligible_at=backoff,
+                )
+
         new_path = EVENT_KINDS[kind]["new_path"]
         try:
             html = await self.client.fetch_page(f"{new_path}?tlat={latitude}&tlng={longitude}")
@@ -1057,6 +1129,7 @@ class MissionScheduler:
             return StartOutcome("http_error", f"start request failed ({exc}); will retry")
 
         if status >= 400:
+            await self.set_start_backoff()
             return StartOutcome(
                 "unverified", f"MissionChief rejected the start (HTTP {status})",
                 http_status=status,
@@ -1066,6 +1139,7 @@ class MissionScheduler:
         # cooldown-advance check can't confirm it — report success on the
         # accepted POST and leave verification to the owner in-game.
         if allow_coins:
+            await self.set_start_backoff()
             return StartOutcome(
                 "started",
                 f"paid {kind} started at {latitude:.5f},{longitude:.5f} "
@@ -1073,10 +1147,12 @@ class MissionScheduler:
             )
 
         verified = await self._verify_started(new_path, latitude, longitude, free_before)
+        await self.set_start_backoff()
         if verified is False:
             return StartOutcome(
                 "unverified",
-                "start submitted but MissionChief shows no new mission — verify manually",
+                "MissionChief accepted the request but no new mission appeared "
+                "— another alliance mission/event is likely still running",
             )
         note = "" if verified else " (could not verify)"
         return StartOutcome(
@@ -1109,6 +1185,20 @@ class MissionScheduler:
                 area=spec.area, shape=spec.shape, call_volume=spec.call_volume,
                 allow_coins=True,
                 dry=not confirm,  # preview unless the owner confirmed
+            )
+        if outcome.state == "started":
+            # A paid start is a real mission too — members get the same ping.
+            await self._queue_event_ping(
+                {
+                    "kind": spec.kind,
+                    "event_random": spec.event_random,
+                    "event_type_id": spec.event_type_id,
+                    "caption": spec.custom.caption if spec.custom else None,
+                    "saved_name": spec.saved_name,
+                    "preset_type_id": spec.preset_type_id,
+                    "location_text": spec.location_text,
+                },
+                lat, lng, address,
             )
         outcome.detail = f"{outcome.detail} — {address}"
         return outcome
@@ -1208,6 +1298,16 @@ class MissionScheduler:
         if row["preset_type_id"] is not None:
             return str(PRESET_TYPE_IDS.get(row["preset_type_id"], "Large scale mission"))
         return "Large scale mission"
+
+    async def start_backoff_until(self) -> str | None:
+        """The active alliance-busy window (ISO), or None once it expired."""
+        raw = await self.state.get(STATE_START_BACKOFF)
+        if raw and raw > utcnow_iso():
+            return raw
+        return None
+
+    async def set_start_backoff(self, minutes: int = START_BACKOFF_MINUTES) -> None:
+        await self.state.set(STATE_START_BACKOFF, start_backoff_iso(minutes))
 
     async def _queue_event_ping(
         self, row: aiosqlite.Row, lat: float | None, lng: float | None,

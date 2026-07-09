@@ -57,8 +57,13 @@ discord:
     reports: 0            # daily / monthly income reports
     admin_approvals: 0    # approve/deny embeds for requests needing a decision
     member_panel: 0       # member-management panel (dossier button)
+    # Eventpinger: role pings for every alliance mission/event the bot
+    # actually starts (Notify-Event role + resolved region role).
+    event_pings: 1421242306136113254
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
+  # Role that is always pinged by the eventpinger (Notify-Event).
+  notify_event_role_id: 669496241591418890
 
 automation:
   # SAFETY FIRST: with dry_run on, the bot detects and reports board

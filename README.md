@@ -225,7 +225,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra cancelmission <id>` | Cancel a not-yet-started scheduled mission |
 | `!fra deletemission <id\|all>` | Delete a mission row (any status); `all` clears finished ones |
 | `!fra coinmission <location> [\| …] [\| confirm]` | Owner-only: start using **coins** (ignores the free cooldown). Previews unless `\| confirm` |
-| `!fra nextmission` | Show which mission/event is up next and where (for the eventpinger) |
+| `!fra nextmission` | Show which mission/event is up next and where (also shown in eventpinger pings) |
 | `!fra rotation` / `list` | Show the auto-start rotation list and which entry is next |
 | `!fra rotation add <location> [\| kind: event] [\| preset: Pile-up] [\| custom: need_lf=25 …] [\| saved: <name>] [\| name: <caption>]` | Add a location to the rotation |
 | `!fra rotation remove\|on\|off <id>` | Remove, pause or resume a rotation entry |
@@ -278,8 +278,8 @@ The **rotation list** is an admin-managed set of locations the bot starts
 automatically and keeps cycling forever — one per free slot, oldest-started
 first. **Member requests come first**; the rotation only fills a free slot
 when nothing is queued. `!fra nextmission` reports which mission/event is up
-next and where (so the eventpinger can be driven off it). Recurring member
-requests are promoted into the rotation once they first start.
+next and where. Recurring member requests are promoted into the rotation
+once they first start.
 
 Everything queues in `scheduled_missions` and starts **one at a time at the
 next free slot** (cooldown-aware), with a hard free-only guard — the bot
@@ -289,6 +289,28 @@ each request is recorded as *skipped* with what would have been started.
 Outcomes are announced back in Discord (never on MissionChief while in
 dry-run). The `missions` report (`!fra report missions`) summarises requests
 and outcomes.
+
+MissionChief silently refuses a start while another alliance mission/event
+is still running (the POST is accepted but no mission appears). The bot
+treats that as *waiting*, not a failure: the request stays queued, all free
+starts back off for an hour (the bot knows what it started, so it doesn't
+hammer doomed attempts), and only a request that keeps being refused for
+48 hours is surfaced as failed. Owner coin starts bypass the backoff.
+
+### Built-in eventpinger
+
+Because the bot starts every alliance mission/event itself, it doesn't need
+to watch a channel for MissionChief announcements. Each **confirmed** start
+is recorded in an outbox and posted as a role ping in
+`discord.channels.event_pings`: always the Notify-Event role
+(`discord.notify_event_role_id`), plus the region role when the mission's
+coordinates resolve to one — roles named like `Michigan (MI)` /
+`Bermuda (BM)` / `Germany (DE)`, using the old eventpinger cog's logic
+(reverse geocode first, then US state names, ZIP ranges, place aliases and
+Bermuda postal codes as text fallbacks). The embed shows what started,
+where, the region, and the next queued/rotation location with its expected
+start time. Dry-run starts never ping; stale pings (>24h) are dropped.
+Both settings can be changed live with `!fra set`.
 
 ### Updating from Discord
 

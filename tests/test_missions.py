@@ -1207,3 +1207,93 @@ async def test_rotation_skips_entry_with_open_queue_request(db):
     assert (await sched.missions.get(mid))["status"] == "done"
     entry = await sched.rotation.next_entry()
     assert entry is not None and entry["id"] == row["rotation_id"]
+
+
+# -- game-refused starts: wait + shared backoff, never a spurious failure ----
+
+class RefusingClient(FakeClient):
+    """POST accepted (HTTP 200) but the free cooldown never advances — the
+    game refused the start (another alliance mission/event still running)."""
+
+    async def fetch_page(self, path, *, referer=None):
+        self.fetched.append(path)
+        return self.event_html if "Event" in path else self.large_html
+
+
+async def test_game_refusal_waits_instead_of_failing(db):
+    client = RefusingClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    mid = await _enqueue(sched)
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "waiting"                      # NOT failed
+    assert "still running" in row["status_detail"]
+    assert row["next_attempt_at"] is not None
+    assert await sched.start_backoff_until() is not None   # backoff armed
+
+
+async def test_backoff_blocks_further_post_attempts(db):
+    client = RefusingClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    await _enqueue(sched)
+    await sched._advance()                                 # refused → backoff
+    assert client.post_calls == 1
+    m2 = await _enqueue(sched)
+    await sched._advance()                                 # backoff: no POST
+    assert client.post_calls == 1
+    row = await sched.missions.get(m2)
+    assert row["status"] == "waiting"
+    assert "busy" in row["status_detail"]
+
+
+async def test_confirmed_start_arms_backoff_for_next_kind(db):
+    # The bot knows what it started: right after a confirmed large start,
+    # an event request must wait instead of being submitted (and refused).
+    client = FakeClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    await _enqueue(sched)                                  # large
+    eid = await _enqueue(sched, kind="event")
+    await sched._advance()                                 # large starts
+    assert client.post_calls == 1
+    await sched._advance()                                 # event: backoff
+    assert client.post_calls == 1                          # nothing submitted
+    row = await sched.missions.get(eid)
+    assert row["status"] == "waiting"
+    assert "busy" in row["status_detail"]
+
+
+async def test_game_refusal_gives_up_after_deadline(db):
+    client = RefusingClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    mid = await _enqueue(sched)
+    await db.execute(
+        "UPDATE scheduled_missions SET created_at = ? WHERE id = ?",
+        ("2000-01-01T00:00:00+00:00", mid),
+    )
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "failed"
+    assert "giving up" in row["status_detail"]
+
+
+async def test_rotation_refusal_keeps_turn(db):
+    client = RefusingClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    rid = await sched.rotation.add(location_text="NYC", created_by="admin")
+    handled = await sched._advance()
+    assert handled == 0
+    row = await sched.rotation.get(rid)
+    assert row["last_started_at"] is None                  # turn not consumed
+    assert row["active"] == 1                              # not deactivated
+
+
+async def test_coin_start_bypasses_backoff_and_pings(db):
+    from fra_bot.db.repos import EventPingsRepo
+
+    client = FakeClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    await sched.set_start_backoff()                        # alliance "busy"
+    spec = MissionSpec(location_text="NYC", kind="large", source="preset").validate()
+    outcome = await sched.run_coin_mission(spec, confirm=True)
+    assert outcome.state == "started"                      # coins ignore it
+    assert len(await EventPingsRepo(db).unposted()) == 1
