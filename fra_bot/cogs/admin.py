@@ -1105,6 +1105,32 @@ class AdminCog(commands.Cog):
                     f"alliance funds: NOT FOUND in plain HTML ({len(kasse):,} chars)"
                 )
                 lines.append(f"  around first 'Credits': {around}")
+                # The figure is drawn by JavaScript on this page — test the
+                # rendered fallback the build flow uses, so the diag proves
+                # end-to-end whether funds can be read at all.
+                if BrowserBuilder.available():
+                    from ..mc.browser_builder import cookies_for, render_page
+
+                    try:
+                        base = cfg.missionchief.base_url
+                        rendered = await render_page(
+                            base,
+                            cookies_for(base, self.bot.mc.session.cookie_jar),
+                            "/verband/kasse",
+                        )
+                        rendered_funds = parse_total_funds(rendered)
+                        if rendered_funds is not None:
+                            lines.append(
+                                f"alliance funds (rendered): {rendered_funds:,} "
+                                "— the build flow will use this fallback"
+                            )
+                        else:
+                            lines.append(
+                                "alliance funds (rendered): STILL NOT FOUND "
+                                f"({len(rendered):,} chars) — layout change?"
+                            )
+                    except Exception as exc:  # noqa: BLE001 - diagnostic only
+                        lines.append(f"alliance funds (rendered): FAILED — {exc}")
 
         # Academy list: what the trainings flow can actually see.
         try:
@@ -1117,7 +1143,7 @@ class AdminCog(commands.Cog):
             listings = parse_alliance_buildings_page(listing_html)
             per: dict[str, list[int]] = {}
             for a in listings:
-                stats = per.setdefault(a.discipline or "?", [0, 0])
+                stats = per.setdefault(a.discipline or "other buildings", [0, 0])
                 stats[0] += 1
                 if a.has_start_button:
                     stats[1] += 1
