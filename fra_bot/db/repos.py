@@ -1385,10 +1385,19 @@ class RotationRepo:
 
     async def next_entry(self) -> aiosqlite.Row | None:
         """The active entry due to run next: least-recently started first,
-        never-started (NULL last_started_at) ahead of all, ties by id."""
+        never-started (NULL last_started_at) ahead of all, ties by id.
+
+        Entries whose ORIGINATING queue request is still open are skipped:
+        recurring requests are promoted at intake, so until that first
+        queued start happens the rotation must not also start the same
+        location — one request would otherwise run twice."""
         async with self._db.conn.execute(
-            "SELECT * FROM mission_rotation WHERE active = 1 "
-            "ORDER BY (last_started_at IS NOT NULL), last_started_at, id LIMIT 1"
+            "SELECT * FROM mission_rotation r WHERE r.active = 1 "
+            "AND NOT EXISTS (SELECT 1 FROM scheduled_missions m "
+            "  WHERE m.rotation_id = r.id "
+            "  AND m.status IN ('pending', 'waiting', 'processing')) "
+            "ORDER BY (r.last_started_at IS NOT NULL), r.last_started_at, r.id "
+            "LIMIT 1"
         ) as cur:
             return await cur.fetchone()
 

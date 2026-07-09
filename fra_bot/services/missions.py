@@ -23,6 +23,7 @@ a mission is marked ``skipped`` with what *would* have been started.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import json
 import logging
@@ -83,6 +84,14 @@ _TERMINAL_STATUSES = frozenset({"done", "failed", "skipped"})
 # waits for the cooldown don't count).
 MAX_ATTEMPTS = 12
 
+# Cooldown waits are re-verified against the live form at least this often:
+# a computed eligible_at can be skewed (timezone fallback, a stale last-free
+# line), and trusting it blindly leaves a free slot unused for hours.
+MAX_WAIT_MINUTES = 30
+# Waiting rechecks that start nothing don't consume the poll's one start,
+# but one poll must not walk every queued form either.
+_MAX_RECHECKS_PER_POLL = 5
+
 # Member-facing names for the two request boards.
 _KIND_LABELS = {
     "large": "Large Scale Alliance Mission",
@@ -92,6 +101,28 @@ _KIND_LABELS = {
 # The maintained "what is on the schedule" post (the reference bot kept an
 # equivalent [EM-GUIDE:locations] post on its events board).
 SCHEDULE_MARKER = "[FRA] 📅 Scheduled locations"
+
+
+def _capped_wait(eligible_at: str | None) -> str:
+    """Never park a cooldown wait further out than MAX_WAIT_MINUTES: the
+    availability is re-verified against the live form on the next due poll,
+    so a skewed eligible_at can cost at most half an hour.
+
+    Always returns UTC — claimable() compares next_attempt_at to
+    utcnow_iso() as strings, so a non-UTC offset (the form's timezone)
+    would corrupt both the cap comparison and the due check."""
+    cap = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+        minutes=MAX_WAIT_MINUTES
+    )
+    when = cap
+    if eligible_at:
+        try:
+            parsed = datetime.datetime.fromisoformat(eligible_at)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None:
+            when = min(parsed, cap)
+    return when.astimezone(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 def _event_error_reply(requester: str | None, reason: str) -> str:
@@ -554,6 +585,7 @@ class MissionScheduler:
                 log.exception("mission %s: rotation promotion failed", mission["id"])
 
     async def _process_queue(self) -> int:
+        rechecks = 0
         for mission in await self.missions.claimable():
             if mission["attempts"] >= MAX_ATTEMPTS:
                 if await self.missions.claim(mission["id"]):
@@ -582,6 +614,17 @@ class MissionScheduler:
                         mission["id"], "failed", "internal error while processing",
                     )
             await self._schedule_cleanup(mission["id"])
+            # A recheck that ended in 'waiting' started NOTHING — it must
+            # not consume this poll's one start: a queue full of waiting
+            # events would otherwise starve a large mission whose separate
+            # cooldown is free right now. Bounded so one poll can't walk
+            # the whole queue's forms.
+            current = await self.missions.get(mission["id"])
+            if current is not None and current["status"] == "waiting":
+                rechecks += 1
+                if rechecks >= _MAX_RECHECKS_PER_POLL:
+                    return 0
+                continue
             return 1
         return 0
 
@@ -678,7 +721,8 @@ class MissionScheduler:
         if outcome.state == "waiting":
             await self.missions.set_status(
                 mid, "waiting", outcome.detail,
-                next_attempt_at=outcome.eligible_at, announce=announce,
+                next_attempt_at=_capped_wait(outcome.eligible_at),
+                announce=announce,
             )
             if announce:
                 await self._notify_board(mission,
