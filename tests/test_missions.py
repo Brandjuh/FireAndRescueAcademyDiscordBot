@@ -835,14 +835,18 @@ async def test_ensure_guide_creates_then_skips_unchanged(db):
     board = GuideBoard(existing=None)
     sched.board = board
     await sched._ensure_guide(15307, "large")
-    assert len(board.created) == 1                     # first time: created once
+    # Two maintained posts: the how-to guide AND the schedule post.
+    assert len(board.created) == 2
     assert board.created[0][1].startswith("[FRA] 📋 How to request a LARGE")
     assert "Last updated:" in board.created[0][1]       # carries a freshness stamp
+    assert board.created[1][1].startswith("[FRA] 📅 Scheduled locations")
+    assert "In rotation (recurring)" in board.created[1][1]
     assert await sched.state.get("mission_board_guide_id:15307") == "55"
-    # Same content next poll: no duplicate, no needless edit (within the
-    # refresh window, unchanged instructions).
+    assert await sched.state.get("mission_board_sched_id:15307") == "55"
+    # Same content next poll: no duplicates, no needless edits (within the
+    # refresh window, unchanged instructions and unchanged schedule).
     await sched._ensure_guide(15307, "large")
-    assert len(board.created) == 1
+    assert len(board.created) == 2
     assert board.edited == []
 
 
@@ -882,12 +886,12 @@ async def test_ensure_guide_reedits_when_text_changes(db):
     board = GuideBoard(existing=None)
     sched.board = board
     await sched._ensure_guide(15307, "large")
-    assert len(board.created) == 1
+    assert len(board.created) == 2                      # guide + schedule post
     # A different contribution threshold changes the guide text -> re-edit the
     # stored post (not a new one).
     sched._auto.min_contribution_rate = 10.0
     await sched._ensure_guide(15307, "large")
-    assert len(board.created) == 1                      # still no duplicate
+    assert len(board.created) == 2                      # still no duplicates
     assert board.edited and board.edited[-1][0] == 55
 
 
@@ -897,8 +901,9 @@ async def test_force_guide_missions_creates_and_reports(db):
     sched.board = board
     line = await sched.force_guide(15307, "large")
     assert line.startswith("✅") and "#55" in line
-    assert len(board.created) == 1
-    # A second force bypasses the throttle and edits the stored post.
+    assert "schedule #55" in line                       # schedule post reported
+    assert len(board.created) == 2                      # guide + schedule
+    # A second force bypasses the throttle and edits the stored posts.
     line = await sched.force_guide(15307, "large")
     assert line.startswith("✅")
     assert board.edited and board.edited[-1][0] == 55
@@ -912,3 +917,35 @@ async def test_ensure_guide_suppressed_when_replies_off(db):
     sched.board = board
     await sched._ensure_guide(15307, "large")
     assert board.created == [] and board.edited == []
+
+
+async def test_schedule_post_lists_rotation_and_queue(db):
+    """The maintained schedule post shows the recurring rotation of the
+    board's kind plus queued member requests — like the reference bot's
+    locations post."""
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    rid = await sched.rotation.add(
+        location_text="Amsterdam, Netherlands", kind="large", created_by="admin",
+    )
+    await sched.rotation.add(
+        location_text="Tokyo, Japan", kind="event", created_by="admin",
+    )
+    await _enqueue(sched, source="board", kind="large",
+                   location_text="New York City", requester_name="Bob")
+
+    body = await sched._schedule_body("large")
+    assert body.startswith("[FRA] 📅 Scheduled locations")
+    assert "Amsterdam, Netherlands" in body
+    assert "Tokyo, Japan" not in body                  # other board's kind
+    assert "New York City — requested by Bob" in body
+
+    # The events board shows its own kind, and an empty queue says so.
+    events = await sched._schedule_body("event")
+    assert "Tokyo, Japan" in events
+    assert "Amsterdam" not in events
+    assert "empty — post a location to add one" in events
+
+    # Deactivated rotation entries stay visible, marked paused.
+    await sched.rotation.set_active(rid, False)
+    body = await sched._schedule_body("large")
+    assert "— paused" in body
