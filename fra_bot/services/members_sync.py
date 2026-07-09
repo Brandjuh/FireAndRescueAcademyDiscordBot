@@ -38,7 +38,18 @@ class MembersSyncService:
         self._runs = RunsRepo(db)
 
     async def run(self) -> list[dict]:
-        """Scrape the full roster; returns generated member events."""
+        """Scrape the full roster; returns generated member events.
+
+        The sweep is ~47+ pages, so it runs as BULK traffic: its requests
+        yield to board work (polls, guides, request execution) on the
+        shared pacer instead of starving them for minutes.
+        """
+        from ..core.pacing import bulk_traffic
+
+        with bulk_traffic():
+            return await self._run_paced()
+
+    async def _run_paced(self) -> list[dict]:
         run_id = await self._runs.start("members")
         base_path = f"/verband/mitglieder/{self._cfg.missionchief.alliance_id}"
         roster: list[dict] = []

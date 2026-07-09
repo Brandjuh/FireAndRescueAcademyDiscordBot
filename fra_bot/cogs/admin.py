@@ -102,10 +102,14 @@ class AdminCog(commands.Cog):
         embed.add_field(name="Expenses stored", value=f"{expense_count:,}")
         backlog = self.bot.mc.pacer_backlog
         if backlog:
+            bulk = self.bot.mc.pacer_backlog_bulk
+            interactive = backlog - bulk
             embed.add_field(
                 name="⏳ MC request backlog",
                 value=(
-                    f"{backlog} waiting — if this keeps growing, lower "
+                    f"{backlog} waiting ({interactive} board/interactive · "
+                    f"{bulk} bulk backfill; bulk yields to board work) — if the "
+                    "interactive count keeps growing, lower "
                     "`missionchief.max_delay` (default 9.0)"
                 ),
             )

@@ -14,12 +14,35 @@ crawler hammering the site.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import random
 import time
 from collections import deque
+from contextlib import contextmanager
 
 log = logging.getLogger(__name__)
+
+# Task-local flag marking the current work as LOW-priority bulk traffic.
+# Set via bulk_traffic(); read by HumanPacer.wait_turn, so no call site
+# between the job and the client needs to thread a priority argument.
+_BULK_TRAFFIC = contextvars.ContextVar("fra_bulk_traffic", default=False)
+
+
+@contextmanager
+def bulk_traffic():
+    """Mark every MissionChief request made inside as bulk (low priority).
+
+    Wrap the body of history backfills and full sweeps::
+
+        with bulk_traffic():
+            await self.client.fetch_page(...)   # yields to board work
+    """
+    token = _BULK_TRAFFIC.set(True)
+    try:
+        yield
+    finally:
+        _BULK_TRAFFIC.reset(token)
 
 
 class CircuitOpenError(RuntimeError):
@@ -56,6 +79,12 @@ class HumanPacer:
         self._failures: deque[float] = deque()
         self._circuit_open_until = 0.0
         self._waiting = 0
+        self._bulk_waiting = 0
+        self._priority_waiters = 0
+        # Set whenever NO priority (interactive) request is waiting — bulk
+        # traffic parks on this event so board work always goes first.
+        self._no_priority = asyncio.Event()
+        self._no_priority.set()
 
     @property
     def circuit_open(self) -> bool:
@@ -67,6 +96,12 @@ class HumanPacer:
         that keeps growing means demand exceeds the configured pacing
         (min_delay/max_delay) — the bot is choking on its own politeness."""
         return self._waiting
+
+    @property
+    def backlog_bulk(self) -> int:
+        """How many of the queued requests are LOW-priority bulk traffic
+        (backfills, full member sweeps)."""
+        return self._bulk_waiting
 
     def reconfigure(
         self,
@@ -93,12 +128,36 @@ class HumanPacer:
         )
 
     async def wait_turn(self) -> None:
-        """Block until it's polite to send the next request."""
+        """Block until it's polite to send the next request.
+
+        Two priority classes share the pacing budget: interactive work
+        (board polls, guides, request execution, admin commands) and BULK
+        work (history backfills, full member sweeps — anything running
+        inside :func:`bulk_traffic`). Bulk holds back whenever interactive
+        requests are waiting, so a member's request never sits behind a
+        stack of backfill pages."""
+        bulk = _BULK_TRAFFIC.get()
         self._waiting += 1
+        if bulk:
+            self._bulk_waiting += 1
         try:
-            await self._wait_turn_inner()
+            if bulk:
+                while self._priority_waiters:
+                    await self._no_priority.wait()
+                await self._wait_turn_inner()
+            else:
+                self._priority_waiters += 1
+                self._no_priority.clear()
+                try:
+                    await self._wait_turn_inner()
+                finally:
+                    self._priority_waiters -= 1
+                    if self._priority_waiters == 0:
+                        self._no_priority.set()
         finally:
             self._waiting -= 1
+            if bulk:
+                self._bulk_waiting -= 1
 
     async def _wait_turn_inner(self) -> None:
         async with self._lock:

@@ -79,6 +79,11 @@ class MissionChiefClient:
         """Requests currently waiting for their pacing turn (congestion gauge)."""
         return self._pacer.backlog
 
+    @property
+    def pacer_backlog_bulk(self) -> int:
+        """How many of those are low-priority bulk requests (backfills)."""
+        return self._pacer.backlog_bulk
+
     def reconfigure_pacing(self, mc_cfg: MissionChiefConfig) -> None:
         """Re-apply pacing settings live (after a `!fra set missionchief.*`)."""
         self._pacer.reconfigure(
