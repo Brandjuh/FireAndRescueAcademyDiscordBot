@@ -358,37 +358,69 @@ async def test_confirm_build_finds_the_new_building(db, monkeypatch):
 
     monkeypatch.setattr("fra_bot.services.buildings.CONFIRM_RETRY_SECONDS", 0)
     svc = _svc(db, alliance_json=_json.dumps([_hospital_row(9, 40.0001, -74.0001)]))
-    before = await svc._same_type_near("hospital", 40.0, -74.0)
-    assert set(before) == {9}
+    before, coverage = await svc._same_type_near("hospital", 40.0, -74.0)
+    assert set(before) == {"9"} and len(coverage) == 2
     # The build lands: a NEW row appears next to the pre-existing one.
     svc.client._alliance_json = _json.dumps(
         [_hospital_row(9, 40.0001, -74.0001), _hospital_row(12, 40.0002, -74.0002)]
     )
-    result = await svc._confirm_build("hospital", 40.0, -74.0, before)
+    outcome, result = await svc._confirm_build(
+        "hospital", 40.0, -74.0, set(before), coverage
+    )
+    assert outcome == "confirmed"
     assert result.ok and result.building_id == 12
 
 
-async def test_confirm_build_reports_refusal_when_nothing_appears(db, monkeypatch):
+async def test_confirm_build_absent_when_apis_show_nothing_new(db, monkeypatch):
     import json as _json
 
     monkeypatch.setattr("fra_bot.services.buildings.CONFIRM_RETRY_SECONDS", 0)
     pre = _json.dumps([_hospital_row(9, 40.0001, -74.0001)])
     svc = _svc(db, alliance_json=pre)
-    before = await svc._same_type_near("hospital", 40.0, -74.0)
-    result = await svc._confirm_build("hospital", 40.0, -74.0, before)
-    assert not result.ok and result.building_id is None
-    assert "refused" in result.detail and "permissions" in result.detail
+    before, coverage = await svc._same_type_near("hospital", 40.0, -74.0)
+    outcome, result = await svc._confirm_build(
+        "hospital", 40.0, -74.0, set(before), coverage
+    )
+    assert outcome == "absent" and result is None
 
 
-async def test_board_build_submit_without_id_is_confirmed_via_api(db, monkeypatch):
-    """The real alliance-build flow: the browser submit yields no id; the
-    request must only be reported BUILT once the API shows the new
-    building, with the link in the board reply."""
+async def test_confirm_build_unknown_when_before_snapshot_missed_endpoint(
+    db, monkeypatch
+):
+    """HIGH-finding regression: a pre-existing building on an endpoint the
+    BEFORE snapshot failed to read must NEVER be confirmed as the new
+    build — that would claim 'built #<old-id>' for a refused submit."""
     import json as _json
 
+    monkeypatch.setattr("fra_bot.services.buildings.CONFIRM_RETRY_SECONDS", 0)
+    svc = _svc(db, alliance_json=_json.dumps([_hospital_row(9, 40.0001, -74.0001)]))
+    # Before snapshot covered ONLY /api/buildings (alliance endpoint failed).
+    before_keys: set = set()
+    before_coverage = {"/api/buildings"}
+    outcome, result = await svc._confirm_build(
+        "hospital", 40.0, -74.0, before_keys, before_coverage
+    )
+    assert outcome == "unknown" and result is None   # never 'confirmed', never 'absent'
+
+
+async def test_confirm_build_unknown_when_all_reads_fail(db, monkeypatch):
+    """MEDIUM-finding regression: unreadable APIs are NOT proof of refusal."""
+    from fra_bot.mc.errors import FetchError
+
+    monkeypatch.setattr("fra_bot.services.buildings.CONFIRM_RETRY_SECONDS", 0)
+    svc = _svc(db)
+
+    class _DeadClient:
+        async def fetch_page(self, path, *, referer=None):
+            raise FetchError(path, 503)
+
+    svc.client = _DeadClient()
+    outcome, result = await svc._confirm_build("hospital", 40.0, -74.0, set(), set())
+    assert outcome == "unknown" and result is None
+
+
+def _board_svc(db, monkeypatch):
     from fra_bot.db.repos import AutomationRepo
-    from fra_bot.geo.geocoder import GeocodeResult
-    from fra_bot.mc.browser_builder import BuildResult
 
     monkeypatch.setattr("fra_bot.services.buildings.CONFIRM_RETRY_SECONDS", 0)
     monkeypatch.setattr(
@@ -406,6 +438,19 @@ async def test_board_build_submit_without_id_is_confirmed_via_api(db, monkeypatc
             return True
 
     svc.board = _Board()
+    return svc, replies
+
+
+async def test_board_build_submit_without_id_is_confirmed_via_api(db, monkeypatch):
+    """The real alliance-build flow: the browser submit yields no id; the
+    request must only be reported BUILT once the API shows the new
+    building, with the link in the board reply."""
+    import json as _json
+
+    from fra_bot.geo.geocoder import GeocodeResult
+    from fra_bot.mc.browser_builder import BuildResult
+
+    svc, replies = _board_svc(db, monkeypatch)
 
     class _SubmitOnlyBuilder:
         async def build(self, *, building_type, latitude, longitude, name,
@@ -431,33 +476,23 @@ async def test_board_build_submit_without_id_is_confirmed_via_api(db, monkeypatc
     assert replies and "buildings/77" in replies[0]
 
 
-async def test_board_build_refusal_is_reported_not_claimed_built(db, monkeypatch):
-    """When the game silently refuses (nothing appears on the APIs), the
-    member must NOT be told it was built, and the failure must carry the
-    admin-action flag."""
-    from fra_bot.db.repos import AutomationRepo
+async def test_board_build_refusal_waits_then_fails_without_rebuilding(
+    db, monkeypatch
+):
+    """A silent refusal first parks the request (pending_confirm), tells the
+    member NOTHING yet, and the re-check must VERIFY ONLY — a second submit
+    would double-build. Only the second empty window is terminal."""
+    import json as _json
+
     from fra_bot.geo.geocoder import GeocodeResult
     from fra_bot.mc.browser_builder import BuildResult
 
-    monkeypatch.setattr("fra_bot.services.buildings.CONFIRM_RETRY_SECONDS", 0)
-    monkeypatch.setattr(
-        "fra_bot.services.buildings.BrowserBuilder.available",
-        staticmethod(lambda: True),
-    )
-    svc = _svc(db, dry_run=False)
-    svc.cfg.automation.reply_to_board = True
-    svc.requests = AutomationRepo(db)
-    replies: list[str] = []
-
-    class _Board:
-        async def post_reply(self, thread_id, content):
-            replies.append(content)
-            return True
-
-    svc.board = _Board()
+    svc, replies = _board_svc(db, monkeypatch)
+    builds = {"n": 0}
 
     class _SubmitOnlyBuilder:
         async def build(self, **kwargs):
+            builds["n"] += 1
             return BuildResult(True, None, "submitted (HTTP 200)")
 
     svc._builder = _SubmitOnlyBuilder()
@@ -470,7 +505,56 @@ async def test_board_build_refusal_is_reported_not_claimed_built(db, monkeypatch
     await svc._attempt_build(request, "Alice", "hospital", location, {})
 
     row = await svc.requests.get(rid)
+    assert row["status"] == "waiting"                    # parked, not failed
+    payload = _json.loads(row["payload"])
+    assert payload["pending_confirm"]["building_type"] == "hospital"
+    assert replies == []                                 # member not misinformed
+    assert builds["n"] == 1
+
+    # Next poll: the pending short-circuit verifies WITHOUT rebuilding and,
+    # on a second empty window, fails terminally with the admin flag.
+    await svc.requests.claim(rid)
+    request = await svc.requests.get(rid)
+    await svc._attempt_build(request, "Alice", "hospital", location, payload)
+    row = await svc.requests.get(rid)
     assert row["status"] == "failed"
     assert "ADMIN ACTION NEEDED" in row["status_detail"]
-    assert replies and "built" not in replies[0].split("couldn't build")[0]
-    assert "admin has been notified" in replies[0].lower()
+    assert builds["n"] == 1                              # NEVER rebuilt
+    assert replies and "admin has been notified" in replies[0].lower()
+
+
+async def test_board_build_pending_confirms_on_late_api(db, monkeypatch):
+    """API propagation lag: the first window shows nothing, the re-check
+    finds the building — the member gets the ✅ with the link, no failure."""
+    import json as _json
+
+    from fra_bot.geo.geocoder import GeocodeResult
+    from fra_bot.mc.browser_builder import BuildResult
+
+    svc, replies = _board_svc(db, monkeypatch)
+
+    class _SubmitOnlyBuilder:
+        async def build(self, **kwargs):
+            return BuildResult(True, None, "submitted (HTTP 200)")
+
+    svc._builder = _SubmitOnlyBuilder()
+    rid = await svc.requests.create(
+        kind="building", thread_id=15304, post_id=6,
+        requester_name="Alice", requester_mc_id=42, payload="{}",
+    )
+    request = await svc.requests.get(rid)
+    location = GeocodeResult(40.0, -74.0, "St Olavs hospital", "url")
+    await svc._attempt_build(request, "Alice", "hospital", location, {})
+    row = await svc.requests.get(rid)
+    assert row["status"] == "waiting"
+
+    # The API catches up between polls.
+    svc.client._alliance_json = _json.dumps([_hospital_row(88, 40.0, -74.0)])
+    payload = _json.loads(row["payload"])
+    await svc.requests.claim(rid)
+    request = await svc.requests.get(rid)
+    await svc._attempt_build(request, "Alice", "hospital", location, payload)
+    row = await svc.requests.get(rid)
+    assert row["status"] == "done"
+    assert "built hospital #88" in row["status_detail"]
+    assert replies and "buildings/88" in replies[-1]
