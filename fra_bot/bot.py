@@ -138,6 +138,16 @@ class FRABot(commands.Bot):
                 "%s %d scheduled mission(s) interrupted mid-start",
                 "Re-queued" if requeue else "Flagged", stranded_missions,
             )
+        # Re-apply the operator's `!fra set` overrides on top of config.yaml
+        # BEFORE anything schedules jobs or caches values. The pacer was
+        # built pre-DB, so rewire it in case pacing was overridden.
+        from .core.settings import apply_stored_overrides
+        from .db.repos import StateRepo
+
+        for line in await apply_stored_overrides(self.cfg, StateRepo(self.db)):
+            log.info("settings: %s", line)
+        self.mc.reconfigure_pacing(self.cfg.missionchief)
+
         await self.mc.start()
         await self.geocoder.start()
 

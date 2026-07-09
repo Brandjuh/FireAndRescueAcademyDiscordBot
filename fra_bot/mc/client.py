@@ -79,6 +79,15 @@ class MissionChiefClient:
         """Requests currently waiting for their pacing turn (congestion gauge)."""
         return self._pacer.backlog
 
+    def reconfigure_pacing(self, mc_cfg: MissionChiefConfig) -> None:
+        """Re-apply pacing settings live (after a `!fra set missionchief.*`)."""
+        self._pacer.reconfigure(
+            min_delay=mc_cfg.min_delay,
+            max_delay=mc_cfg.max_delay,
+            max_per_minute=mc_cfg.max_requests_per_minute,
+            cooldown_seconds=mc_cfg.circuit_breaker_cooldown_minutes * 60.0,
+        )
+
     # ------------------------------------------------------------------
     # Session plumbing
     # ------------------------------------------------------------------

@@ -192,6 +192,141 @@ class AdminCog(commands.Cog):
             embed.add_field(name="Recent requests", value="\n".join(lines), inline=False)
         await ctx.send(embed=embed)
 
+    # -- runtime settings -------------------------------------------------
+
+    @fra.command(name="set")
+    async def set_setting(self, ctx: commands.Context, key: str = "", *, value: str = "") -> None:
+        """Change any config setting, e.g. `!fra set dry_run off`.
+
+        Keys match by unique suffix (`dry_run`, `training.enabled`,
+        `max_delay`, …) — `!fra settings` lists them all. Booleans accept
+        on/off, yes/no, aan/uit; channels and roles accept #/@ mentions.
+        The change persists across restarts (stored as an override on top
+        of config.yaml); undo with `!fra settings reset <key>`.
+        """
+        from ..core import settings as rt
+
+        if not key:
+            await ctx.send(
+                "Usage: `!fra set <setting> <value>` — e.g. `!fra set dry_run off`, "
+                "`!fra set max_delay 9`, `!fra set training.enabled on`.\n"
+                "`!fra settings` shows every setting and its current value."
+            )
+            return
+        try:
+            setting = rt.resolve(key)
+            parsed = rt.parse_value(setting, value, self.bot.cfg)
+        except rt.SettingError as exc:
+            await ctx.send(f"⚠️ {exc}")
+            return
+
+        old = rt.current(self.bot.cfg, setting)
+        rt.apply(self.bot.cfg, setting, parsed)
+        await rt.store_override(self._state, setting, parsed)
+        try:
+            rt.post_apply(self.bot, setting)
+        except Exception:  # noqa: BLE001 — the value is stored; side-effect only
+            log.exception("post-apply for %s failed", setting.path)
+
+        when = (
+            "active immediately"
+            if setting.live else "takes effect after `!fra restart`"
+        )
+        warning = ""
+        if setting.path == "automation.dry_run" and parsed is False:
+            warning = (
+                "\n⚠️ **Dry-run is OFF — the bot will now perform REAL "
+                "MissionChief actions** (trainings, buildings, missions)."
+            )
+        await ctx.send(
+            f"✅ `{setting.path}` = **{rt.format_value(parsed)}** "
+            f"(was {rt.format_value(old)}) — {when}.{warning}\n"
+            f"_Undo with `!fra settings reset {setting.path}`._"
+        )
+
+    @fra.group(name="settings", aliases=["instellingen"], invoke_without_command=True)
+    async def settings_group(self, ctx: commands.Context, group: str = "") -> None:
+        """Show every runtime setting (optionally one group, e.g.
+        `!fra settings automation`). `*` marks values overridden via
+        `!fra set`; ⟳ marks settings that need a restart to apply."""
+        from ..core import settings as rt
+
+        group = group.strip().lower()
+        groups: dict[str, list[str]] = {}
+        for setting in rt.SETTINGS:
+            if group and setting.group != group:
+                continue
+            override = await rt.get_override(self._state, setting)
+            mark = " \\*" if override is not None else ""
+            flag = "" if setting.live else " ⟳"
+            value = rt.format_value(rt.current(self.bot.cfg, setting))
+            short = setting.path.split(".", 1)[1]
+            groups.setdefault(setting.group, []).append(
+                f"`{short}` = **{value}**{mark}{flag}"
+            )
+        if not groups:
+            names = ", ".join(sorted({s.group for s in rt.SETTINGS}))
+            await ctx.send(f"Unknown group `{group}`. Groups: {names}")
+            return
+        embed = discord.Embed(
+            title="⚙️ Settings",
+            colour=discord.Colour.blurple(),
+            description=(
+                "Change with `!fra set <key> <value>` · reset with "
+                "`!fra settings reset <key>`\n\\* = overridden via command · "
+                "⟳ = applies after restart"
+            ),
+        )
+        for name, lines in groups.items():
+            embed.add_field(name=name, value="\n".join(lines)[:1024], inline=False)
+        await ctx.send(embed=embed)
+
+    @settings_group.command(name="reset")
+    async def settings_reset(self, ctx: commands.Context, key: str = "") -> None:
+        """Remove an override so the config.yaml value applies again.
+        `!fra settings reset all` clears every override."""
+        from ..config import ConfigError, load_config
+        from ..core import settings as rt
+
+        if not key:
+            await ctx.send("Usage: `!fra settings reset <key|all>`")
+            return
+
+        try:
+            fresh = load_config()
+        except (ConfigError, Exception):  # noqa: BLE001 — fall back to restart
+            fresh = None
+
+        async def _reset_one(setting) -> str:
+            removed = await rt.clear_override(self._state, setting)
+            if not removed:
+                return f"➖ `{setting.path}` had no override"
+            if fresh is not None:
+                file_value = rt.current(fresh, setting)
+                rt.apply(self.bot.cfg, setting, file_value)
+                try:
+                    rt.post_apply(self.bot, setting)
+                except Exception:  # noqa: BLE001
+                    log.exception("post-apply for %s failed", setting.path)
+                when = "" if setting.live else " (fully applies after restart)"
+                return (
+                    f"✅ `{setting.path}` back to **{rt.format_value(file_value)}** "
+                    f"from config.yaml{when}"
+                )
+            return f"✅ `{setting.path}` override removed — file value applies after restart"
+
+        if key.strip().lower() == "all":
+            lines = [await _reset_one(s) for s in rt.SETTINGS]
+            lines = [line for line in lines if not line.startswith("➖")]
+            await ctx.send("\n".join(lines)[:1900] or "No overrides were set.")
+            return
+        try:
+            setting = rt.resolve(key)
+        except rt.SettingError as exc:
+            await ctx.send(f"⚠️ {exc}")
+            return
+        await ctx.send(await _reset_one(setting))
+
     @fra.command(name="sync")
     async def sync(self, ctx: commands.Context, scraper: str) -> None:
         """Run a sync/poll: members, applications, logs, treasury, expenses,
