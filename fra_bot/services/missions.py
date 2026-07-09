@@ -399,12 +399,14 @@ class MissionScheduler:
         return created
 
     async def _reply_to(self, thread_id: int, content: str) -> None:
-        """Post a board reply to a specific thread (suppressed in dry-run /
-        when replies are disabled)."""
+        """Post a board reply to a specific thread (when ``reply_to_board``
+        is on).
+
+        Replies post in dry-run too: they're informational posts on OUR
+        request topics, not game actions — members need the feedback
+        regardless of whether real starts are enabled. Action messages
+        carry their own [dry-run] markers."""
         if not self.cfg.automation.reply_to_board:
-            return
-        if self.dry_run:
-            log.info("mission board DRY-RUN reply to %s:\n%s", thread_id, content)
             return
         try:
             await self.board.post_reply(thread_id, content)
@@ -510,6 +512,11 @@ class MissionScheduler:
                 else:
                     await self.missions.set_status(
                         mission["id"], "failed", f"geocoding failed: {exc}",
+                    )
+                    await self._notify_board(mission,
+                        f"@{requester}: I couldn't find that location "
+                        f"({exc}). Please try a different link, or post the "
+                        "place name / address as plain text."
                     )
                 return
             lat, lng, address = resolved.latitude, resolved.longitude, resolved.address or ""

@@ -362,11 +362,14 @@ class BoardRequestService:
         }
 
     async def reply(self, content: str) -> None:
-        """Post a board reply (skipped in dry-run / when disabled)."""
+        """Post a board reply (when ``reply_to_board`` is on).
+
+        Replies post in dry-run too: they're informational forum posts on
+        OUR dedicated request topics, not game actions — members need the
+        feedback ("got it", "couldn't use that link") regardless of whether
+        real starts are enabled. Action messages carry their own [dry-run]
+        markers where relevant."""
         if not self.cfg.automation.reply_to_board:
-            return
-        if self.dry_run:
-            log.info("%s DRY-RUN board reply:\n%s", self.kind, content)
             return
         try:
             await self.board.post_reply(self.thread_id, content)

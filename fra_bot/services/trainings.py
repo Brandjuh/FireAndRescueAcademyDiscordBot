@@ -342,12 +342,20 @@ class TrainingsService(BoardRequestService):
             results.append({"training": match.name, "outcome": outcome["status"]})
             if outcome["status"] == "opened":
                 opened_any = True
-                lines.append(
-                    f"✅ {match.name}: class opened in academy "
-                    f"{outcome['building_id']} — "
-                    f"https://www.missionchief.com/buildings/{outcome['building_id']} "
-                    f"(free, join within 1 hour)"
-                )
+                if outcome.get("dry_run"):
+                    # Honest feedback: nothing was actually started.
+                    lines.append(
+                        f"🧪 {match.name}: [dry-run] I would open a class in "
+                        f"academy {outcome['building_id']} — no class was "
+                        "actually started."
+                    )
+                else:
+                    lines.append(
+                        f"✅ {match.name}: class opened in academy "
+                        f"{outcome['building_id']} — "
+                        f"https://www.missionchief.com/buildings/{outcome['building_id']} "
+                        f"(free, join within 1 hour)"
+                    )
                 await self._maybe_schedule_reminder(request_id, payload, match)
             elif outcome["status"] == "uncertain":
                 opened_any = True

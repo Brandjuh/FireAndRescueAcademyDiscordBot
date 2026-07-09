@@ -60,3 +60,37 @@ def test_parse_query_place_text():
 def test_invalid_coordinates_rejected():
     loc = parse_maps_url("https://maps.google.com/?q=999.0,999.0")
     assert not loc.has_coordinates
+
+
+def test_consent_wrapper_is_unwrapped():
+    # EU consent interstitial: the real maps URL is percent-encoded in
+    # ?continue= — mobile share links regularly expand to this.
+    inner = "https://www.google.com/maps/place/Somewhere/@63.4205,10.3851,17z"
+    import urllib.parse
+    url = "https://consent.google.com/m?continue=" + urllib.parse.quote(inner, safe="")
+    loc = parse_maps_url(url)
+    assert loc.has_coordinates
+    assert abs(loc.latitude - 63.4205) < 1e-6
+    assert loc.place_text == "Somewhere"
+
+
+def test_percent_encoded_pin_coordinates_found():
+    # Coordinates hidden behind percent-encoding (!3d → %213d) inside a
+    # wrapped/re-encoded URL must still be found.
+    url = (
+        "https://www.google.com/maps/place/Hospital/data="
+        "%213m1%214b1%218m2%213d63.4205000%214d10.3851000"
+    )
+    loc = parse_maps_url(url)
+    assert loc.has_coordinates
+    assert abs(loc.latitude - 63.4205) < 1e-6
+    assert abs(loc.longitude - 10.3851) < 1e-6
+
+
+def test_double_encoded_place_text_cleaned():
+    # %2B decodes to a literal '+' after one unquote round — those must
+    # become spaces, not reach the geocoder verbatim (the St. Olav's case).
+    url = "https://www.google.com/maps/place/St.%2BOlav's%2BUniversity%2BHospital/"
+    loc = parse_maps_url(url)
+    assert not loc.has_coordinates
+    assert loc.place_text == "St. Olav's University Hospital"
