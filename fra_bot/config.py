@@ -62,6 +62,8 @@ class DiscordChannels:
     reports: int
     # Approve/deny embeds for requests that need a staff decision.
     admin_approvals: int = 0
+    # The member-management panel (dossier button).
+    member_panel: int = 0
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,8 @@ class DiscordConfig:
     admin_role_ids: tuple[int, ...] = field(default_factory=tuple)
     # Role granted by !verify (0 = membersync disabled).
     verified_role_id: int = 0
+    # Roles allowed to use the staff console (besides admins).
+    staff_role_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -287,11 +291,15 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 alliance_logs=int(channels.get("alliance_logs", 0)),
                 reports=int(channels.get("reports", 0)),
                 admin_approvals=int(channels.get("admin_approvals", 0)),
+                member_panel=int(channels.get("member_panel", 0)),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])
             ),
             verified_role_id=int(_get(raw, "discord", "verified_role_id", default=0)),
+            staff_role_ids=tuple(
+                int(r) for r in (_get(raw, "discord", "staff_role_ids", default=[]) or [])
+            ),
         ),
         automation=AutomationConfig(
             dry_run=bool(_get(raw, "automation", "dry_run", default=True)),
