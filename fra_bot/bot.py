@@ -166,6 +166,7 @@ class FRABot(commands.Bot):
         await self.add_cog(ReportingCog(self))
         await self.add_cog(MissionsCog(self))
         await self.add_cog(RequestsCog(self))
+        await self.add_cog(MemberSyncCog(self))
 
         # Persistent panels survive restarts; register their views.
         missions_cog = self.get_cog("MissionsCog")

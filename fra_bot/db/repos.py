@@ -1535,6 +1535,96 @@ class RemindersRepo:
         )
 
 
+class LinksRepo:
+    """Discord <-> MissionChief identity links + the verification queue."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def get_by_discord(self, discord_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM member_links WHERE discord_id = ?", (discord_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def get_by_mc(self, mc_user_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM member_links WHERE mc_user_id = ?", (mc_user_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def all_approved(self) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM member_links WHERE status = 'approved'"
+        ) as cur:
+            return await cur.fetchall()
+
+    async def upsert(
+        self, discord_id: int, mc_user_id: int, *, status: str, reviewer_id: int = 0
+    ) -> None:
+        """One link per Discord account; an MC account can only be claimed
+        once — claiming it steals it from a stale link (people re-verify
+        after renames), which the UNIQUE index would otherwise block."""
+        now = utcnow_iso()
+        async with self._db.transaction() as conn:
+            await conn.execute(
+                "DELETE FROM member_links WHERE mc_user_id = ? AND discord_id != ?",
+                (mc_user_id, discord_id),
+            )
+            await conn.execute(
+                "INSERT INTO member_links "
+                "(discord_id, mc_user_id, status, reviewer_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(discord_id) DO UPDATE SET mc_user_id = excluded.mc_user_id, "
+                "status = excluded.status, reviewer_id = excluded.reviewer_id, "
+                "updated_at = excluded.updated_at",
+                (discord_id, mc_user_id, status, reviewer_id, now, now),
+            )
+
+    async def delete(self, discord_id: int) -> bool:
+        n = await self._db.execute(
+            "DELETE FROM member_links WHERE discord_id = ?", (discord_id,)
+        )
+        return n > 0
+
+    # -- verification queue ------------------------------------------------
+
+    async def queue_add(
+        self, discord_id: int, *, mc_user_id: int | None,
+        display_name: str | None, guild_id: int | None,
+    ) -> None:
+        await self._db.execute(
+            "INSERT INTO verify_queue "
+            "(discord_id, mc_user_id, display_name, guild_id, attempts, enqueued_at) "
+            "VALUES (?, ?, ?, ?, 0, ?) "
+            "ON CONFLICT(discord_id) DO NOTHING",
+            (discord_id, mc_user_id, display_name, guild_id, utcnow_iso()),
+        )
+
+    async def queue_get(self, discord_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM verify_queue WHERE discord_id = ?", (discord_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def queue_all(self) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM verify_queue ORDER BY enqueued_at ASC"
+        ) as cur:
+            return await cur.fetchall()
+
+    async def queue_bump(self, discord_id: int) -> None:
+        await self._db.execute(
+            "UPDATE verify_queue SET attempts = attempts + 1 WHERE discord_id = ?",
+            (discord_id,),
+        )
+
+    async def queue_remove(self, discord_id: int) -> None:
+        await self._db.execute(
+            "DELETE FROM verify_queue WHERE discord_id = ?", (discord_id,)
+        )
+
+
 def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
     """(daily, monthly) period keys for the current New York game day."""
     from zoneinfo import ZoneInfo

@@ -88,6 +88,9 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("discord.channels.reports", "int", True, "Reports channel"),
     Setting("discord.channels.admin_approvals", "int", True,
             "Approve/deny embeds for requests needing a staff decision"),
+    Setting("discord.verified_role_id", "int", True,
+            "Role granted by !verify (0 = membersync off)",
+            aliases=("verified_role",)),
     Setting("discord.admin_role_ids", "intlist", True,
             "Roles allowed to use admin commands (comma-separated)"),
     # -- automation ----------------------------------------------------------

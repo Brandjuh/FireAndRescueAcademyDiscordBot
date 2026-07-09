@@ -70,6 +70,8 @@ class DiscordConfig:
     guild_id: int
     channels: DiscordChannels
     admin_role_ids: tuple[int, ...] = field(default_factory=tuple)
+    # Role granted by !verify (0 = membersync disabled).
+    verified_role_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -289,6 +291,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])
             ),
+            verified_role_id=int(_get(raw, "discord", "verified_role_id", default=0)),
         ),
         automation=AutomationConfig(
             dry_run=bool(_get(raw, "automation", "dry_run", default=True)),
