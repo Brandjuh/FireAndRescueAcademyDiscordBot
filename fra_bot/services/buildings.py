@@ -145,6 +145,39 @@ def detect_building_type(
 
 GUIDE_MARKER = "[FRA] 📋 How to request a BUILDING"
 
+_TYPE_EMOJI = {"hospital": "🏥", "prison": "🔒"}
+
+
+def _reply_received(
+    requester: str | None, request_id, building_type: str | None,
+    name: str | None, coords: str | None, status_line: str,
+) -> str:
+    """The reference bot's 'request received' reply structure."""
+    lines = [
+        f"Building request received for {requester or 'member'}.",
+        "",
+        f"Request ID: {request_id}",
+        f"Type: {building_type or 'unknown'}",
+    ]
+    if name:
+        lines.append(f"Detected name: {name}")
+    if coords:
+        lines.append(f"Coordinates: {coords}")
+    lines.append("")
+    lines.append(status_line)
+    return "\n".join(lines)
+
+
+def _reply_error(requester: str | None, reason: str) -> str:
+    """The reference bot's 'could not be processed' reply, verbatim."""
+    return (
+        f"Building request could not be processed for {requester or 'member'}.\n\n"
+        f"Reason: {reason}\n\n"
+        "Use one of these formats:\n"
+        "Hospital: <Google Maps link>\n"
+        "Prison: <Google Maps link>"
+    )
+
 
 def _building_guide(min_funds: int) -> str:
     """The how-to-request post for the building board, structured like the
@@ -241,11 +274,12 @@ class BuildingsService(BoardRequestService):
                 await self.requests.set_status(
                     request["id"], "failed", f"geocoding failed: {exc}"
                 )
-                await self.reply_for(
-                    request,
-                    f"@{requester}: could not resolve your location link "
-                    f"({exc}). Please share a Google Maps pin."
-                )
+                await self.reply_for(request, _reply_error(
+                    requester,
+                    "The location could not be resolved to GPS coordinates. "
+                    "Please use a Google Maps place link with a visible "
+                    f"marker. ({exc})",
+                ))
                 return
 
             building_type = detect_building_type(
@@ -267,13 +301,12 @@ class BuildingsService(BoardRequestService):
                     "refused: location is not a hospital or prison",
                     payload=json.dumps(payload),
                 )
-                await self.reply_for(
-                    request,
-                    f"@{requester}: that location "
-                    f"({location.place_text or location.address or 'the pin'}) isn't a "
-                    "hospital or a prison, so nothing was built. Only hospitals and "
-                    "prisons are built automatically."
-                )
+                await self.reply_for(request, _reply_error(
+                    requester,
+                    f"{location.place_text or location.address or 'The pin'} "
+                    "was not detected as a hospital or a prison. Only "
+                    "hospitals and prisons are built automatically.",
+                ))
                 return
 
         await self._attempt_build(
@@ -313,13 +346,13 @@ class BuildingsService(BoardRequestService):
                 f"{location.latitude:.5f},{location.longitude:.5f}",
                 payload=json.dumps(payload),
             )
-            await self.reply_for(
-                request,
-                f"@{requester}: {building_type} request resolved to "
-                f"{location.address or 'the pin'} "
-                f"({location.latitude:.5f}, {location.longitude:.5f}). "
-                f"[{reason} — build it manually for now]"
-            )
+            await self.reply_for(request, _reply_received(
+                requester, request_id, building_type,
+                location.address.split(",")[0] if location.address else None,
+                f"{location.latitude:.5f}, {location.longitude:.5f}",
+                f"Resolved and recorded. [{reason} — an admin can build it "
+                "manually for now]",
+            ))
             return
 
         funds, funds_error = await self._live_funds()
@@ -340,12 +373,15 @@ class BuildingsService(BoardRequestService):
                 payload=json.dumps(payload), announce=announce,
             )
             if announce:
-                await self.reply_for(
-                    request,
-                    f"@{requester}: your {building_type} request is on hold — alliance "
-                    f"funds ({funds:,}) are below the {self._auto.min_alliance_funds:,} "
-                    "safety floor. I'll build it once funds recover."
-                )
+                await self.reply_for(request, _reply_received(
+                    requester, request_id, building_type,
+                    location.address.split(",")[0] if location.address else None,
+                    f"{location.latitude:.5f}, {location.longitude:.5f}",
+                    "Queued for automatic build. No building was created yet. "
+                    f"Current alliance funds are {funds:,} credits; minimum "
+                    "required before auto-building is "
+                    f"{self._auto.min_alliance_funds:,} credits.",
+                ))
             return
 
         name = location.address.split(",")[0] if location.address else f"{building_type}"
@@ -455,10 +491,14 @@ class BuildingsService(BoardRequestService):
         building_type: str, address: str | None, building_id: int | None,
     ) -> None:
         payload["building_id"] = building_id
+        name = address.split(",")[0] if address else None
+        coords = None
+        if payload.get("latitude") is not None:
+            coords = f"{payload['latitude']:.5f}, {payload['longitude']:.5f}"
         link = (
             f"https://www.missionchief.com/buildings/{building_id}"
             if building_id
-            else "see the alliance buildings list"
+            else None
         )
         await self.requests.set_status(
             request["id"], "done",
@@ -466,26 +506,65 @@ class BuildingsService(BoardRequestService):
             + (f" #{building_id}" if building_id else " (id unknown)"),
             payload=json.dumps(payload),
         )
-        await self.reply_for(
-            request,
-            f"✅ {building_type.capitalize()} built for {requester} at "
-            f"{address or 'the pin'} — {link}"
+        status_line = (
+            "Building request approved and automatically created in "
+            "MissionChief." + (f"\n{link}" if link else "")
         )
+        await self.reply_for(request, _reply_received(
+            requester, request["id"], building_type, name, coords, status_line,
+        ))
+        # Board requesters get the reference bot's personal notification as
+        # an in-game PM (no Discord identity on a board post).
+        if not self.is_discord_request(request):
+            await self._notify_ingame_built(
+                requester, building_type, name, coords, address, link
+            )
+
+    async def _notify_ingame_built(
+        self, requester: str | None, building_type: str, name: str | None,
+        coords: str | None, address: str | None, link: str | None,
+    ) -> None:
+        from ..mc.messages import send_ingame_message
+
+        if not requester:
+            return
+        emoji = _TYPE_EMOJI.get(building_type, "🏢")
+        lines = [
+            "Your building request has been APPROVED.",
+            "",
+            f"{emoji} {building_type}: {name or address or 'your location'}",
+        ]
+        if coords:
+            lines.append(f"📍 Coordinates: {coords}")
+        if address:
+            lines.append(f"📫 Address: {address}")
+        if link:
+            lines.append(f"Building: {link}")
+        try:
+            await send_ingame_message(
+                self.client, requester, "Building request", "\n".join(lines)
+            )
+        except Exception:  # noqa: BLE001 - a PM must never fail the request
+            log.exception("building: in-game PM to %s failed", requester)
 
     async def _finish_build_failed(
         self, request, requester: str | None, payload: dict,
         building_type: str, detail: str,
     ) -> None:
+        name = (payload.get("address") or "").split(",")[0] or None
+        coords = None
+        if payload.get("latitude") is not None:
+            coords = f"{payload['latitude']:.5f}, {payload['longitude']:.5f}"
         await self.requests.set_status(
             request["id"], "failed",
             f"build failed: {detail} — ADMIN ACTION NEEDED",
             payload=json.dumps(payload),
         )
-        await self.reply_for(
-            request,
-            f"@{requester}: I couldn't build the {building_type} "
-            f"({detail}). An admin has been notified."
-        )
+        await self.reply_for(request, _reply_received(
+            requester, request["id"], building_type, name, coords,
+            "Building request approved, but automatic creation needs staff "
+            "follow-up. Admins have been notified.",
+        ))
 
     async def _live_funds(self) -> tuple[int | None, str | None]:
         """Live alliance funds from /verband/kasse, as ``(funds, error)``.

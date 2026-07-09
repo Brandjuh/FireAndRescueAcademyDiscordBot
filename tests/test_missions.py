@@ -740,7 +740,7 @@ async def test_board_scan_clarifies_bad_field(db):
     sched.board = board
     created = await sched._scan_board(15303, "event")
     assert created == 0
-    assert any("couldn't use" in c for _, c in board.replies)
+    assert any("could not be processed" in c for _, c in board.replies)
 
 
 async def test_board_replies_post_in_dry_run_too(db):
@@ -751,7 +751,7 @@ async def test_board_replies_post_in_dry_run_too(db):
     board = FakeBoard([_post(101, "New York City")])
     sched.board = board
     assert await sched._scan_board(15307, "large") == 1
-    assert any("got it" in c for _, c in board.replies)
+    assert any("Event request received" in c for _, c in board.replies)
 
 
 async def test_geocode_permanent_failure_notifies_board(db):
@@ -772,7 +772,7 @@ async def test_geocode_permanent_failure_notifies_board(db):
     row = await sched.missions.get(mid)
     assert row["status"] == "failed"
     assert any(
-        "couldn't find that location" in c and "Alice" in c
+        "could not be resolved to GPS coordinates" in c and "Alice" in c
         for _, c in board.replies
     )
 

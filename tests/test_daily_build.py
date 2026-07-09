@@ -520,7 +520,8 @@ async def test_board_build_refusal_waits_then_fails_without_rebuilding(
     assert row["status"] == "failed"
     assert "ADMIN ACTION NEEDED" in row["status_detail"]
     assert builds["n"] == 1                              # NEVER rebuilt
-    assert replies and "admin has been notified" in replies[0].lower()
+    assert replies and "admins have been notified" in replies[0].lower()
+    assert "needs staff follow-up" in replies[0]         # old-bot wording
 
 
 async def test_board_build_pending_confirms_on_late_api(db, monkeypatch):

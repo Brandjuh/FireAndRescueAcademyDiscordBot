@@ -191,8 +191,9 @@ async def test_dry_run_board_reply_says_would_open(db):
 
     assert replies, "dry-run must still post board feedback"
     text = "\n".join(replies)
-    assert "[dry-run]" in text and "would open" in text
-    assert "class opened" not in text
+    assert "dry-run" in text and "Would open" in text
+    assert "nothing was started" in text
+    assert "Opened:" not in text          # never claims a real open
 
 
 async def test_busy_retry_is_bounded_with_backoff(db):
@@ -578,3 +579,91 @@ async def test_training_guide_skips_availability_fetch_when_throttled(db):
     assert board.edited == [(77, await svc._overview_content(0.0))] or (
         len(board.edited) == 1 and board.edited[0][0] == 77
     )
+
+
+async def test_live_success_reply_uses_reference_format_and_sends_pm(db):
+    """Board success: the reply follows the reference bot's structure and
+    the requester gets an in-game PM (board posts have no Discord id)."""
+    after_page = ACADEMY_PAGE.replace("<option value='2'>2</option>", "")
+    svc, client = _service(db, dry_run=False)
+    svc.cfg.automation.reply_to_board = True
+    compose = (
+        "<form action='/messages' method='post'>"
+        "<input type='hidden' name='authenticity_token' value='tok'/>"
+        "<input type='text' name='message[recipient]' value=''/>"
+        "<input type='text' name='message[subject]' value=''/>"
+        "<textarea name='message[body]'></textarea></form>"
+    )
+    calls = {"n": 0}
+    orig_fetch = client.fetch_page
+
+    async def fetch(path, *, referer=None):
+        if path == "/buildings/4951748":
+            calls["n"] += 1
+            return ACADEMY_PAGE if calls["n"] == 1 else after_page
+        if path == "/messages/new":
+            return compose
+        return await orig_fetch(path, referer=referer)
+
+    client.fetch_page = fetch
+    replies: list[str] = []
+
+    class _Board:
+        async def post_reply(self, thread_id, content):
+            replies.append(content)
+            return True
+
+    svc.board = _Board()
+    rid = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=11,
+        requester_name="Alice", requester_mc_id=42,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat", "duration": 3}],
+            "ambiguous": [],
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+
+    text = "\n".join(replies)
+    assert "Training request processed for Alice." in text
+    assert "- HazMat: opened 1 class(es) in academy 4951748" in text
+    assert "Where to find and join the class:" in text
+    assert "https://www.missionchief.com/buildings/4951748" in text
+
+    # One education POST + one in-game PM.
+    pm_posts = [p for p in client.posts if p[0] == "/messages"]
+    assert len(pm_posts) == 1
+    assert pm_posts[0][1]["message[recipient]"] == "Alice"
+    assert "started automatically" in pm_posts[0][1]["message[body]"]
+
+
+async def test_all_failed_reply_uses_could_not_be_processed(db):
+    """When nothing can be opened at all, the reference bot's error format
+    is used instead of the processed format."""
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    replies: list[str] = []
+
+    class _Board:
+        async def post_reply(self, thread_id, content):
+            replies.append(content)
+            return True
+
+    svc.board = _Board()
+    rid = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=12,
+        requester_name="Alice", requester_mc_id=42,
+        payload=json.dumps({
+            "trainings": [],
+            "ambiguous": [{"name": "Lifeguard Training",
+                           "disciplines": ["fire", "coastal"]}],
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+
+    assert replies
+    assert "Training request could not be processed for Alice." in replies[0]
+    assert "exists in multiple academy types" in replies[0]
+    assert "Fire Station - Lifeguard Training" in replies[0]
