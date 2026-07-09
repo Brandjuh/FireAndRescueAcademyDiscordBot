@@ -1275,6 +1275,17 @@ class MissionsRepo:
         ) as cur:
             return await cur.fetchone()
 
+    async def open_for_kind(self, kind: str, *, limit: int = 15) -> list[aiosqlite.Row]:
+        """Open (queued) requests of one kind, oldest first — the board's
+        'what is on the schedule' post."""
+        async with self._db.conn.execute(
+            "SELECT * FROM scheduled_missions "
+            "WHERE kind = ? AND status IN ('pending', 'waiting', 'processing') "
+            "ORDER BY id ASC LIMIT ?",
+            (kind, limit),
+        ) as cur:
+            return list(await cur.fetchall())
+
     async def open_count(self) -> int:
         async with self._db.conn.execute(
             "SELECT COUNT(*) AS n FROM scheduled_missions "

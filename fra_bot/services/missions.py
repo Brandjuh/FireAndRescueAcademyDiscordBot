@@ -89,6 +89,10 @@ _KIND_LABELS = {
     "event": "Alliance Event",
 }
 
+# The maintained "what is on the schedule" post (the reference bot kept an
+# equivalent [EM-GUIDE:locations] post on its events board).
+SCHEDULE_MARKER = "[FRA] 📅 Scheduled locations"
+
 
 def _event_error_reply(requester: str | None, reason: str) -> str:
     """The reference bot's 'could not be processed' event reply, verbatim
@@ -306,6 +310,80 @@ class MissionScheduler:
             )
         except MissionChiefError as exc:
             log.warning("mission: could not maintain guide on %s: %s", thread_id, exc)
+        await self._ensure_schedule_post(thread_id, default_kind, now)
+
+    # -- the maintained schedule post (reference bot's locations post) ------
+
+    def _sched_id_key(self, thread_id: int) -> str:
+        return f"mission_board_sched_id:{thread_id}"
+
+    def _sched_hash_key(self, thread_id: int) -> str:
+        return f"mission_board_sched_hash:{thread_id}"
+
+    def _sched_refreshed_key(self, thread_id: int) -> str:
+        return f"mission_board_sched_refreshed:{thread_id}"
+
+    async def _schedule_body(self, default_kind: str) -> str:
+        """The 'what is on the schedule' body: the recurring rotation of
+        this board's kind plus the queued member requests, oldest first."""
+        label = _KIND_LABELS.get(default_kind, default_kind)
+        lines = [
+            SCHEDULE_MARKER,
+            f"[b]Current {label} schedule[/b]",
+            "",
+            "[b]In rotation (recurring)[/b]",
+        ]
+        rotation = [
+            entry for entry in await self.rotation.list_all()
+            if (entry["kind"] or "large") == default_kind
+        ]
+        if rotation:
+            for entry in rotation:
+                where = entry["address"] or entry["location_text"]
+                last = (entry["last_started_at"] or "")[:10] or "never"
+                state = "" if entry["active"] else " — paused"
+                lines.append(f"- {where} (last started: {last}){state}")
+        else:
+            lines.append("- none yet")
+        lines.append("")
+        lines.append("[b]Waiting in the queue[/b]")
+        queued = await self.missions.open_for_kind(default_kind)
+        if queued:
+            for row in queued:
+                where = row["address"] or row["location_text"] or "?"
+                who = row["requester_name"] or "admin"
+                lines.append(f"- {where} — requested by {who}")
+        else:
+            lines.append("- empty — post a location to add one")
+        lines.append("")
+        lines.append("Locations start at the next free alliance mission slot; "
+                     "see the how-to post above to add one.")
+        return "\n".join(lines)
+
+    async def _ensure_schedule_post(
+        self, thread_id: int, default_kind: str, now: float
+    ) -> None:
+        try:
+            body = await self._schedule_body(default_kind)
+        except Exception:  # noqa: BLE001 - schedule post must not break the scan
+            log.exception("mission: could not build schedule body for %s", thread_id)
+            return
+        signature = hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
+        desired = f"{body}\n\n{guide_updated_line(now)}"
+        try:
+            await ensure_guide_post(
+                self.board, self.state, thread_id,
+                id_key=self._sched_id_key(thread_id),
+                hash_key=self._sched_hash_key(thread_id),
+                refreshed_key=self._sched_refreshed_key(thread_id),
+                marker=SCHEDULE_MARKER,
+                desired=desired, signature=signature, now_epoch=now,
+            )
+        except MissionChiefError as exc:
+            log.warning(
+                "mission: could not maintain schedule post on %s: %s",
+                thread_id, exc,
+            )
 
     async def force_guide(
         self, thread_id: int, default_kind: str, *, repost: bool = False
@@ -319,22 +397,36 @@ class MissionScheduler:
             return f"➖ {label}: reply_to_board is off"
         try:
             if repost:
-                stored = await self.state.get(self._guide_id_key(thread_id))
-                target = int(stored) if stored else await self.board.find_bot_post(
-                    thread_id, _guide_marker(default_kind)
-                )
-                if target:
-                    await self.board.delete_post(thread_id, int(target))
-                await self.state.delete(self._guide_id_key(thread_id))
-            await self.state.delete(self._guide_hash_key(thread_id))
-            await self.state.delete(self._guide_refreshed_key(thread_id))
+                for id_key, marker in (
+                    (self._guide_id_key(thread_id), _guide_marker(default_kind)),
+                    (self._sched_id_key(thread_id), SCHEDULE_MARKER),
+                ):
+                    stored = await self.state.get(id_key)
+                    target = int(stored) if stored else await self.board.find_bot_post(
+                        thread_id, marker
+                    )
+                    if target:
+                        await self.board.delete_post(thread_id, int(target))
+                    await self.state.delete(id_key)
+            for key in (
+                self._guide_hash_key(thread_id),
+                self._guide_refreshed_key(thread_id),
+                self._sched_hash_key(thread_id),
+                self._sched_refreshed_key(thread_id),
+            ):
+                await self.state.delete(key)
             await self._ensure_guide(thread_id, default_kind)
         except MissionChiefError as exc:
             return f"❌ {label}: {exc}"
         post_id = await self.state.get(self._guide_id_key(thread_id))
+        sched_id = await self.state.get(self._sched_id_key(thread_id))
         if post_id:
             url = self.client.url(f"/alliance_threads/{thread_id}")
-            return f"✅ {label}: guide is post #{post_id} — {url}"
+            sched_note = (
+                f", schedule #{sched_id}" if sched_id
+                else ", schedule ❌ (see the log)"
+            )
+            return f"✅ {label}: guide is post #{post_id}{sched_note} — {url}"
         reason = getattr(self.board, "last_error", None) or "see the log"
         return f"❌ {label}: could not create or edit the guide — {reason}"
 
