@@ -91,6 +91,11 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("discord.verified_role_id", "int", True,
             "Role granted by !verify (0 = membersync off)",
             aliases=("verified_role",)),
+    Setting("discord.channels.member_panel", "int", True,
+            "Member-management panel channel (dossier button)"),
+    Setting("discord.staff_role_ids", "intlist", True,
+            "Roles allowed to use the staff console (comma-separated)",
+            aliases=("staff_roles",)),
     Setting("discord.admin_role_ids", "intlist", True,
             "Roles allowed to use admin commands (comma-separated)"),
     # -- automation ----------------------------------------------------------

@@ -56,6 +56,7 @@ discord:
     alliance_logs: 0      # mirrored MissionChief alliance log feed
     reports: 0            # daily / monthly income reports
     admin_approvals: 0    # approve/deny embeds for requests needing a decision
+    member_panel: 0       # member-management panel (dossier button)
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
 
