@@ -373,17 +373,39 @@ class BuildingsService(BoardRequestService):
         Exactly one side is set — the error string says WHY the read failed
         (fetch error vs. unparseable page) so waiting requests and daily
         summaries can show the real reason instead of a bare "could not
-        read"."""
+        read". When the plain HTML carries no funds figure (parts of the
+        kasse page are drawn by JavaScript), a browser-rendered fetch is
+        tried before giving up — the reference bot needed the same fallback.
+        """
         try:
             html = await self.client.fetch_page(KASSE_PATH)
         except MissionChiefError as exc:
             log.warning("Building funds check failed: %s", exc)
             return None, str(exc)
         funds = parse_total_funds(html)
-        if funds is None:
-            log.warning("No alliance funds figure found on %s", KASSE_PATH)
-            return None, "no funds figure found on the kasse page — layout change?"
-        return funds, None
+        if funds is not None:
+            return funds, None
+        if BrowserBuilder.available():
+            from ..mc.browser_builder import render_page
+
+            try:
+                rendered = await render_page(
+                    self.cfg.missionchief.base_url,
+                    self._playwright_cookies(),
+                    KASSE_PATH,
+                )
+                funds = parse_total_funds(rendered)
+                if funds is not None:
+                    log.info("Alliance funds read via rendered kasse page: %s", funds)
+                    return funds, None
+            except Exception as exc:  # noqa: BLE001 — report, never crash the poll
+                log.warning("Rendered funds fetch failed: %s", exc)
+                return None, (
+                    "no funds figure in the plain kasse HTML and the rendered "
+                    f"fetch failed ({exc})"
+                )
+        log.warning("No alliance funds figure found on %s", KASSE_PATH)
+        return None, "no funds figure found on the kasse page — layout change?"
 
     async def test_build(
         self, building_type: str | None, location_text: str

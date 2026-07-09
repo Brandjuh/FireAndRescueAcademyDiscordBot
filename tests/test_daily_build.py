@@ -259,6 +259,27 @@ async def test_daily_build_summary_carries_funds_failure_reason(db):
     assert all("no funds figure" in line for line in lines)
 
 
+async def test_live_funds_falls_back_to_rendered_page(db, monkeypatch):
+    """When the plain kasse HTML has no funds figure (JS-drawn) but
+    Playwright is available, the rendered page is parsed instead — the
+    reference bot needed the exact same fallback."""
+    svc = _svc(db)
+    svc.client._funds_html = "<div>drawn by JS</div>"
+    svc.cfg.missionchief = SimpleNamespace(base_url="https://www.missionchief.com")
+
+    async def fake_render(base_url, cookies, path, **kwargs):
+        return "<div>Alliance Funds</div><div>7,500,000 Credits</div>"
+
+    monkeypatch.setattr(
+        "fra_bot.services.buildings.BrowserBuilder.available",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr("fra_bot.mc.browser_builder.render_page", fake_render)
+    svc._playwright_cookies = lambda: []
+    funds, error = await svc._live_funds()
+    assert funds == 7_500_000 and error is None
+
+
 async def test_dry_run_board_request_not_blocked_by_funds_read(db):
     """A dry-run request spends nothing, so it must NOT wait on the funds
     gate: even with an unreadable kasse page the member gets the resolved
