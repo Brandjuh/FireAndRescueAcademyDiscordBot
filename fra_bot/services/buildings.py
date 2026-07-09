@@ -61,6 +61,10 @@ DUPLICATE_RADIUS_M = 250                      # skip a spot within this of a sam
 OVERPASS_BBOX_DELTA = 0.18                    # ~20 km box around a chosen city
 MAX_CITY_ATTEMPTS = 6                         # cities to try before giving up on a type
 DAILY_BUILD_STATE_KEY = "daily_build_last_date"
+# Fresh builds the finisher keeps revisiting (prison extensions unlock
+# only after the previous one finishes real-time construction).
+PENDING_COMPLETION_KEY = "building_pending_completion"
+COMPLETION_IDLE_LIMIT = 24    # consecutive no-progress checks (~12h at 30min)
 
 # Post-build verification: an alliance build doesn't redirect to
 # /buildings/<id>, so after a submit we look for a NEW same-type building
@@ -539,17 +543,22 @@ class BuildingsService(BoardRequestService):
         self, building_id: int | None, building_type: str, name: str | None
     ) -> str:
         """Tax + level-to-max + extensions (except large) for a NEW
-        building. Returns a short human summary ('' when skipped)."""
+        building, plus registration with the FINISHER: prisons reveal each
+        next extension only after the previous one finishes CONSTRUCTION
+        (real build time), so one pass can never complete a building — the
+        periodic finisher keeps revisiting it until it is done. Returns a
+        short human summary ('' when skipped)."""
         if not building_id or self.dry_run:
             return ""
         from ..mc.building_tax import set_building_tax
 
         notes: list[str] = []
+        tax_ok = True
         percent = self._auto.set_tax_percent
         if percent:
-            ok, detail = await set_building_tax(self.client, building_id, percent)
-            notes.append(("✅ " if ok else "⚠️ ") + detail)
-            if not ok:
+            tax_ok, detail = await set_building_tax(self.client, building_id, percent)
+            notes.append(("✅ " if tax_ok else "⚠️ ") + detail)
+            if not tax_ok:
                 log.warning("post-creation: %s #%s: %s", building_type,
                             building_id, detail)
         report = await self._upgrader.upgrade_one(
@@ -558,13 +567,84 @@ class BuildingsService(BoardRequestService):
         notes.append(
             f"levels raised: {report.levels_raised} · "
             f"extensions bought: {report.extensions_bought}"
-            + (" · stopped at the funds floor" if report.funds_blocked else "")
-            + (" · action cap reached — an admin can run `!fra "
-               "upgradebuildings confirm` for the rest" if report.truncated else "")
+        )
+        await self._register_completion(
+            building_id, building_type, name, tax_done=tax_ok,
+        )
+        notes.append(
+            "🔁 I will keep revisiting this building until it is fully "
+            "upgraded (new extensions unlock as construction finishes)."
         )
         log.info("post-creation %s #%s: %s", building_type, building_id,
                  " | ".join(notes))
         return "\n".join(notes)
+
+    # -- the finisher: complete fresh builds over time ---------------------
+
+    async def _load_pending_completion(self) -> dict:
+        raw = await self.state.get(PENDING_COMPLETION_KEY)
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    async def _register_completion(
+        self, building_id: int, kind: str, name: str | None, *, tax_done: bool,
+    ) -> None:
+        data = await self._load_pending_completion()
+        data[str(building_id)] = {
+            "kind": kind,
+            "name": name,
+            "tax_done": tax_done,
+            "idle": 0,
+            "added_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        await self.state.set(PENDING_COMPLETION_KEY, json.dumps(data))
+
+    async def finish_pending(self) -> list[str]:
+        """One finisher pass over every registered fresh build: retry the
+        tax until it sticks, buy whatever new levels/extensions have become
+        available, and retire a building after enough consecutive
+        no-progress checks (construction done, nothing left to buy)."""
+        if self.dry_run:
+            return []
+        data = await self._load_pending_completion()
+        if not data:
+            return []
+        from ..mc.building_tax import set_building_tax
+
+        lines: list[str] = []
+        for key, entry in list(data.items()):
+            building_id = int(key)
+            progressed = False
+            if not entry.get("tax_done") and self._auto.set_tax_percent:
+                ok, detail = await set_building_tax(
+                    self.client, building_id, self._auto.set_tax_percent
+                )
+                if ok:
+                    entry["tax_done"] = True
+                    progressed = True
+                lines.append(f"#{building_id}: {'✅' if ok else '⚠️'} {detail}")
+            report = await self._upgrader.upgrade_one(
+                building_id, kind=entry.get("kind", "hospital"),
+                name=entry.get("name"),
+            )
+            if report.actions > 0:
+                progressed = True
+                lines.append(
+                    f"#{building_id}: +{report.levels_raised} levels, "
+                    f"+{report.extensions_bought} extensions"
+                )
+            entry["idle"] = 0 if progressed else entry.get("idle", 0) + 1
+            if entry["idle"] >= COMPLETION_IDLE_LIMIT and entry.get("tax_done"):
+                del data[key]
+                lines.append(f"#{building_id}: complete — finisher done")
+                log.info("finisher: building %s considered complete", building_id)
+        await self.state.set(PENDING_COMPLETION_KEY, json.dumps(data))
+        for line in lines:
+            log.info("building finisher: %s", line)
+        return lines
 
     async def _notify_ingame_built(
         self, requester: str | None, building_type: str, name: str | None,
