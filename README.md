@@ -276,6 +276,13 @@ Requests arrive three ways:
   confirms accepted requests, and asks for clarification when a post can't be
   used. Event posts with no refinements default to a random type at
   Large / Circle / 30s.
+* an **Own mission template** — the mission-board guide carries a
+  copy-paste list of every Own-mission field (same labels and order as the
+  in-game form). A member copies it, fills in the location, a name and
+  their numbers, and posts it; deleted or 0 lines count as 0, transport
+  probability defaults to 50, and the hospital department is picked by
+  name (General Internal by default). The bot maps it straight onto the
+  game's form.
 
 The **rotation list** is an admin-managed set of locations the bot starts
 automatically and keeps cycling forever — one per free slot, oldest-started
