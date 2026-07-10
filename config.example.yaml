@@ -61,6 +61,11 @@ discord:
     # Eventpinger: role pings for every alliance mission/event the bot
     # actually starts (Notify-Event role + resolved region role).
     event_pings: 1421242306136113254
+    # Missions-database forum (see automation.missions_forum). 0 = off.
+    missions_forum: 0
+    # New-mission announcements (link to the forum post) land here when
+    # automation.missions_forum.announce_new is on.
+    mission_announce: 1524842963316773036
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
   # Role that is always pinged by the eventpinger (Notify-Event).
@@ -123,6 +128,21 @@ automation:
     panel_channel_id: 1425234755842080890
     # Board requests are self-serve; skip members below this contribution.
     min_contribution_rate: 5.0
+  missions_forum:
+    # Missions-database forum: every mission from missionchief.com's
+    # einsaetze.json gets its own tagged forum post (all information, in
+    # English). The bot manages the forum itself: it creates the tag set,
+    # requires a tag on every post, adds new missions daily and edits a
+    # post in place when a mission's data changes — never a duplicate.
+    # The forum channel id lives under discord.channels.missions_forum.
+    enabled: false
+    sync_time: "04:00"        # HH:MM in reports.timezone
+    # Announce brand-new missions (with a link to the forum post) in
+    # discord.channels.mission_announce. Off by default.
+    announce_new: false
+    # Posts/edits per sync run — spreads the initial ~450-mission backfill
+    # over a few runs and keeps rate limits comfortable.
+    max_posts_per_run: 100
   tax_warnings:
     # Automated member tax (alliance donation) warnings, like the old bot:
     # members below min_rate get an in-game PM — a friendly reminder first,
