@@ -184,6 +184,12 @@ class MissionsForumService:
         self._bot = bot
         self._repo = MissionsForumRepo(db)
         self._state = StateRepo(db)
+        # `!fra missionsforum stop` raises this; the running sync/wipe
+        # loop checks it between posts and bows out cleanly.
+        self._stop = False
+
+    def request_stop(self) -> None:
+        self._stop = True
 
     # ------------------------------------------------------------------
     # Channel plumbing
@@ -223,29 +229,43 @@ class MissionsForumService:
         Discord validates the flag against the forum's pre-edit tag list,
         so combining it with the tag creation fails on a fresh forum with
         40066 ("no tags available that can be set by non-moderators")."""
-        existing = {tag.name for tag in forum.available_tags}
-        missing = [name for name in catalog.FORUM_TAG_EMOJI if name not in existing]
+        current = list(forum.available_tags)
+        names = {tag.name for tag in current}
+        # Renamed tags keep their id: the rename happens in place, so posts
+        # already carrying the old tag follow along automatically.
+        renamed = []
+        for old, new in catalog.RENAMED_TAGS.items():
+            if old in names and new not in names:
+                for tag in current:
+                    if tag.name == old:
+                        tag.name = new
+                        renamed.append(f"{old} → {new}")
+                        names = (names - {old}) | {new}
+                        break
+        missing = [name for name in catalog.FORUM_TAG_EMOJI if name not in names]
         # The fallback tag has priority: it is what keeps a tag-less
         # mission postable once require_tag is on.
         missing.sort(key=lambda name: name != catalog.FALLBACK_TAG)
         # Discord allows 20 tags per forum; never push it over.
-        room = max(0, 20 - len(forum.available_tags))
+        room = max(0, 20 - len(current))
         if len(missing) > room:
             log.warning(
                 "Forum has only %d free tag slots; skipping tags: %s",
                 room, ", ".join(missing[room:]),
             )
             missing = missing[:room]
-        if missing:
+        if missing or renamed:
             try:
                 updated = await forum.edit(
-                    available_tags=list(forum.available_tags) + [
+                    available_tags=current + [
                         discord.ForumTag(name=name, emoji=catalog.FORUM_TAG_EMOJI[name])
                         for name in missing
                     ],
                     reason="Missions database tags",
                 )
                 forum = updated or forum
+                for line in renamed:
+                    log.info("Missions-forum tag renamed: %s", line)
             except discord.HTTPException as exc:
                 # No Manage Channels on the forum? Keep posting (untagged
                 # posts are allowed while require_tag is off) instead of
@@ -265,7 +285,7 @@ class MissionsForumService:
                 log.warning(
                     "Could not enable require_tag on the missions forum: %s", exc
                 )
-        return missing, forum
+        return missing + renamed, forum
 
     def _applied_tags(self, forum, mission: dict) -> list:
         by_name = {tag.name: tag for tag in forum.available_tags}
@@ -310,6 +330,7 @@ class MissionsForumService:
         ``limit`` caps posts+edits this run (default: config
         ``max_posts_per_run``); ``force`` re-renders even unchanged posts.
         """
+        self._stop = False
         forum = self.forum()
         if forum is None:
             return self._summary(
@@ -352,13 +373,16 @@ class MissionsForumService:
         updated_stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
 
         created = updated = skipped = failed = announced = 0
-        capped = False
+        capped = stopped = False
         seen_unchanged: list[str] = []
         seen_keys: set[str] = set()
         writes = 0
 
         missions.sort(key=lambda m: _sort_key(catalog.mission_key(m)))
         for mission in missions:
+            if self._stop:
+                stopped = True
+                break
             key = catalog.mission_key(mission)
             if key in seen_keys:
                 log.warning("Duplicate mission key %s in einsaetze.json; skipped", key)
@@ -405,14 +429,14 @@ class MissionsForumService:
             await self._pause(writes)
 
         await self._repo.touch_seen(seen_unchanged)
-        if not capped and not failed:
+        if not capped and not failed and not stopped:
             # Whole catalog covered in one run: the backfill is done and
             # future creations are genuinely new missions.
             await self._state.set(STATE_BACKFILL_DONE, updated_stamp)
         summary = self._summary(
             created=created, updated=updated, skipped=skipped, failed=failed,
             announced=announced, adopted=adopted, tags_created=tags_created,
-            capped=capped, cap=cap, total=len(missions),
+            capped=capped, cap=cap, total=len(missions), stopped=stopped,
         )
         await self._state.set(
             STATE_LAST_SYNC,
@@ -481,6 +505,65 @@ class MissionsForumService:
         await self._repo.record(key, thread.id, digest, name)
         return "updated"
 
+    async def wipe(self) -> dict:
+        """Delete EVERY mission post (tracked rows plus any thread carrying
+        our title marker) and forget the mapping — a clean slate for a full
+        repost. The backfill flag resets too, so the repost never floods the
+        announcement channel."""
+        self._stop = False
+        forum = self.forum()
+        if forum is None:
+            return self._summary(
+                error="Missions forum is not configured — nothing to wipe."
+            )
+        # Tracked posts first, then marker-titled strays (adopt-style scan).
+        targets: dict[int, str | None] = {}
+        for row in await self._repo.all():
+            targets[int(row["thread_id"])] = row["mission_key"]
+        threads = list(getattr(forum, "threads", []) or [])
+        try:
+            async for thread in forum.archived_threads(limit=None):
+                threads.append(thread)
+        except discord.HTTPException as exc:
+            log.warning("Could not list archived mission threads: %s", exc)
+        for thread in threads:
+            if thread_key(getattr(thread, "name", "")):
+                targets.setdefault(thread.id, None)
+
+        deleted = failed = 0
+        stopped = False
+        for thread_id, mission_key in targets.items():
+            if self._stop:
+                stopped = True
+                break
+            thread = await self._get_thread(thread_id)
+            if thread is None:
+                if mission_key:
+                    await self._repo.delete(mission_key)
+                continue
+            try:
+                await thread.delete()
+            except discord.HTTPException as exc:
+                failed += 1
+                log.error("Could not delete mission thread %s: %s", thread_id, exc)
+                continue
+            if mission_key:
+                await self._repo.delete(mission_key)
+            deleted += 1
+            await self._pause(deleted)
+
+        await self._state.delete(STATE_BACKFILL_DONE)
+        lines = [f"deleted {deleted} post(s), {failed} failed"]
+        if stopped:
+            lines.append("⏹️ stopped by admin — run wipe again for the rest")
+        remaining = await self._repo.count()
+        if remaining:
+            lines.append(f"{remaining} mapping row(s) left (their threads remain)")
+        return {
+            "error": None, "deleted": deleted, "failed": failed,
+            "stopped": stopped, "lines": lines, "changed": bool(deleted or failed),
+        }
+
     async def _announce(self, mission: dict, thread) -> int:
         channel_id = self._cfg.discord.channels.mission_announce
         channel = self._bot.get_channel(channel_id) if channel_id else None
@@ -543,14 +626,16 @@ class MissionsForumService:
             f"(of {counts.get('total', 0)} missions)"
         ]
         if counts.get("tags_created"):
-            lines.append("tags created: " + ", ".join(counts["tags_created"]))
+            lines.append("tag changes: " + ", ".join(counts["tags_created"]))
         if counts.get("adopted"):
             lines.append(
                 f"re-adopted {counts['adopted']} existing post(s) from the forum"
             )
         if counts.get("announced"):
             lines.append(f"announced {counts['announced']} new mission(s)")
-        if counts.get("capped"):
+        if counts.get("stopped"):
+            lines.append("⏹️ stopped by admin — the rest follows on the next sync")
+        elif counts.get("capped"):
             lines.append(
                 f"post cap reached ({counts.get('cap')}/run) — "
                 "the rest follows on the next sync"

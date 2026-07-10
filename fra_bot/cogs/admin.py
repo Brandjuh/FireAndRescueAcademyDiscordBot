@@ -973,6 +973,52 @@ class AdminCog(commands.Cog):
             content=f"{icon} Missions forum:\n" + "\n".join(summary["lines"])[:1800]
         )
 
+    @missions_forum_group.command(name="stop")
+    async def missions_forum_stop(self, ctx: commands.Context) -> None:
+        """Stop the running missions-forum sync (or wipe) after the post
+        it is currently working on."""
+        if not self.bot.job_lock("missions-forum").locked():
+            await ctx.send("There is no missions-forum sync running.")
+            return
+        self.bot.missions_forum.request_stop()
+        await ctx.send("🛑 Stopping the missions-forum run after the current post…")
+
+    @missions_forum_group.command(name="wipe")
+    async def missions_forum_wipe(
+        self, ctx: commands.Context, confirm: str = ""
+    ) -> None:
+        """Delete ALL mission posts from the forum and forget the mapping.
+        Destructive — requires the literal word CONFIRM:
+        `!fra missionsforum wipe CONFIRM`."""
+        if confirm != "CONFIRM":
+            count = 0
+            try:
+                from ..db.repos import MissionsForumRepo
+
+                count = await MissionsForumRepo(self.bot.db).count()
+            except Exception:  # count is cosmetic only
+                pass
+            await ctx.send(
+                f"⚠️ This deletes **every** mission post ({count} tracked) "
+                "from the forum. If you are sure: `!fra missionsforum wipe CONFIRM`"
+            )
+            return
+        lock = self.bot.job_lock("missions-forum")
+        if lock.locked():
+            await ctx.send(
+                "⏳ A missions-forum run is busy — `!fra missionsforum stop` "
+                "it first."
+            )
+            return
+        message = await ctx.send("🧹 Wiping the missions forum… (this is paced)")
+        async with lock:
+            summary = await self.bot.missions_forum.wipe()
+        icon = "❌" if summary.get("error") else "✅"
+        await message.edit(
+            content=f"{icon} Missions forum wipe:\n"
+                    + "\n".join(summary["lines"])[:1800]
+        )
+
     @missions_forum_group.command(name="adopt")
     async def missions_forum_adopt(self, ctx: commands.Context) -> None:
         """Rebuild the mission→post mapping from the forum's thread titles
