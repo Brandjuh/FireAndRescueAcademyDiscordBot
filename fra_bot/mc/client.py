@@ -255,11 +255,15 @@ class MissionChiefClient:
     # Fetching
     # ------------------------------------------------------------------
 
-    async def fetch_page(self, path: str, *, referer: str | None = None) -> str:
+    async def fetch_page(
+        self, path: str, *, referer: str | None = None, ajax: bool = False
+    ) -> str:
         """GET a MissionChief page, returning HTML.
 
         Handles pacing, retries and transparent re-login on session
-        expiry. Raises FetchError / LoginError when all else fails.
+        expiry. ``ajax`` adds the XHR header for endpoints the page's own
+        scripts call (e.g. the alliance-cost tax links). Raises
+        FetchError / LoginError when all else fails.
         """
         await self.start()
         target = self.url(path)
@@ -269,6 +273,8 @@ class MissionChiefClient:
             await self._pacer.wait_turn()
             try:
                 headers = {"Referer": referer} if referer else {}
+                if ajax:
+                    headers["X-Requested-With"] = "XMLHttpRequest"
                 async with self.session.get(
                     target, allow_redirects=True, headers=headers
                 ) as resp:
