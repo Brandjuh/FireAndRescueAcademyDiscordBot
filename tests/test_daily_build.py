@@ -723,3 +723,36 @@ async def test_finisher_noop_in_dry_run_and_when_empty(db):
     assert await svc.finish_pending() == []
     live = _svc(db, dry_run=False)
     assert await live.finish_pending() == []
+
+
+async def test_daily_build_never_rebuilds_a_type_built_today(db, monkeypatch):
+    from fra_bot.services import buildings as buildings_mod
+
+    monkeypatch.setattr(
+        buildings_mod.BrowserBuilder, "available", staticmethod(lambda: True)
+    )
+    svc = _svc(db, dry_run=False)
+    first = await svc.daily_build(force=True)      # builds both
+    assert sum(1 for line in first if line.startswith("✅")) == 2
+    # A second manual run the same day must not add duplicates.
+    second = await svc.daily_build(force=True)
+    assert all("already built today" in line for line in second)
+    assert len(svc._builder.calls) == 2            # nothing extra built
+
+
+async def test_daily_build_manual_retry_only_builds_the_missing_type(db, monkeypatch):
+    from fra_bot.services import buildings as buildings_mod
+
+    monkeypatch.setattr(
+        buildings_mod.BrowserBuilder, "available", staticmethod(lambda: True)
+    )
+    hospital_only = {"elements": [OVERPASS_DATA["elements"][0]]}
+    svc = _svc(db, dry_run=False, overpass_data=hospital_only)
+    first = await svc.daily_build(force=True)
+    assert any(line.startswith("✅ hospital") for line in first)
+    assert any(line.startswith("❔ prison") for line in first)   # no candidate
+    svc._overpass.data = OVERPASS_DATA                           # prison findable
+    second = await svc.daily_build(force=True)
+    assert any("hospital: already built today" in line for line in second)
+    assert any(line.startswith("✅ prison") for line in second)
+    assert [c[0] for c in svc._builder.calls] == ["hospital", "prison"]
