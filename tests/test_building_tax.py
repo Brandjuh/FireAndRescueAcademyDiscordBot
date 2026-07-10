@@ -1,81 +1,85 @@
-"""Post-creation tax setting: form discovery, update, verification."""
+"""Post-creation tax setting via the building page's alliance_costs
+buttons (the reference bot's mechanism — a GET per tax step, no form)."""
 
 import pytest
 
-from fra_bot.mc.building_tax import find_tax_form, read_tax_value, set_building_tax
-from fra_bot.mc.errors import ParseError
+from fra_bot.mc.building_tax import (
+    has_tax_controls,
+    read_tax_percent,
+    set_building_tax,
+)
 
 pytestmark = pytest.mark.asyncio
 
 
-def _edit_page(share="0"):
-    options = "".join(
-        f"<option value='{v}'{' selected' if v == share else ''}>{v}%</option>"
-        for v in ("0", "10", "20", "30", "40", "50")
+def _building_page(active=0, building_id=777):
+    # The real page shows one alliance-cost button per tax step; the active
+    # one carries btn-success.
+    buttons = "".join(
+        f"<a class='btn btn-xs btn-alliance_costs "
+        f"{'btn-success' if tax_id * 10 == active else 'btn-default'}' "
+        f"href='/buildings/{building_id}/alliance_costs/{tax_id}'>"
+        f"{tax_id * 10}%</a>"
+        for tax_id in range(6)
     )
-    return (
-        "<form action='/buildings/777' method='post'>"
-        "<input type='hidden' name='_method' value='patch'/>"
-        "<input type='hidden' name='authenticity_token' value='tok'/>"
-        "<input type='text' name='building[name]' value='Hospital X'/>"
-        f"<select name='building[alliance_share]'>{options}</select>"
-        "<input type='submit' value='Save'/>"
-        "</form>"
-    )
+    return f"<html><body><dl><dt>Level:</dt><dd>3</dd></dl>{buttons}</body></html>"
 
 
-def test_find_tax_form_extracts_action_payload_and_field():
-    action, payload, tax_field = find_tax_form(_edit_page(), 777)
-    assert action == "/buildings/777"
-    assert tax_field == "building[alliance_share]"
-    assert payload["_method"] == "patch"
-    assert payload["authenticity_token"] == "tok"
-    assert payload["building[name]"] == "Hospital X"
-    assert payload[tax_field] == "0"
-    assert read_tax_value(_edit_page("20"), 777) == "20"
-
-
-def test_find_tax_form_fails_loud_without_tax_field():
-    with pytest.raises(ParseError):
-        find_tax_form("<form action='/buildings/777'>"
-                      "<input name='building[name]'/></form>", 777)
+def test_read_tax_percent_and_controls():
+    assert read_tax_percent(_building_page(active=20), 777) == 20
+    assert read_tax_percent(_building_page(active=0), 777) == 0
+    assert has_tax_controls(_building_page(), 777) is True
+    # A personal building page has no alliance-cost row.
+    assert has_tax_controls("<html><body>no buttons</body></html>", 777) is False
+    assert read_tax_percent("<html></html>", 777) is None
+    # Another building's buttons don't count.
+    assert has_tax_controls(_building_page(building_id=888), 777) is False
 
 
 class _Client:
-    def __init__(self, *, before="0", after="20", post_status=200):
-        self.pages = [_edit_page(before), _edit_page(after)]
-        self.post_status = post_status
-        self.posts = []
+    def __init__(self, *, before=0, after=20):
+        self.pages = [_building_page(before), _building_page(after)]
+        self.fetched = []
 
     def url(self, path):
         return path
 
     async def fetch_page(self, path, *, referer=None):
-        return self.pages.pop(0) if self.pages else _edit_page("20")
+        self.fetched.append(path)
+        if "/alliance_costs/" in path:
+            return "OK"                       # the set-tax GET
+        return self.pages.pop(0) if self.pages else _building_page(20)
 
-    async def post_form(self, path, data, **kwargs):
-        self.posts.append((path, dict(data)))
-        return (self.post_status, {}, "")
 
-
-async def test_set_building_tax_posts_and_verifies():
-    client = _Client(before="0", after="20")
+async def test_set_building_tax_gets_link_and_verifies():
+    client = _Client(before=0, after=20)
     ok, detail = await set_building_tax(client, 777, 20)
     assert ok and "tax set to 20%" in detail
-    path, data = client.posts[0]
-    assert path == "/buildings/777"
-    assert data["building[alliance_share]"] == "20"
-    assert data["_method"] == "patch"          # full form carried along
+    assert "/buildings/777/alliance_costs/2" in client.fetched
 
 
 async def test_set_building_tax_detects_silent_refusal():
-    client = _Client(before="0", after="0")    # form still shows 0 after POST
+    client = _Client(before=0, after=0)       # page still shows 0% active
     ok, detail = await set_building_tax(client, 777, 20)
     assert not ok and "did not take" in detail
 
 
 async def test_set_building_tax_short_circuits_when_already_set():
-    client = _Client(before="20")
+    client = _Client(before=20)
     ok, detail = await set_building_tax(client, 777, 20)
     assert ok and "already" in detail
-    assert client.posts == []                   # nothing submitted
+    assert all("/alliance_costs/" not in p for p in client.fetched)
+
+
+async def test_set_building_tax_refuses_unsupported_percent():
+    ok, detail = await set_building_tax(_Client(), 777, 15)
+    assert not ok and "unsupported" in detail
+
+
+async def test_set_building_tax_reports_missing_button_row():
+    class NoRowClient(_Client):
+        async def fetch_page(self, path, *, referer=None):
+            return "<html><body>personal building</body></html>"
+
+    ok, detail = await set_building_tax(NoRowClient(), 777, 20)
+    assert not ok and "no alliance tax buttons" in detail

@@ -959,10 +959,20 @@ class BuildingsService(BoardRequestService):
         try:
             existing = await self._existing_buildings()
             for building_type in AUTO_BUILD_TYPES:
+                # Per-type day marker: a type that already got its REAL
+                # build today is never built again — a manual `!fra
+                # dailybuild` after the scheduled run retries only what
+                # failed instead of adding a second hospital.
+                if await self.state.get(self._done_key(building_type)) == today:
+                    summary.append(
+                        f"⏭️ {building_type}: already built today — skipped"
+                    )
+                    continue
                 line = await self._auto_build_one(building_type, existing)
                 summary.append(line)
                 if line.startswith("✅"):
                     built += 1
+                    await self.state.set(self._done_key(building_type), today)
             if force and built:
                 # A real manual build uses up today's slot too.
                 await self.state.set(DAILY_BUILD_STATE_KEY, today)
@@ -976,6 +986,10 @@ class BuildingsService(BoardRequestService):
         for line in summary:
             log.info("daily build: %s", line)
         return summary
+
+    @staticmethod
+    def _done_key(building_type: str) -> str:
+        return f"daily_build_done:{building_type}"
 
     async def _auto_build_one(self, building_type: str, existing: list) -> str:
         funds, funds_error = await self._live_funds()
