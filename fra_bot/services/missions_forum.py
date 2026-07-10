@@ -35,6 +35,10 @@ from ..mc.client import MissionChiefClient
 log = logging.getLogger(__name__)
 
 STATE_LAST_SYNC = "missions_forum:last_sync"
+# Set once a sync has covered the whole catalog without hitting the post
+# cap. Announcements only fire after that: the multi-run initial backfill
+# must never ping the announcement channel, not even its later runs.
+STATE_BACKFILL_DONE = "missions_forum:backfill_done"
 
 # Thread titles end in " · #<key>" — the recovery marker that lets the bot
 # re-adopt its own posts after a database loss.
@@ -78,10 +82,11 @@ def _truncate_lines(lines: list[str], limit: int = 1024) -> str:
 
 def thread_title(name: str, key: str) -> str:
     """``"{name} · #{key}"`` within Discord's 100-char thread-name limit —
-    the key suffix is never truncated (it's the recovery marker)."""
+    the key suffix is only truncated (sacrificing the recovery marker) in
+    the pathological case where the key alone exceeds the limit."""
     suffix = f" · #{key}"
     room = max(1, 100 - len(suffix))
-    return f"{_truncate(name, room)}{suffix}"
+    return _truncate(f"{_truncate(name, room)}{suffix}", 100)
 
 
 def thread_key(title: str) -> str | None:
@@ -212,9 +217,17 @@ class MissionsForumService:
 
     async def ensure_tags(self, forum) -> tuple[list[str], object]:
         """Create any missing forum tags (one bulk edit) and make sure
-        posts require a tag. Returns (created tag names, fresh forum)."""
+        posts require a tag. Returns (created tag names, fresh forum).
+
+        The require_tag flag goes in a SEPARATE edit after the tags exist:
+        Discord validates the flag against the forum's pre-edit tag list,
+        so combining it with the tag creation fails on a fresh forum with
+        40066 ("no tags available that can be set by non-moderators")."""
         existing = {tag.name for tag in forum.available_tags}
         missing = [name for name in catalog.FORUM_TAG_EMOJI if name not in existing]
+        # The fallback tag has priority: it is what keeps a tag-less
+        # mission postable once require_tag is on.
+        missing.sort(key=lambda name: name != catalog.FALLBACK_TAG)
         # Discord allows 20 tags per forum; never push it over.
         room = max(0, 20 - len(forum.available_tags))
         if len(missing) > room:
@@ -223,22 +236,45 @@ class MissionsForumService:
                 room, ", ".join(missing[room:]),
             )
             missing = missing[:room]
-        require_tag = bool(getattr(getattr(forum, "flags", None), "require_tag", False))
-        if not missing and require_tag:
-            return [], forum
-        kwargs: dict = {"require_tag": True}
         if missing:
-            kwargs["available_tags"] = list(forum.available_tags) + [
-                discord.ForumTag(name=name, emoji=catalog.FORUM_TAG_EMOJI[name])
-                for name in missing
-            ]
-        updated = await forum.edit(**kwargs)
-        return missing, (updated or forum)
+            try:
+                updated = await forum.edit(
+                    available_tags=list(forum.available_tags) + [
+                        discord.ForumTag(name=name, emoji=catalog.FORUM_TAG_EMOJI[name])
+                        for name in missing
+                    ],
+                    reason="Missions database tags",
+                )
+                forum = updated or forum
+            except discord.HTTPException as exc:
+                # No Manage Channels on the forum? Keep posting (untagged
+                # posts are allowed while require_tag is off) instead of
+                # silently zero-progressing every day.
+                log.warning("Could not create missions-forum tags: %s", exc)
+                return [], forum
+        # require_tag is a nice-to-have; only turn it on when the fallback
+        # tag exists (otherwise a tag-less mission could never be posted),
+        # and never let a refusal block the sync.
+        names = {tag.name for tag in forum.available_tags}
+        require_tag = bool(getattr(getattr(forum, "flags", None), "require_tag", False))
+        if catalog.FALLBACK_TAG in names and not require_tag:
+            try:
+                updated = await forum.edit(require_tag=True)
+                forum = updated or forum
+            except discord.HTTPException as exc:
+                log.warning(
+                    "Could not enable require_tag on the missions forum: %s", exc
+                )
+        return missing, forum
 
     def _applied_tags(self, forum, mission: dict) -> list:
         by_name = {tag.name: tag for tag in forum.available_tags}
         wanted = catalog.derive_tags(mission)
-        return [by_name[name] for name in wanted if name in by_name][:5]
+        tags = [by_name[name] for name in wanted if name in by_name][:5]
+        if not tags and catalog.FALLBACK_TAG in by_name:
+            # require_tag forums refuse tag-less posts.
+            tags = [by_name[catalog.FALLBACK_TAG]]
+        return tags
 
     # ------------------------------------------------------------------
     # Adopt (DB-loss recovery)
@@ -281,7 +317,10 @@ class MissionsForumService:
                       "id with `!fra set missions_forum <id>`."
             )
 
-        missions = await catalog.fetch_catalog(self._mc)
+        try:
+            missions = await catalog.fetch_catalog(self._mc)
+        except ValueError as exc:
+            return self._summary(error=f"einsaetze.json is unusable: {exc}")
         if not missions:
             return self._summary(error="einsaetze.json returned no missions.")
 
@@ -293,12 +332,20 @@ class MissionsForumService:
         if await self._repo.count() == 0:
             adopted = await self.adopt(forum)
 
-        # Announce only missions that are new relative to an established
-        # forum — never during the initial backfill.
-        initial_fill = await self._repo.count() == 0
+        # Announce only once the whole catalog has been posted at least
+        # once — no run of the (multi-run) initial backfill may ping.
+        backfill_done = await self._state.get(STATE_BACKFILL_DONE) is not None
         announce = (
-            self._cfg.automation.missions_forum.announce_new and not initial_fill
+            self._cfg.automation.missions_forum.announce_new and backfill_done
         )
+
+        # Untracked threads with our title marker (a crash between post and
+        # bookkeeping, or a partial adopt) — reclaim instead of duplicating.
+        orphans: dict[str, object] = {}
+        for thread in getattr(forum, "threads", []) or []:
+            orphan_key = thread_key(getattr(thread, "name", ""))
+            if orphan_key:
+                orphans[orphan_key] = thread
 
         cap = limit or self._cfg.automation.missions_forum.max_posts_per_run
         base_url = self._cfg.missionchief.base_url
@@ -307,13 +354,26 @@ class MissionsForumService:
         created = updated = skipped = failed = announced = 0
         capped = False
         seen_unchanged: list[str] = []
+        seen_keys: set[str] = set()
         writes = 0
 
         missions.sort(key=lambda m: _sort_key(catalog.mission_key(m)))
         for mission in missions:
             key = catalog.mission_key(mission)
+            if key in seen_keys:
+                log.warning("Duplicate mission key %s in einsaetze.json; skipped", key)
+                continue
+            seen_keys.add(key)
             digest = catalog.content_hash(mission)
             row = await self._repo.get(key)
+            if row is None and key in orphans:
+                # Reclaim the existing thread; the empty hash forces a
+                # content refresh below.
+                orphan = orphans[key]
+                await self._repo.record(
+                    key, orphan.id, "", catalog.mission_name(mission)
+                )
+                row = await self._repo.get(key)
             if row is not None and row["content_hash"] == digest and not force:
                 seen_unchanged.append(key)
                 skipped += 1
@@ -345,6 +405,10 @@ class MissionsForumService:
             await self._pause(writes)
 
         await self._repo.touch_seen(seen_unchanged)
+        if not capped and not failed:
+            # Whole catalog covered in one run: the backfill is done and
+            # future creations are genuinely new missions.
+            await self._state.set(STATE_BACKFILL_DONE, updated_stamp)
         summary = self._summary(
             created=created, updated=updated, skipped=skipped, failed=failed,
             announced=announced, adopted=adopted, tags_created=tags_created,
@@ -388,7 +452,19 @@ class MissionsForumService:
         if getattr(thread, "archived", False):
             await thread.edit(archived=False)
         embed = build_mission_embed(mission, base_url=base_url, updated=stamp)
-        starter = await thread.fetch_message(thread.id)
+        try:
+            starter = await thread.fetch_message(thread.id)
+        except discord.NotFound:
+            # The starter message was deleted but the thread remains: the
+            # post can't be repaired in place, so replace it — otherwise
+            # this mission would fail on every sync forever.
+            log.warning(
+                "Starter message of mission %s (thread %s) is gone; reposting",
+                key, thread.id,
+            )
+            await self._repo.delete(key)
+            await self._create_post(forum, mission, digest, stamp, base_url)
+            return "recreated"
         await starter.edit(embed=embed)
         title = thread_title(name, key)
         wanted_tags = self._applied_tags(forum, mission)

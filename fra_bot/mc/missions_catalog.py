@@ -250,7 +250,15 @@ ATTRIBUTE_TAG_EMOJI: dict[str, str] = {
     "Event": "🎪",
 }
 
-FORUM_TAG_EMOJI: dict[str, str] = {**DISCIPLINE_TAG_EMOJI, **ATTRIBUTE_TAG_EMOJI}
+# Last-resort tag so no post is ever tag-less: the forum requires a tag,
+# and Discord refuses tag-less posts there.
+FALLBACK_TAG = "Other"
+
+FORUM_TAG_EMOJI: dict[str, str] = {
+    **DISCIPLINE_TAG_EMOJI,
+    **ATTRIBUTE_TAG_EMOJI,
+    FALLBACK_TAG: "📁",
+}
 
 CATEGORY_TO_DISCIPLINE: dict[str, str] = {
     "fire": "Fire",
@@ -286,6 +294,35 @@ CATEGORY_TO_DISCIPLINE: dict[str, str] = {
     "highway": "Technical",
     "aviation": "Airport",
     "airport": "Airport",
+}
+
+# Fallback discipline when a mission carries no (mapped) categories: infer
+# it from the building type that generates the mission.
+BUILDING_TO_DISCIPLINE: dict[int, str] = {
+    0: "Fire",        # Fire Station
+    4: "Fire",        # Fire Academy
+    13: "Fire",       # Fire Station (Small)
+    22: "Fire",       # Fire Marshal's Office
+    2: "EMS",         # Hospital
+    3: "EMS",         # Ambulance Station
+    6: "EMS",         # Medical Helicopter Station
+    14: "EMS",        # Clinic
+    16: "EMS",        # Ambulance Station (Small)
+    19: "EMS",        # Rescue (EMS) Academy
+    5: "Police",      # Police Station
+    7: "Police",      # Police Academy
+    8: "Police",      # Police Aviation
+    10: "Police",     # Prison
+    15: "Police",     # Police Station (Small)
+    18: "Federal",    # Federal Police Station
+    11: "Water",      # Fire Boat Dock
+    12: "Water",      # Rescue Boat Dock
+    23: "Water",      # Coastal Rescue Station
+    24: "Water",      # Coastal Rescue School
+    25: "Water",      # Coastal Air Station
+    26: "Water",      # Lifeguard Post
+    17: "Wildfire",   # Firefighting Plane Station
+    27: "Technical",  # Tow Truck Station
 }
 
 
@@ -330,10 +367,14 @@ def normalize_missions(payload: Any) -> list[dict[str, Any]]:
 
 def add_related_mission_names(missions: list[dict[str, Any]]) -> None:
     """Resolve ``expansion_missions_ids`` to names (stored on ``additional``
-    so a renamed expansion target also refreshes this mission's post)."""
+    so a renamed expansion target also refreshes this mission's post).
+
+    Plain ids register before base ids: a base mission and its overlay
+    variants share the base id, and the resolution must not depend on
+    payload order (order flips would churn content hashes)."""
     names_by_id: dict[str, str] = {}
-    for mission in missions:
-        for id_field in ("id", "base_mission_id"):
+    for id_field in ("id", "base_mission_id"):
+        for mission in missions:
             value = mission.get(id_field)
             if value not in (None, ""):
                 names_by_id.setdefault(str(value), mission_name(mission))
@@ -349,8 +390,12 @@ def add_related_mission_names(missions: list[dict[str, Any]]) -> None:
 
 
 def mission_key(mission: dict[str, Any]) -> str:
-    """Stable identity: ``base/overlay`` → ``id`` → ``base`` → name slug."""
+    """Stable identity: ``base/overlay`` → ``id`` → ``base`` → name slug.
+
+    Keys never contain whitespace — they double as the ``· #<key>`` thread
+    title marker, whose parser stops at the first space."""
     overlay = str(mission.get("additive_overlays") or "").strip().lower()
+    overlay = re.sub(r"[^a-z0-9_]+", "-", overlay).strip("-")[:40]
     base_id = mission.get("base_mission_id")
     mission_id = mission.get("id")
     if base_id not in (None, "") and overlay:
@@ -360,7 +405,7 @@ def mission_key(mission: dict[str, Any]) -> str:
     if base_id not in (None, ""):
         return str(base_id)
     slug = re.sub(r"[^a-z0-9]+", "-", str(mission.get("name") or "unknown").lower())
-    return slug.strip("-") or "unknown"
+    return slug.strip("-")[:64] or "unknown"
 
 
 def mission_name(mission: dict[str, Any]) -> str:
@@ -572,12 +617,27 @@ def _is_event(mission: dict[str, Any]) -> bool:
     return "event" in str(mission.get("generated_by") or "").casefold()
 
 
-def derive_tags(mission: dict[str, Any]) -> list[str]:
-    """Tag names for a mission, at most 5 (Discord's per-post limit):
-    disciplines first (max 2), then Patients/Prisoners, then the rest."""
+def _disciplines(mission: dict[str, Any]) -> list[str]:
+    """Discipline tags in fixed order — from the categories, falling back
+    to the building type that generates the mission."""
     categories = [str(c) for c in mission.get("mission_categories") or []]
     mapped = {CATEGORY_TO_DISCIPLINE.get(c) for c in categories}
-    disciplines = [tag for tag in DISCIPLINE_TAG_EMOJI if tag in mapped][:2]
+    disciplines = [tag for tag in DISCIPLINE_TAG_EMOJI if tag in mapped]
+    if disciplines:
+        return disciplines
+    building = (mission.get("prerequisites") or {}).get("main_building")
+    try:
+        inferred = BUILDING_TO_DISCIPLINE.get(int(building))
+    except (TypeError, ValueError):
+        inferred = None
+    return [inferred] if inferred else []
+
+
+def derive_tags(mission: dict[str, Any]) -> list[str]:
+    """Tag names for a mission, at most 5 (Discord's per-post limit):
+    disciplines first (max 2), then Patients/Prisoners, then the rest.
+    Never empty — the forum requires a tag on every post."""
+    disciplines = _disciplines(mission)[:2]
 
     attributes: list[str] = []
     if patient_summary(mission):
@@ -602,16 +662,11 @@ def derive_tags(mission: dict[str, Any]) -> list[str]:
     if _is_event(mission):
         attributes.append("Event")
 
-    return (disciplines + attributes)[:5]
+    tags = (disciplines + attributes)[:5]
+    return tags or [FALLBACK_TAG]
 
 
 def discipline_of(mission: dict[str, Any]) -> str | None:
     """The mission's primary discipline (drives the embed colour)."""
-    mapped = {
-        CATEGORY_TO_DISCIPLINE.get(str(c))
-        for c in mission.get("mission_categories") or []
-    }
-    for tag in DISCIPLINE_TAG_EMOJI:
-        if tag in mapped:
-            return tag
-    return None
+    disciplines = _disciplines(mission)
+    return disciplines[0] if disciplines else None
