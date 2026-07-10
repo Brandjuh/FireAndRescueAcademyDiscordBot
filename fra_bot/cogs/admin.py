@@ -877,6 +877,29 @@ class AdminCog(commands.Cog):
             content=f"{'✅' if ok else '❌'} Building {building_id}: {detail}"
         )
 
+    @fra.command(name="taxwarnings", aliases=["taxwarning", "taxwarn"])
+    async def tax_warnings(self, ctx: commands.Context, action: str = "") -> None:
+        """Member 5%-donation warnings. `!fra taxwarnings` lists everyone
+        below the minimum with their warning count; `!fra taxwarnings scan`
+        runs a warning pass now (works with the schedule off; dry-run only
+        reports)."""
+        svc = self.bot.tax_warnings
+        if action.lower() == "scan":
+            message = await ctx.send("⏳ Running a tax-warning scan…")
+            lines = await svc.scan(force=True)
+            body = "\n".join(lines) if lines else "Nothing to do — nobody is due."
+            await message.edit(content=f"💰 Tax warnings:\n{body}"[:1900])
+            return
+        lines = await svc.overview()
+        auto = self.bot.cfg.automation.tax_warnings
+        head = (
+            f"💰 Members below {auto.min_rate:g}% donation "
+            f"(warnings: {'on' if auto.enabled else 'OFF'}, "
+            f"auto-kick: {'on' if auto.auto_kick else 'off'}):"
+        )
+        body = "\n".join(lines) if lines else "Nobody — everyone meets the minimum. 🎉"
+        await ctx.send(f"{head}\n{body}"[:1900])
+
     @fra.command(name="nextmission")
     async def next_mission(self, ctx: commands.Context) -> None:
         """Show which mission/event is up next and where (for the eventpinger)."""
