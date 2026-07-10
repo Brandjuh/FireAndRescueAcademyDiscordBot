@@ -550,19 +550,26 @@ class AdminCog(commands.Cog):
 
     @fra.command(name="requestpanel", aliases=["requestspanel"])
     async def request_panel(self, ctx: commands.Context) -> None:
-        """Post the training/building request panel in THIS channel."""
-        requests_cog = self.bot.get_cog("RequestsCog")
-        if requests_cog is None:
-            await ctx.send("Requests cog not loaded.")
+        """(Re)post the training/building request panel (configured channel,
+        else this one). The keeper maintains it automatically afterwards."""
+        keeper = self.bot.get_cog("PanelKeeperCog")
+        if keeper is None:
+            await ctx.send("Panel keeper not loaded.")
             return
-        await requests_cog.post_panel(ctx.channel)
+        channel_id = getattr(self.bot.cfg.discord.channels, "request_panel", 0)
+        channel = self.bot.get_channel(channel_id) if channel_id else ctx.channel
+        if channel is None:
+            channel = ctx.channel
+        outcome = await keeper.ensure("requests", channel=channel, force=True)
+        await ctx.send(f"✅ Request panel {outcome} in <#{channel.id}>.")
 
     @fra.command(name="missionpanel")
     async def mission_panel(self, ctx: commands.Context) -> None:
-        """Post the mission-request panel to the configured channel."""
-        missions = self.bot.get_cog("MissionsCog")
-        if missions is None:
-            await ctx.send("Missions cog not loaded.")
+        """(Re)post the mission-request panel to the configured channel. The
+        keeper maintains it automatically afterwards."""
+        keeper = self.bot.get_cog("PanelKeeperCog")
+        if keeper is None:
+            await ctx.send("Panel keeper not loaded.")
             return
         channel_id = self.bot.cfg.automation.mission.panel_channel_id
         channel = self.bot.get_channel(channel_id) if channel_id else ctx.channel
@@ -572,9 +579,8 @@ class AdminCog(commands.Cog):
                 "post from the target channel or fix `automation.mission.panel_channel_id`."
             )
             return
-        await missions.post_panel(channel)
-        if channel.id != ctx.channel.id:
-            await ctx.send(f"✅ Mission panel posted in <#{channel.id}>.")
+        outcome = await keeper.ensure("mission", channel=channel, force=True)
+        await ctx.send(f"✅ Mission panel {outcome} in <#{channel.id}>.")
 
     @fra.command(name="missions")
     async def missions_list(self, ctx: commands.Context, limit: int = 10) -> None:

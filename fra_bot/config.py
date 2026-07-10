@@ -64,6 +64,8 @@ class DiscordChannels:
     admin_approvals: int = 0
     # The member-management panel (dossier button).
     member_panel: int = 0
+    # The training/building request panel.
+    request_panel: int = 0
     # Role pings for alliance mission/event starts (the event pinger).
     event_pings: int = 1421242306136113254
 
@@ -297,6 +299,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 reports=int(channels.get("reports", 0)),
                 admin_approvals=int(channels.get("admin_approvals", 0)),
                 member_panel=int(channels.get("member_panel", 0)),
+                request_panel=int(channels.get("request_panel", 0)),
                 event_pings=int(
                     channels.get("event_pings", 1421242306136113254)
                 ),

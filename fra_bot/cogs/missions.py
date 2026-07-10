@@ -404,10 +404,10 @@ class MissionsCog(commands.Cog):
         else:
             await interaction.response.send_message(content, ephemeral=ephemeral)
 
-    # -- panel posting (called from AdminCog) ---------------------------
+    # -- panel (posted/maintained by the panel keeper) -------------------
 
-    async def post_panel(self, channel: discord.abc.Messageable) -> None:
-        embed = discord.Embed(
+    def panel_embed(self) -> discord.Embed:
+        return discord.Embed(
             title="🚨 Request an alliance mission or event",
             colour=discord.Colour.blurple(),
             description=(
@@ -419,7 +419,9 @@ class MissionsCog(commands.Cog):
                 "You can also use the **/mission** slash command."
             ),
         )
-        await channel.send(embed=embed, view=MissionPanelView(self))
+
+    def panel_view(self) -> discord.ui.View:
+        return MissionPanelView(self)
 
     # -- outcome publisher ----------------------------------------------
 
