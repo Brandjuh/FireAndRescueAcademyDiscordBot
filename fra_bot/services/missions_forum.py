@@ -229,20 +229,34 @@ class MissionsForumService:
         Discord validates the flag against the forum's pre-edit tag list,
         so combining it with the tag creation fails on a fresh forum with
         40066 ("no tags available that can be set by non-moderators")."""
+        def norm(name) -> str:
+            return " ".join(str(name).split()).casefold()
+
         current = list(forum.available_tags)
-        names = {tag.name for tag in current}
+        names = {norm(tag.name) for tag in current}
         # Renamed tags keep their id: the rename happens in place, so posts
-        # already carrying the old tag follow along automatically.
+        # already carrying the old tag follow along automatically. Matching
+        # is case/whitespace-tolerant, and when BOTH names exist somehow,
+        # the stale old tag is dropped instead of lingering forever.
         renamed = []
         for old, new in catalog.RENAMED_TAGS.items():
-            if old in names and new not in names:
-                for tag in current:
-                    if tag.name == old:
-                        tag.name = new
-                        renamed.append(f"{old} → {new}")
-                        names = (names - {old}) | {new}
-                        break
-        missing = [name for name in catalog.FORUM_TAG_EMOJI if name not in names]
+            old_n, new_n = norm(old), norm(new)
+            if old_n not in names:
+                continue
+            if new_n in names:
+                current = [t for t in current if norm(t.name) != old_n]
+                names.discard(old_n)
+                renamed.append(f"removed stale tag '{old}'")
+                continue
+            for tag in current:
+                if norm(tag.name) == old_n:
+                    tag.name = new
+                    renamed.append(f"{old} → {new}")
+                    names = (names - {old_n}) | {new_n}
+                    break
+        missing = [
+            name for name in catalog.FORUM_TAG_EMOJI if norm(name) not in names
+        ]
         # The fallback tag has priority: it is what keeps a tag-less
         # mission postable once require_tag is on.
         missing.sort(key=lambda name: name != catalog.FALLBACK_TAG)
