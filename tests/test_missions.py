@@ -993,18 +993,186 @@ async def test_waiting_event_does_not_starve_free_large(db):
     assert (await sched.missions.get(large_id))["status"] == "skipped"  # dry-run start
 
 
-async def test_recheck_loop_is_bounded(db):
-    """A queue of only-waiting items stops after a few form re-checks per
-    poll instead of walking the whole queue."""
-    from fra_bot.services.missions import _MAX_RECHECKS_PER_POLL
+async def test_closed_cooldown_checks_one_form_per_kind(db):
+    """The cooldown is per kind and alliance-wide: once one queued item
+    hears 'window closed', the rest of that kind is skipped this poll —
+    not re-fetched one by one."""
     client = FakeClient(_WAITING, _EVENT_WAITING)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    for i in range(8):
+        await _enqueue(sched, location_text=f"Spot {i}")
+    await sched._advance()
+    form_fetches = [p for p in client.fetched if "tlat" in p]
+    assert len(form_fetches) == 1                       # one answer serves all
+
+
+async def test_transient_rechecks_are_bounded(db):
+    """Transient failures (form unreadable) don't share a cooldown, so each
+    item retries individually — but bounded, so one poll can't walk the
+    whole queue."""
+    from fra_bot.services.missions import _MAX_RECHECKS_PER_POLL
+    client = FakeClient("<html><body>maintenance</body></html>")
     sched = _scheduler(_cfg(dry_run=True), client, db)
     for i in range(_MAX_RECHECKS_PER_POLL + 3):
         await _enqueue(sched, location_text=f"Spot {i}")
     await sched._advance()
-    # Only the bounded number of forms was fetched this poll.
     form_fetches = [p for p in client.fetched if "tlat" in p]
     assert len(form_fetches) == _MAX_RECHECKS_PER_POLL
+
+
+async def test_queued_events_dont_starve_large_in_same_poll(db):
+    """The exact live situation: five pending recurring events ahead of a
+    large request (lower ids). One poll checks the event window ONCE, skips
+    the other events, and still starts the free large mission."""
+    client = FakeClient(_ELIGIBLE, _EVENT_WAITING)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    event_ids = [
+        await _enqueue(sched, kind="event", event_type_id=1, recurring=1,
+                       location_text=f"Event {i}")
+        for i in range(5)
+    ]
+    large_id = await _enqueue(sched, location_text="New York City")
+    await sched._advance()                              # ONE poll
+    assert (await sched.missions.get(event_ids[0]))["status"] == "waiting"
+    for eid in event_ids[1:]:                           # skipped, not walked
+        assert (await sched.missions.get(eid))["status"] == "pending"
+    assert (await sched.missions.get(large_id))["status"] == "skipped"  # dry-run start
+    event_fetches = [p for p in client.fetched if "Event" in p]
+    assert len(event_fetches) == 1
+
+
+async def test_two_startable_kinds_still_one_start_per_poll(db):
+    """Both windows free, an event and a large queued: one poll starts
+    exactly ONE of them (the older request); the other follows next poll.
+    Pins the 'at most one start per poll' contract against the
+    blocked-kinds machinery."""
+    client = FakeClient(_ELIGIBLE, _EVENT)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    event_id = await _enqueue(sched, kind="event", event_type_id=1)
+    large_id = await _enqueue(sched)
+    await sched._advance()
+    statuses = {
+        (await sched.missions.get(event_id))["status"],
+        (await sched.missions.get(large_id))["status"],
+    }
+    assert statuses == {"done", "pending"}              # one started, one waits
+    assert client.post_calls == 1
+
+
+async def test_recheck_budget_trip_keeps_rotation_out(db):
+    """When the transient-recheck budget is spent with member requests
+    still unexamined, the rotation may not grab the free window — member
+    requests keep priority. (The budget trip means we don't KNOW the queue
+    is empty.)"""
+    from fra_bot.services.missions import _MAX_RECHECKS_PER_POLL
+    client = FakeClient("<html><body>maintenance</body></html>")
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    for i in range(_MAX_RECHECKS_PER_POLL + 1):
+        await _enqueue(sched, location_text=f"Spot {i}")
+    rid = await sched.rotation.add(
+        location_text="Rot", kind="large", mission_source="preset",
+        latitude=40.7, longitude=-74.0, address="Rot", created_by="admin",
+    )
+    await sched._advance()
+    assert (await sched.rotation.get(rid))["start_count"] == 0
+
+
+async def test_transient_failures_back_off_and_cooldown_resets_attempts(db):
+    """Transient failures are re-parked with a growing delay (not due the
+    very next poll), and a later healthy cooldown answer resets the
+    attempt counter — an hour of maintenance pages must not permanently
+    retire a request that was merely waiting out its window."""
+    import datetime as dt
+    client = FakeClient("<html><body>maintenance</body></html>")
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    mid = await _enqueue(sched)
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "waiting"
+    assert row["attempts"] == 1
+    assert row["next_attempt_at"] is not None           # backed off, not due now
+    parked = dt.datetime.fromisoformat(row["next_attempt_at"])
+    assert parked > dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=3)
+
+    # The page recovers with the cooldown closed: healthy recheck → reset.
+    client.large_html = _WAITING
+    await sched.missions.set_status(
+        mid, "waiting", "retry now", next_attempt_at=None, announce=False,
+    )
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "waiting"
+    assert row["attempts"] == 0                          # consecutive failures only
+
+
+async def test_rotation_event_head_does_not_starve_large_entry(db):
+    """Rotation mirror of the queue fix: an event entry at the head of the
+    cycle whose 7-day window is closed must not hide a large entry whose
+    24h window is free — the kinds have separate cooldowns."""
+    client = FakeClient(_ELIGIBLE, _EVENT_WAITING)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    ev = await sched.rotation.add(
+        location_text="Tokyo", kind="event", mission_source="preset",
+        event_type_id=1, latitude=35.6, longitude=139.7, address="Tokyo",
+        created_by="admin",
+    )
+    lg = await sched.rotation.add(
+        location_text="NYC", kind="large", mission_source="preset",
+        latitude=40.7, longitude=-74.0, address="NYC",
+        created_by="admin",
+    )
+    handled = await sched._advance()                    # queue empty → rotation
+    assert handled == 1
+    assert (await sched.rotation.get(lg))["start_count"] == 1   # large started
+    assert (await sched.rotation.get(ev))["start_count"] == 0   # event still waiting
+
+
+async def test_real_start_queues_event_ping(db):
+    """A confirmed live start lands in the event-ping outbox with its
+    resolved location, so the pinger can mention the right region role."""
+    from fra_bot.db.repos import EventPingsRepo
+    sched = _scheduler(_cfg(dry_run=False), FakeClient(_ELIGIBLE), db)
+    mid = await _enqueue(sched)
+    await sched._advance()
+    assert (await sched.missions.get(mid))["status"] == "done"
+    pings = await EventPingsRepo(db).unposted()
+    assert len(pings) == 1
+    assert pings[0]["kind"] == "large"
+    assert pings[0]["address"] == "Resolved NYC"
+    assert abs(pings[0]["latitude"] - 40.5) < 1e-6
+
+
+async def test_dry_run_start_does_not_ping(db):
+    from fra_bot.db.repos import EventPingsRepo
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(_ELIGIBLE), db)
+    await _enqueue(sched)
+    await sched._advance()
+    assert await EventPingsRepo(db).unposted() == []
+
+
+async def test_preexisting_far_wait_is_reverified(db):
+    """Rows parked far out by older code (which trusted the computed
+    eligible_at outright) are pulled back within the re-verify horizon."""
+    import datetime as dt
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(_WAITING), db)
+    mid = await _enqueue(sched)
+    await sched.missions.claim(mid)
+    # Computed, not hardcoded: a literal date would silently pass once it
+    # lies in the past (the row is then simply due and takes the normal
+    # recheck path, never exercising the sweep).
+    far = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=10)).isoformat(
+        timespec="seconds"
+    )
+    await sched.missions.set_status(
+        mid, "waiting", f"next free mission at {far}; queued",
+        next_attempt_at=far, announce=False,
+    )
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "waiting"
+    parked = dt.datetime.fromisoformat(row["next_attempt_at"])
+    horizon = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=31)
+    assert parked <= horizon
 
 
 async def test_waiting_next_attempt_capped_at_30_minutes(db):
@@ -1039,3 +1207,93 @@ async def test_rotation_skips_entry_with_open_queue_request(db):
     assert (await sched.missions.get(mid))["status"] == "done"
     entry = await sched.rotation.next_entry()
     assert entry is not None and entry["id"] == row["rotation_id"]
+
+
+# -- game-refused starts: wait + shared backoff, never a spurious failure ----
+
+class RefusingClient(FakeClient):
+    """POST accepted (HTTP 200) but the free cooldown never advances — the
+    game refused the start (another alliance mission/event still running)."""
+
+    async def fetch_page(self, path, *, referer=None):
+        self.fetched.append(path)
+        return self.event_html if "Event" in path else self.large_html
+
+
+async def test_game_refusal_waits_instead_of_failing(db):
+    client = RefusingClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    mid = await _enqueue(sched)
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "waiting"                      # NOT failed
+    assert "still running" in row["status_detail"]
+    assert row["next_attempt_at"] is not None
+    assert await sched.start_backoff_until() is not None   # backoff armed
+
+
+async def test_backoff_blocks_further_post_attempts(db):
+    client = RefusingClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    await _enqueue(sched)
+    await sched._advance()                                 # refused → backoff
+    assert client.post_calls == 1
+    m2 = await _enqueue(sched)
+    await sched._advance()                                 # backoff: no POST
+    assert client.post_calls == 1
+    row = await sched.missions.get(m2)
+    assert row["status"] == "waiting"
+    assert "busy" in row["status_detail"]
+
+
+async def test_confirmed_start_arms_backoff_for_next_kind(db):
+    # The bot knows what it started: right after a confirmed large start,
+    # an event request must wait instead of being submitted (and refused).
+    client = FakeClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    await _enqueue(sched)                                  # large
+    eid = await _enqueue(sched, kind="event")
+    await sched._advance()                                 # large starts
+    assert client.post_calls == 1
+    await sched._advance()                                 # event: backoff
+    assert client.post_calls == 1                          # nothing submitted
+    row = await sched.missions.get(eid)
+    assert row["status"] == "waiting"
+    assert "busy" in row["status_detail"]
+
+
+async def test_game_refusal_gives_up_after_deadline(db):
+    client = RefusingClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    mid = await _enqueue(sched)
+    await db.execute(
+        "UPDATE scheduled_missions SET created_at = ? WHERE id = ?",
+        ("2000-01-01T00:00:00+00:00", mid),
+    )
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    assert row["status"] == "failed"
+    assert "giving up" in row["status_detail"]
+
+
+async def test_rotation_refusal_keeps_turn(db):
+    client = RefusingClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    rid = await sched.rotation.add(location_text="NYC", created_by="admin")
+    handled = await sched._advance()
+    assert handled == 0
+    row = await sched.rotation.get(rid)
+    assert row["last_started_at"] is None                  # turn not consumed
+    assert row["active"] == 1                              # not deactivated
+
+
+async def test_coin_start_bypasses_backoff_and_pings(db):
+    from fra_bot.db.repos import EventPingsRepo
+
+    client = FakeClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=True), client, db)
+    await sched.set_start_backoff()                        # alliance "busy"
+    spec = MissionSpec(location_text="NYC", kind="large", source="preset").validate()
+    outcome = await sched.run_coin_mission(spec, confirm=True)
+    assert outcome.state == "started"                      # coins ignore it
+    assert len(await EventPingsRepo(db).unposted()) == 1

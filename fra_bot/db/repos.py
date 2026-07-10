@@ -1195,6 +1195,7 @@ class MissionsRepo:
         address: str | None = None,
         next_attempt_at: str | None = None,
         bump_attempts: bool = False,
+        reset_attempts: bool = False,
         announce: bool = True,
     ) -> None:
         sets = ["status = ?", "status_detail = ?", "updated_at = ?"]
@@ -1214,6 +1215,8 @@ class MissionsRepo:
         params.append(next_attempt_at)
         if bump_attempts:
             sets.append("attempts = attempts + 1")
+        elif reset_attempts:
+            sets.append("attempts = 0")
         params.append(mission_id)
         await self._db.execute(
             f"UPDATE scheduled_missions SET {', '.join(sets)} WHERE id = ?",
@@ -1274,6 +1277,16 @@ class MissionsRepo:
             "WHERE status IN ('pending', 'waiting') ORDER BY id ASC LIMIT 1"
         ) as cur:
             return await cur.fetchone()
+
+    async def reverify_waiting(self, cap_iso: str) -> int:
+        """Pull every waiting row's next retry within the cap, so parked
+        requests are re-verified against the live form at least that often
+        — including rows parked far out by older code or a skewed clock."""
+        return await self._db.execute(
+            "UPDATE scheduled_missions SET next_attempt_at = ?, updated_at = ? "
+            "WHERE status = 'waiting' AND next_attempt_at > ?",
+            (cap_iso, utcnow_iso(), cap_iso),
+        )
 
     async def open_recurring_unpromoted(self, *, limit: int = 25) -> list[aiosqlite.Row]:
         """Open recurring requests not yet in the rotation — promoted at
@@ -1383,21 +1396,28 @@ class RotationRepo:
         async with self._db.conn.execute(query) as cur:
             return list(await cur.fetchall())
 
-    async def next_entry(self) -> aiosqlite.Row | None:
+    async def next_entry(self, kind: str | None = None) -> aiosqlite.Row | None:
         """The active entry due to run next: least-recently started first,
         never-started (NULL last_started_at) ahead of all, ties by id.
+        With ``kind``, the next entry of that kind only — the large and
+        event cooldowns are separate, so a blocked kind must not hide the
+        other kind's runnable head.
 
         Entries whose ORIGINATING queue request is still open are skipped:
         recurring requests are promoted at intake, so until that first
         queued start happens the rotation must not also start the same
         location — one request would otherwise run twice."""
+        kind_filter = "AND r.kind = ? " if kind is not None else ""
+        params: tuple = (kind,) if kind is not None else ()
         async with self._db.conn.execute(
             "SELECT * FROM mission_rotation r WHERE r.active = 1 "
+            f"{kind_filter}"
             "AND NOT EXISTS (SELECT 1 FROM scheduled_missions m "
             "  WHERE m.rotation_id = r.id "
             "  AND m.status IN ('pending', 'waiting', 'processing')) "
             "ORDER BY (r.last_started_at IS NOT NULL), r.last_started_at, r.id "
-            "LIMIT 1"
+            "LIMIT 1",
+            params,
         ) as cur:
             return await cur.fetchone()
 
@@ -1466,6 +1486,48 @@ class RotationRepo:
             "DELETE FROM mission_rotation WHERE id = ?", (rotation_id,)
         )
         return n == 1
+
+
+class EventPingsRepo:
+    """Outbox of real alliance mission/event starts awaiting a role ping.
+
+    The scheduler adds a row per confirmed start; the EventPinger cog
+    delivers it to Discord and marks it posted. Same pattern as the
+    mission outcome publisher: Discord stays out of the scheduler and a
+    restart between start and ping loses nothing.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def add(
+        self,
+        *,
+        kind: str,
+        name: str | None,
+        address: str | None,
+        latitude: float | None,
+        longitude: float | None,
+    ) -> int:
+        return await self._db.execute_returning_id(
+            "INSERT INTO event_pings (kind, name, address, latitude, longitude, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (kind, name, address, latitude, longitude, utcnow_iso()),
+        )
+
+    async def unposted(self, limit: int = 10) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM event_pings WHERE posted_at IS NULL "
+            "ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def mark_posted(self, ping_id: int) -> None:
+        await self._db.execute(
+            "UPDATE event_pings SET posted_at = ? WHERE id = ?",
+            (utcnow_iso(), ping_id),
+        )
 
 
 class BoardDeletionRepo:

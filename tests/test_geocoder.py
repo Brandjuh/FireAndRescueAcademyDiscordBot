@@ -137,6 +137,37 @@ async def test_search_simplified_retry_still_raises_when_empty(geo):
         await geo.search("St. Nowhere's Clinic")
 
 
+async def test_search_near_phrase_falls_back_to_each_side(geo):
+    # "X near Y" is how members describe places, but geocoders can't parse
+    # relative descriptions — the live failure was 'Okanogan-Wenatchee
+    # National Forest near Yakima, WA, USA'. Each side alone resolves.
+    queries = []
+
+    async def fake_nominatim(path, params):
+        queries.append(params["q"])
+        if params["q"] == "Okanogan-Wenatchee National Forest":
+            return [{"lat": "47.5", "lon": "-120.9",
+                     "display_name": "Okanogan-Wenatchee National Forest, WA"}]
+        return []
+
+    geo._nominatim = fake_nominatim
+    result = await geo.search("Okanogan-Wenatchee National Forest near Yakima, WA, USA")
+    assert abs(result.latitude - 47.5) < 1e-6
+    # Full query, punctuation-stripped retry, then the "near" split.
+    assert queries[-1] == "Okanogan-Wenatchee National Forest"
+
+
+async def test_search_near_fallback_tries_second_side_too(geo):
+    async def fake_nominatim(path, params):
+        if params["q"] == "Yakima, WA, USA":
+            return [{"lat": "46.6", "lon": "-120.5", "display_name": "Yakima"}]
+        return []
+
+    geo._nominatim = fake_nominatim
+    result = await geo.search("Somewhere Unknown near Yakima, WA, USA")
+    assert abs(result.latitude - 46.6) < 1e-6
+
+
 def test_default_geocoder_uses_nominatim_without_key(db):
     g = Geocoder(StateRepo(db))
     url = g._geocode_url("/search", {"q": "NYC"})

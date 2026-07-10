@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -42,6 +43,18 @@ def _simplify_query(query: str) -> str:
     for char in ".'’`\"":
         simplified = simplified.replace(char, "")
     return " ".join(simplified.split())
+
+
+_NEAR_RE = re.compile(r"\s+(?:near|by|around|close to)\s+", re.IGNORECASE)
+
+
+def _near_fallbacks(query: str) -> list[str]:
+    """Fallback queries for relative descriptions: "X near Y" → try "X",
+    then "Y" — geocoders can find either alone but not the combination."""
+    parts = _NEAR_RE.split(query, maxsplit=1)
+    if len(parts) != 2:
+        return []
+    return [p.strip(" ,") for p in parts if p.strip(" ,")]
 
 
 class GeocodeError(RuntimeError):
@@ -176,6 +189,17 @@ class Geocoder:
                     "/search", {"q": cleaned, "format": "jsonv2", "limit": "1"}
                 )
         if not data:
+            # Members describe places relatively ("X near Y") — geocoders
+            # don't parse that. Try each side of the "near", most specific
+            # first, so "Okanogan-Wenatchee National Forest near Yakima, WA"
+            # still lands in the right area.
+            for part in _near_fallbacks(query):
+                data = await self._nominatim(
+                    "/search", {"q": part, "format": "jsonv2", "limit": "1"}
+                )
+                if data:
+                    break
+        if not data:
             raise GeocodeError(f"Nominatim found nothing for {query!r}")
         result = GeocodeResult(
             latitude=float(data[0]["lat"]),
@@ -211,6 +235,34 @@ class Geocoder:
             ),
         )
         return address, place_type
+
+    async def reverse_details(
+        self, latitude: float, longitude: float
+    ) -> dict | None:
+        """The structured address parts (state, country, country_code, …)
+        at a coordinate — what the event pinger maps to a region role.
+        Returns None when the geocoder has no address there."""
+        key = f"{latitude:.5f},{longitude:.5f}"
+        cached = await self._cache_get("reverse_details", key)
+        if cached is not None:
+            return cached or None
+
+        data = await self._nominatim(
+            "/reverse",
+            {
+                "lat": str(latitude),
+                "lon": str(longitude),
+                "format": "jsonv2",
+                "addressdetails": "1",
+            },
+        )
+        details = data.get("address") if isinstance(data, dict) else None
+        if not isinstance(details, dict):
+            details = None
+        await self._state.set(
+            f"geocode/reverse_details/{key}", json.dumps(details or {})
+        )
+        return details
 
     def _geocode_url(self, path: str, params: dict[str, str]) -> str:
         """Build the request URL, injecting the API key when configured."""
