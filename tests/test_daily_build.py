@@ -235,6 +235,38 @@ async def test_daily_build_runs_once_per_day(db):
     assert await svc.daily_build(force=True)    # force bypasses the guard
 
 
+async def test_daily_build_force_runs_even_when_disabled(db):
+    # The manual `!fra dailybuild` trigger works with the schedule off, so
+    # the flow can be verified before enabling it.
+    svc = _svc(db, enabled=False, dry_run=True)
+    lines = await svc.daily_build(force=True)
+    assert len(lines) == 2
+    assert all(line.startswith("📝") for line in lines)
+
+
+async def test_daily_build_forced_dry_run_keeps_todays_slot(db):
+    from fra_bot.services.buildings import DAILY_BUILD_STATE_KEY
+
+    svc = _svc(db, dry_run=True)
+    assert await svc.daily_build(force=True)            # manual preview
+    assert await svc.state.get(DAILY_BUILD_STATE_KEY) is None
+    assert len(await svc.daily_build()) == 2            # schedule still runs
+
+
+async def test_daily_build_forced_live_build_consumes_todays_slot(db, monkeypatch):
+    from fra_bot.services import buildings as buildings_mod
+    from fra_bot.services.buildings import DAILY_BUILD_STATE_KEY
+
+    monkeypatch.setattr(
+        buildings_mod.BrowserBuilder, "available", staticmethod(lambda: True)
+    )
+    svc = _svc(db, dry_run=False)
+    lines = await svc.daily_build(force=True)
+    assert any(line.startswith("✅") for line in lines)  # actually built
+    assert await svc.state.get(DAILY_BUILD_STATE_KEY) is not None
+    assert await svc.daily_build() == []                 # schedule skips today
+
+
 async def test_daily_build_skips_when_funds_below_floor(db):
     svc = _svc(db, dry_run=True, funds=1_000_000, min_funds=2_000_000)
     lines = await svc.daily_build()

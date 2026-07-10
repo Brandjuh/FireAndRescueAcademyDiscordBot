@@ -1067,6 +1067,37 @@ class AdminCog(commands.Cog):
             return
         await ctx.send(result[:1900])
 
+    @fra.command(name="dailybuild")
+    async def daily_build_now(self, ctx: commands.Context) -> None:
+        """Run the daily worldwide auto-build now (hospital + prison at a
+        random real location). Works even when the schedule is off; in
+        dry-run it only reports what it would build. A real build consumes
+        today's slot so the scheduled run won't build again."""
+        lock = self.bot.job_lock("daily-build")
+        if lock.locked():
+            await ctx.send("⏳ The daily build is already running — skipped.")
+            return
+        message = await ctx.send(
+            "⏳ Running the daily worldwide auto-build… "
+            "(geocode + OpenStreetMap lookups can take a minute)"
+        )
+        async with lock:
+            self.bot.presence.mark_running("daily-build")
+            try:
+                summary = await self.bot.buildings.daily_build(force=True)
+            except Exception as exc:  # noqa: BLE001 - surfaced to the admin
+                log.exception("Manual daily build failed")
+                await message.edit(content=f"❌ Daily build failed: {exc}")
+                return
+            finally:
+                self.bot.presence.mark_done("daily-build")
+        if not summary:
+            await message.edit(content="Daily build produced no actions.")
+            return
+        await message.edit(
+            content="\n".join(["🏗️ Daily worldwide auto-build:"] + summary)[:1900]
+        )
+
     @fra.command(name="diag", aliases=["diagnose", "doctor"])
     async def diag(self, ctx: commands.Context) -> None:
         """One-shot health check of every automation path.
