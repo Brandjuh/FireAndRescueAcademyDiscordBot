@@ -164,6 +164,20 @@ def test_derive_tags_disciplines_and_attributes():
     assert catalog.derive_tags(EXPLOSION) == ["Fire"]
 
 
+def test_extension_tag_ignores_plain_station_counts():
+    """Nearly every mission requires N stations — that must NOT tag it
+    (the old Unlock Needed tag sat on every post and filtered nothing)."""
+    stations_only = {
+        "id": "10", "name": "Everyday Fire", "mission_categories": ["fire"],
+        "prerequisites": {"main_building": 0, "fire_stations": 4},
+    }
+    assert "Extension Needed" not in catalog.derive_tags(stations_only)
+    with_extension = json.loads(json.dumps(stations_only))
+    with_extension["prerequisites"]["tow_truck_extension"] = 1
+    assert "Extension Needed" in catalog.derive_tags(with_extension)
+    assert "Unlock Needed" not in catalog.FORUM_TAG_EMOJI
+
+
 def test_derive_tags_variation_and_prisoners():
     tags = catalog.derive_tags(OVERLAY)
     assert "Police" in tags and "Wildfire" in tags
@@ -276,7 +290,7 @@ class FakeMessage:
 class FakeThread:
     _next_id = 5000
 
-    def __init__(self, name, embed, applied_tags, bot):
+    def __init__(self, name, embed, applied_tags, bot, forum=None):
         FakeThread._next_id += 1
         self.id = FakeThread._next_id
         self.name = name
@@ -286,7 +300,14 @@ class FakeThread:
         self.starter_deleted = False
         self.jump_url = f"https://discord.com/channels/1/{self.id}"
         self.edit_calls = []
+        self._bot = bot
+        self._forum = forum
         bot.add_channel(self)
+
+    async def delete(self):
+        self._bot.remove_channel(self.id)
+        if self._forum is not None and self in self._forum.threads:
+            self._forum.threads.remove(self)
 
     async def fetch_message(self, message_id):
         assert message_id == self.id
@@ -350,7 +371,7 @@ class FakeForum:
                 "A tag is required to create a forum post in this channel "
                 "(error code: 40067)"
             )
-        thread = FakeThread(name, embed, applied_tags, self._bot)
+        thread = FakeThread(name, embed, applied_tags, self._bot, forum=self)
         self.threads.append(thread)
         return SimpleNamespace(thread=thread, message=thread.starter)
 
@@ -454,6 +475,61 @@ async def test_fresh_forum_gets_tags_then_flag_in_two_steps(db):
     created, forum2 = await service.ensure_tags(forum)
     assert set(created) == set(catalog.FORUM_TAG_EMOJI)
     assert forum2.flags.require_tag is True
+
+
+async def test_old_unlock_tag_is_renamed_in_place(db):
+    """An existing forum with the old tag keeps the tag's id — the rename
+    travels to every already-tagged post automatically."""
+    service, forum, _, _ = _service(db, _missions())
+    old = discord.ForumTag(name="Unlock Needed", emoji="🔓")
+    old.id = 424242
+    forum.available_tags = [old]
+    changes, forum2 = await service.ensure_tags(forum)
+    names = {t.name for t in forum2.available_tags}
+    assert "Extension Needed" in names and "Unlock Needed" not in names
+    renamed = next(t for t in forum2.available_tags if t.name == "Extension Needed")
+    assert renamed.id == 424242  # same tag, renamed — not a new one
+    assert "Unlock Needed → Extension Needed" in changes
+
+
+async def test_stop_halts_the_sync_and_next_run_continues(db):
+    service, forum, _, _ = _service(db, _missions())
+
+    async def stopping_pause(writes):
+        service.request_stop()  # as if the admin ran `!fra missionsforum stop`
+
+    service._pause = stopping_pause
+    summary = await service.sync()
+    assert summary["created"] == 1 and summary["stopped"] is True
+    assert any("stopped" in line for line in summary["lines"])
+    # A stopped run never counts as a completed backfill.
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.missions_forum import STATE_BACKFILL_DONE
+
+    assert await StateRepo(db).get(STATE_BACKFILL_DONE) is None
+    # The stop flag resets: the next run finishes the job.
+    async def no_pause(writes):
+        return None
+
+    service._pause = no_pause
+    summary = await service.sync()
+    assert summary["created"] == 2 and summary["stopped"] is False
+    assert len(forum.threads) == 3
+
+
+async def test_wipe_deletes_everything_and_resync_is_quiet(db):
+    payload = _missions()
+    cfg = _cfg(announce_new=True)
+    service, forum, announce, _ = _service(db, payload, cfg)
+    await service.sync()  # completes → backfill flag set
+    summary = await service.wipe()
+    assert summary["deleted"] == 3 and summary["failed"] == 0
+    assert forum.threads == []
+    assert await MissionsForumRepo(db).count() == 0
+    # The repost after a wipe is a fresh backfill: no announcement flood.
+    summary = await service.sync()
+    assert summary["created"] == 3 and summary["announced"] == 0
+    assert announce.sent == []
 
 
 async def test_fallback_tag_wins_when_foreign_tags_fill_slots(db):

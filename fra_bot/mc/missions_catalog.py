@@ -23,7 +23,9 @@ EINSAETZE_PATH = "/einsaetze.json"
 # Bump to force a re-render of every forum post after format changes: the
 # version is hashed together with the raw mission data, so a bump makes
 # every stored content_hash stale at once.
-FORMAT_VERSION = "missions-forum-v1"
+# v2: "Unlock Needed" tag became "Extension Needed" (extension
+# prerequisites only — plain station counts tagged every single mission).
+FORMAT_VERSION = "missions-forum-v2"
 
 # average_credits at or above this gets the "High Credits" tag.
 HIGH_CREDITS_THRESHOLD = 10_000
@@ -243,11 +245,20 @@ ATTRIBUTE_TAG_EMOJI: dict[str, str] = {
     "Prisoners": "🚔",
     "Towing": "🧲",
     "Training Needed": "🎓",
-    "Unlock Needed": "🔓",
+    "Extension Needed": "🔓",
     "POI Only": "📍",
     "High Credits": "💰",
     "Variation": "🔁",
     "Event": "🎪",
+}
+
+# Old tag name → new: renamed in place on the forum (the tag keeps its id,
+# so already-tagged posts follow the rename automatically).
+RENAMED_TAGS: dict[str, str] = {
+    # Nearly every mission has SOME prerequisite (a station count), so the
+    # old tag sat on every post and filtered nothing. The new one fires
+    # only on real extension/expansion requirements.
+    "Unlock Needed": "Extension Needed",
 }
 
 # Last-resort tag so no post is ever tag-less: the forum requires a tag,
@@ -600,8 +611,14 @@ def _has_training_requirement(mission: dict[str, Any]) -> bool:
     )
 
 
-def _has_unlock_requirement(mission: dict[str, Any]) -> bool:
-    return bool(unlock_lines(mission))
+def _needs_extension(mission: dict[str, Any]) -> bool:
+    """A REAL extension/expansion prerequisite — plain station counts do
+    not count (nearly every mission has those, so they filter nothing)."""
+    prerequisites = mission.get("prerequisites") or {}
+    return any(
+        key in EXTENSION_NAMES and not _empty(value) and not isinstance(value, dict)
+        for key, value in prerequisites.items()
+    )
 
 
 def _is_variation(mission: dict[str, Any]) -> bool:
@@ -648,8 +665,8 @@ def derive_tags(mission: dict[str, Any]) -> list[str]:
         attributes.append("Towing")
     if _has_training_requirement(mission):
         attributes.append("Training Needed")
-    if _has_unlock_requirement(mission):
-        attributes.append("Unlock Needed")
+    if _needs_extension(mission):
+        attributes.append("Extension Needed")
     if poi_list(mission):
         attributes.append("POI Only")
     try:

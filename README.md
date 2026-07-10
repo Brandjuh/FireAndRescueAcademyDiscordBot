@@ -237,6 +237,8 @@ Requires Discord administrator permission or a role listed in
 | `!fra missionsforum` | Missions-database forum status (tracked posts, schedule, announcements) |
 | `!fra missionsforum sync [limit\|force]` | Sync einsaetze.json into the forum now; a number caps this run's posts, `force` re-renders everything |
 | `!fra missionsforum adopt` | Rebuild the mission→post mapping from the forum's thread titles (DB-loss recovery, prevents duplicates) |
+| `!fra missionsforum stop` | Stop the running missions-forum sync/wipe after the current post |
+| `!fra missionsforum wipe CONFIRM` | Delete every mission post from the forum and forget the mapping (paced; a later sync reposts fresh) |
 | `!fra dump <path> [rendered]` | Upload a MissionChief page's HTML for inspection (CSRF tokens redacted; `rendered` runs it through Playwright) |
 | `!fra update` | Pull the latest code, install deps and restart the bot |
 | `!fra restart` | Restart the bot to reload `config.yaml` / `.env` (no code update) |
@@ -368,9 +370,9 @@ Every mission MissionChief can generate (from the game's own
 generating building, vehicle/equipment requirements, trainings, unlock
 prerequisites, patients (count, transport chance, hospital departments),
 prisoners, vehicles to tow, POIs and expandable missions. The bot manages
-the forum itself — it creates the 18-tag set (9 disciplines like Fire/EMS/
-Police/Water, 9 attributes like Patients/Prisoners/High Credits, max 5 per
-post) and turns "require a tag" on.
+the forum itself — it creates the tag set (9 disciplines like Fire/EMS/
+Police/Water, plus attributes like Patients, Prisoners, Extension Needed
+and High Credits, max 5 per post) and turns "require a tag" on.
 
 Point it at a forum with `!fra set missions_forum <forum channel id>` and
 enable the daily check with `!fra set automation.missions_forum.enabled on`

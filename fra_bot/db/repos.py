@@ -1825,6 +1825,12 @@ class MissionsForumRepo:
             row = await cur.fetchone()
         return int(row["n"]) if row else 0
 
+    async def all(self) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM missions_forum_posts"
+        ) as cur:
+            return list(await cur.fetchall())
+
     async def record(
         self, mission_key: str, thread_id: int, content_hash: str, name: str
     ) -> None:
