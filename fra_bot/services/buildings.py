@@ -19,6 +19,7 @@ import datetime as dt
 import json
 import logging
 import random
+from dataclasses import replace
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -1102,8 +1103,30 @@ class BuildingsService(BoardRequestService):
                     building_type, chosen.name, city,
                     len(parse_candidates(data, want=building_type)), len(fresh),
                 )
-                return chosen
+                return await self._with_address(chosen, city)
         return None
+
+    async def _with_address(self, candidate, city: str):
+        """Guarantee the candidate carries an address. Most OSM facilities
+        have no addr:* tags, and MissionChief's own pin→address lookup is
+        US-centric — without this, a worldwide build is refused with "no
+        address could be resolved". Our reverse geocoder works worldwide;
+        as a last resort the facility name + city is address enough (the
+        build itself runs on the coordinates)."""
+        if candidate.address:
+            return candidate
+        address = None
+        try:
+            address, _ = await self._geocoder.reverse(
+                candidate.latitude, candidate.longitude
+            )
+        except GeocodeError as exc:
+            log.warning(
+                "daily build: reverse geocode of %.5f,%.5f failed (%s); "
+                "using the facility name as the address",
+                candidate.latitude, candidate.longitude, exc,
+            )
+        return replace(candidate, address=address or f"{candidate.name}, {city}")
 
     async def _existing_buildings(self) -> list:
         """Current buildings (with coords) for the proximity dedup: our own
