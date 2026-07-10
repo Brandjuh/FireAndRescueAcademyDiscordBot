@@ -93,6 +93,8 @@ SETTINGS: tuple[Setting, ...] = (
             aliases=("verified_role",)),
     Setting("discord.channels.member_panel", "int", True,
             "Member-management panel channel (dossier button)"),
+    Setting("discord.channels.request_panel", "int", True,
+            "Training/building request panel channel"),
     Setting("discord.channels.event_pings", "int", True,
             "Role pings for alliance mission/event starts"),
     Setting("discord.notify_event_role_id", "int", True,

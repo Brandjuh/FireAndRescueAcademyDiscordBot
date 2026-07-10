@@ -215,18 +215,10 @@ class DossierCog(commands.Cog):
             return
         await self.open_dossier(interaction, query)
 
-    @commands.command(name="memberpanel")
-    async def member_panel(self, ctx: commands.Context) -> None:
-        """(Re)post the member-management panel in its channel."""
-        if not is_fra_admin_ctx(ctx):
-            await ctx.send("⛔ You don't have permission to use that command.")
-            return
-        channel_id = getattr(self.bot.cfg.discord.channels, "member_panel", 0)
-        channel = self.bot.get_channel(channel_id) if channel_id else ctx.channel
-        if channel is None:
-            await ctx.send("⚠️ Set the panel channel first: `!fra set member_panel <id>`.")
-            return
-        embed = discord.Embed(
+    # -- panel (posted/maintained by the panel keeper) -----------------------
+
+    def panel_embed(self) -> discord.Embed:
+        return discord.Embed(
             title=f"📇 {PANEL_TITLE}",
             colour=discord.Colour.blurple(),
             description=(
@@ -236,6 +228,24 @@ class DossierCog(commands.Cog):
                 "(also members who are not in Discord)."
             ),
         )
-        await channel.send(embed=embed, view=DossierPanelView(self))
-        if channel is not ctx.channel:
-            await ctx.send(f"✅ Panel posted in {channel.mention}.")
+
+    def panel_view(self) -> discord.ui.View:
+        return DossierPanelView(self)
+
+    @commands.command(name="memberpanel")
+    async def member_panel(self, ctx: commands.Context) -> None:
+        """(Re)post the member-management panel in its channel."""
+        if not is_fra_admin_ctx(ctx):
+            await ctx.send("⛔ You don't have permission to use that command.")
+            return
+        keeper = self.bot.get_cog("PanelKeeperCog")
+        if keeper is None:
+            await ctx.send("Panel keeper not loaded.")
+            return
+        channel_id = getattr(self.bot.cfg.discord.channels, "member_panel", 0)
+        channel = self.bot.get_channel(channel_id) if channel_id else ctx.channel
+        if channel is None:
+            await ctx.send("⚠️ Set the panel channel first: `!fra set member_panel <id>`.")
+            return
+        outcome = await keeper.ensure("member", channel=channel, force=True)
+        await ctx.send(f"✅ Member panel {outcome} in {channel.mention}.")

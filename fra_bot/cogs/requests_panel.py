@@ -308,10 +308,10 @@ class RequestsCog(commands.Cog):
             ephemeral=True,
         )
 
-    # -- panel --------------------------------------------------------------
+    # -- panel (posted/maintained by the panel keeper) -----------------------
 
-    async def post_panel(self, channel: discord.abc.Messageable) -> None:
-        embed = discord.Embed(
+    def panel_embed(self) -> discord.Embed:
+        return discord.Embed(
             title="🚒 Fire & Rescue Academy — requests",
             colour=discord.Colour.red(),
             description=(
@@ -327,7 +327,9 @@ class RequestsCog(commands.Cog):
                 "announced in the log channel._"
             ),
         )
-        await channel.send(embed=embed, view=RequestPanelView(self))
+
+    def panel_view(self) -> discord.ui.View:
+        return RequestPanelView(self)
 
     # -- reminders ------------------------------------------------------------
 

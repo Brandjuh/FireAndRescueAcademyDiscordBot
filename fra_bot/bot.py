@@ -158,6 +158,7 @@ class FRABot(commands.Bot):
         from .cogs.membersync import MemberSyncCog
         from .cogs.missions import MissionPanelView, MissionsCog
         from .cogs.notifications import NotificationsCog
+        from .cogs.panels import PanelKeeperCog
         from .cogs.reporting import ReportingCog
         from .cogs.reports import ReportsCog
         from .cogs.requests_panel import RequestPanelView, RequestsCog
@@ -172,6 +173,7 @@ class FRABot(commands.Bot):
         await self.add_cog(MemberSyncCog(self))
         await self.add_cog(DossierCog(self))
         await self.add_cog(EventPingerCog(self))
+        await self.add_cog(PanelKeeperCog(self))
 
         # Persistent panels survive restarts; register their views.
         missions_cog = self.get_cog("MissionsCog")

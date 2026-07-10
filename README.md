@@ -220,7 +220,9 @@ Requires Discord administrator permission or a role listed in
 | `!fra automation` | Board automation switches, dry-run state, recent requests |
 | `!fra sync <trainings\|buildings\|events>` | Poll a board thread now |
 | `!fra sync missions` | Advance the mission/event queue + rotation now |
-| `!fra missionpanel` | Post the "Request a mission" panel to the configured channel |
+| `!fra missionpanel` | Force-repost the mission panel (panels also place/refresh themselves automatically) |
+| `!fra requestpanel` | Force-repost the training/building request panel |
+| `!memberpanel` | Force-repost the member-management panel |
 | `!fra missions [limit]` | List recent scheduled missions and their status |
 | `!fra cancelmission <id>` | Cancel a not-yet-started scheduled mission |
 | `!fra deletemission <id\|all>` | Delete a mission row (any status); `all` clears finished ones |
@@ -259,8 +261,8 @@ One system handles every mission/event request. A request has four choices:
 Requests arrive three ways:
 
 * the **/mission** slash command (with `kind` / `schedule` / `preset` /
-  `saved` / `custom` / event options), or the button on the panel posted by
-  `!fra missionpanel` (channel set by `automation.mission.panel_channel_id`);
+  `saved` / `custom` / event options), or the button on the mission panel
+  (channel set by `automation.mission.panel_channel_id`);
 * a **board post** — just a location, no command word needed. Each request
   board has a default kind: the **events board** (`automation.events.thread_id`,
   enabled by `automation.events.enabled`) starts an alliance **event**; the
@@ -312,6 +314,20 @@ Bermuda postal codes as text fallbacks). The embed shows what started,
 where, the region, and the next queued/rotation location with its expected
 start time. Dry-run starts never ping; stale pings (>24h) are dropped.
 Both settings can be changed live with `!fra set`.
+
+### Self-maintaining panels
+
+The Discord panels (mission requests, training/building requests, member
+management) place and replace themselves — no manual reposting. On startup
+and every half hour the bot makes sure each configured panel channel holds
+exactly **one** current panel: a missing/deleted panel is posted, a panel
+whose text changed with an update is **edited in place** (it keeps its
+position), a panel whose channel changed in config moves along, and stray
+old copies are cleaned up. Channels: `automation.mission.panel_channel_id`
+(mission), `discord.channels.request_panel` (training/building) and
+`discord.channels.member_panel` (member management) — all settable live
+with `!fra set`; 0 disables a panel. The manual commands still exist for a
+forced repost.
 
 ### Updating from Discord
 

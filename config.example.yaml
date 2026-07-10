@@ -57,6 +57,7 @@ discord:
     reports: 0            # daily / monthly income reports
     admin_approvals: 0    # approve/deny embeds for requests needing a decision
     member_panel: 0       # member-management panel (dossier button)
+    request_panel: 0      # training/building request panel
     # Eventpinger: role pings for every alliance mission/event the bot
     # actually starts (Notify-Event role + resolved region role).
     event_pings: 1421242306136113254
