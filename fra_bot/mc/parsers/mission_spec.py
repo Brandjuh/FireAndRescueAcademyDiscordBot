@@ -73,7 +73,11 @@ def is_mission_post(content: str) -> bool:
     mission and a bare-location event both live on the same board thread, so
     without this a mission post (which usually carries a maps link) would be
     picked up by BOTH consumers and started twice."""
-    return _TRIGGER_RE.search(content or "") is not None
+    if _TRIGGER_RE.search(content or "") is not None:
+        return True
+    from .mission_template import looks_like_template
+
+    return looks_like_template(content or "")
 
 
 @dataclass
@@ -326,6 +330,29 @@ def parse_board_request(
     # Skip our own posts: the reply marker "[FRA]" and guide markers "[FRA-…]".
     if not raw or raw.startswith("[FRA"):
         return None
+
+    # The copy-paste Own-mission template from the guide gets first go: a
+    # filled-in field list is a complete custom request on its own (a
+    # deleted line means 0), regardless of which board it lands on.
+    from .mission_template import looks_like_template, parse_template
+
+    if looks_like_template(raw):
+        try:
+            location, caption, values = parse_template(raw)
+        except CustomMissionError as exc:
+            raise MissionSpecError(str(exc)) from exc
+        if not location:
+            raise MissionSpecError(
+                "the template is missing its Location — put the place name "
+                "(or a maps link) on the line under 'Location:'"
+            )
+        return MissionSpec(
+            location_text=location,
+            kind="large",  # Own missions are large scale by definition
+            source="custom",
+            custom=CustomMission(caption=(caption or location), values=values),
+            recurring=_RECURRING_RE.search(content) is not None,
+        ).validate()
 
     kind_match = _KEY_RE["kind"].search(content)
     kind = (kind_match.group(1).lower() if kind_match else default_kind)

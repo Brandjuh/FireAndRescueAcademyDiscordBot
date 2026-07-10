@@ -1403,6 +1403,8 @@ def _board_guide(default_kind: str, min_rate: float) -> str:
             "Amsterdam, Netherlands",
             "https://maps.app.goo.gl/xxxxx",
         ])
+    from ..mc.parsers.mission_template import HOSPITAL_DEPARTMENTS, render_template
+
     return "\n".join([
         _guide_marker("large"),
         "[b]Large Scale Mission Request Guide[/b]",
@@ -1419,10 +1421,23 @@ def _board_guide(default_kind: str, min_rate: float) -> str:
         f"- If your alliance contribution is below {min_rate:g}%, the "
         "request is skipped.",
         "",
-        "[b]Optional lines for your own mission[/b]",
+        "[b]Own mission — copy the template below[/b]",
+        "- Copy the whole list, fill in your location, a name and your "
+        "numbers, and post it.",
+        "- Lines you delete (or leave at 0) count as 0 — only fill in what "
+        "you need.",
+        "- Patient transport probability is a percentage (the template "
+        "default is 50).",
+        "- Hospital department: pick one by name — "
+        + ", ".join(HOSPITAL_DEPARTMENTS.values()) + ".",
+        "- Add a line 'schedule: recurring' to keep the mission coming back.",
+        "",
+        render_template(),
+        "",
+        "[b]Other options[/b]",
         "- name: My mission name",
-        "- custom: need_lf=25 need_elw1=6 water_needed=15000 (your own "
-        "required units)",
+        "- custom: need_lf=25 need_elw1=6 water_needed=15000 (compact form "
+        "of the same thing)",
         "- saved: <name> (start one of the game's Saved Missions by name)",
         "- schedule: recurring (keeps coming back)",
         "",
