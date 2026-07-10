@@ -230,6 +230,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra rotation add <location> [\| kind: event] [\| preset: Pile-up] [\| custom: need_lf=25 …] [\| saved: <name>] [\| name: <caption>]` | Add a location to the rotation |
 | `!fra rotation remove\|on\|off <id>` | Remove, pause or resume a rotation entry |
 | `!fra testbuild <hospital\|prison> <location>` | Test the building flow for a location (dry-run drives the form without submitting) |
+| `!fra dailybuild` | Run the daily worldwide auto-build now (works with the schedule off; dry-run only reports) |
 | `!fra dump <path> [rendered]` | Upload a MissionChief page's HTML for inspection (CSRF tokens redacted; `rendered` runs it through Playwright) |
 | `!fra update` | Pull the latest code, install deps and restart the bot |
 | `!fra restart` | Restart the bot to reload `config.yaml` / `.env` (no code update) |

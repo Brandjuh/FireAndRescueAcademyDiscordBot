@@ -939,15 +939,18 @@ class BuildingsService(BoardRequestService):
         build is gated on the live alliance funds floor — if funds are below
         it, that building is skipped until tomorrow (never dips the treasury).
         Honours ``dry_run``: reports what it would build without submitting.
-        ``force`` bypasses the once-a-day guard (for a manual trigger)."""
-        if not self._auto.daily_build_enabled:
+        ``force`` (the manual `!fra dailybuild` trigger) bypasses the enabled
+        switch and the once-a-day guard; it only consumes the day's slot when
+        it actually built something for real."""
+        if not force and not self._auto.daily_build_enabled:
             return []
         today = dt.datetime.now(ZoneInfo(self.cfg.reports.timezone)).strftime("%Y-%m-%d")
         if not force and await self.state.get(DAILY_BUILD_STATE_KEY) == today:
             log.debug("daily build already ran for %s; skipping", today)
             return []
-        # Claim the day up front so a restart can't double-build.
-        await self.state.set(DAILY_BUILD_STATE_KEY, today)
+        if not force:
+            # Claim the day up front so a restart can't double-build.
+            await self.state.set(DAILY_BUILD_STATE_KEY, today)
 
         run_id = await self.runs.start("daily_build")
         summary: list[str] = []
@@ -959,6 +962,9 @@ class BuildingsService(BoardRequestService):
                 summary.append(line)
                 if line.startswith("✅"):
                     built += 1
+            if force and built:
+                # A real manual build uses up today's slot too.
+                await self.state.set(DAILY_BUILD_STATE_KEY, today)
             await self.runs.finish(
                 run_id, status="success", rows_parsed=len(AUTO_BUILD_TYPES),
                 rows_new=built, message=" | ".join(summary)[:500],
