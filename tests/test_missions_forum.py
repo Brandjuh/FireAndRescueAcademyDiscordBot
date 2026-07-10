@@ -492,6 +492,62 @@ async def test_old_unlock_tag_is_renamed_in_place(db):
     assert "Unlock Needed → Extension Needed" in changes
 
 
+def _old_tag_set():
+    """The forum tag set as the first release created it (19 tags with
+    'Unlock Needed' instead of 'Extension Needed'), with real ids."""
+    tags = []
+    for index, name in enumerate(catalog.FORUM_TAG_EMOJI):
+        if name == "Extension Needed":
+            name = "Unlock Needed"
+        tag = discord.ForumTag(name=name, emoji=catalog.FORUM_TAG_EMOJI.get(name, "🔓"))
+        tag.id = 1000 + index
+        tags.append(tag)
+    return tags
+
+
+async def test_live_forum_state_gets_the_rename_via_sync(db):
+    """Mirror of the production forum after the first release: all 19 old
+    tags exist, require_tag is on, posts exist. One sync must rename the
+    tag and report it."""
+    payload = _missions()
+    service, forum, _, _ = _service(db, payload)
+    forum.available_tags = _old_tag_set()
+    forum.flags.require_tag = True
+    summary = await service.sync()
+    names = {t.name for t in forum.available_tags}
+    assert "Extension Needed" in names and "Unlock Needed" not in names
+    assert len(forum.available_tags) == 19  # renamed, not added
+    assert any(
+        "Unlock Needed → Extension Needed" in line for line in summary["lines"]
+    )
+
+
+async def test_rename_tolerates_case_and_whitespace(db):
+    service, forum, _, _ = _service(db, _missions())
+    odd = discord.ForumTag(name="unlock  needed", emoji="🔓")
+    odd.id = 55
+    forum.available_tags = [odd]
+    changes, forum2 = await service.ensure_tags(forum)
+    renamed = next(t for t in forum2.available_tags if t.id == 55)
+    assert renamed.name == "Extension Needed"
+    # And no duplicate "Extension Needed" was created alongside it.
+    assert sum(1 for t in forum2.available_tags if t.name == "Extension Needed") == 1
+
+
+async def test_stale_old_tag_is_removed_when_both_exist(db):
+    service, forum, _, _ = _service(db, _missions())
+    old = discord.ForumTag(name="Unlock Needed", emoji="🔓")
+    old.id = 1
+    new = discord.ForumTag(name="Extension Needed", emoji="🔓")
+    new.id = 2
+    forum.available_tags = [old, new]
+    changes, forum2 = await service.ensure_tags(forum)
+    names = [t.name for t in forum2.available_tags]
+    assert "Unlock Needed" not in names
+    assert names.count("Extension Needed") == 1
+    assert any("removed stale tag" in c for c in changes)
+
+
 async def test_stop_halts_the_sync_and_next_run_continues(db):
     service, forum, _, _ = _service(db, _missions())
 
