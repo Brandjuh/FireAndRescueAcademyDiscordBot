@@ -68,6 +68,11 @@ class DiscordChannels:
     request_panel: int = 0
     # Role pings for alliance mission/event starts (the event pinger).
     event_pings: int = 1421242306136113254
+    # The missions-database forum (one post per einsaetze.json mission);
+    # 0 = feature off.
+    missions_forum: int = 0
+    # Announcements for newly added missions (link to the forum post).
+    mission_announce: int = 1524842963316773036
 
 
 @dataclass(frozen=True)
@@ -134,6 +139,19 @@ class MissionAutomationConfig:
 
 
 @dataclass(frozen=True)
+class MissionsForumConfig:
+    """The missions-database forum: every mission from einsaetze.json as a
+    tagged forum post, checked daily for new/changed missions. The forum
+    channel itself is ``discord.channels.missions_forum``; ``announce_new``
+    additionally pings ``discord.channels.mission_announce`` with a link
+    whenever a brand-new mission appears (off by default)."""
+    enabled: bool
+    sync_time: str  # "HH:MM" in reports.timezone
+    announce_new: bool
+    max_posts_per_run: int
+
+
+@dataclass(frozen=True)
 class TaxWarningsConfig:
     """Automated member tax (5% alliance donation) warnings: in-game PMs
     with escalating severity, a kick flag after three unresolved warnings,
@@ -156,6 +174,7 @@ class AutomationConfig:
     events: EventsAutomationConfig
     mission: MissionAutomationConfig
     tax_warnings: TaxWarningsConfig
+    missions_forum: MissionsForumConfig
 
 
 @dataclass(frozen=True)
@@ -318,6 +337,10 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 event_pings=int(
                     channels.get("event_pings", 1421242306136113254)
                 ),
+                missions_forum=int(channels.get("missions_forum", 0)),
+                mission_announce=int(
+                    channels.get("mission_announce", 1524842963316773036)
+                ),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])
@@ -385,6 +408,23 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 min_contribution_rate=float(
                     _get(raw, "automation", "mission", "min_contribution_rate", default=5.0)
+                ),
+            ),
+            missions_forum=MissionsForumConfig(
+                enabled=bool(
+                    _get(raw, "automation", "missions_forum", "enabled", default=False)
+                ),
+                sync_time=str(
+                    _get(raw, "automation", "missions_forum", "sync_time", default="04:00")
+                ),
+                announce_new=bool(
+                    _get(raw, "automation", "missions_forum", "announce_new", default=False)
+                ),
+                max_posts_per_run=int(
+                    _get(
+                        raw, "automation", "missions_forum", "max_posts_per_run",
+                        default=100,
+                    )
                 ),
             ),
             tax_warnings=TaxWarningsConfig(

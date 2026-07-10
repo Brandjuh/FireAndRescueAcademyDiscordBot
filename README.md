@@ -234,6 +234,9 @@ Requires Discord administrator permission or a role listed in
 | `!fra testbuild <hospital\|prison> <location>` | Test the building flow for a location (dry-run drives the form without submitting) |
 | `!fra dailybuild` | Run the daily worldwide auto-build now (works with the schedule off; dry-run only reports) |
 | `!fra taxwarnings [scan]` | List members below the 5% donation minimum with their warning count; `scan` runs a warning pass now |
+| `!fra missionsforum` | Missions-database forum status (tracked posts, schedule, announcements) |
+| `!fra missionsforum sync [limit\|force]` | Sync einsaetze.json into the forum now; a number caps this run's posts, `force` re-renders everything |
+| `!fra missionsforum adopt` | Rebuild the mission→post mapping from the forum's thread titles (DB-loss recovery, prevents duplicates) |
 | `!fra dump <path> [rendered]` | Upload a MissionChief page's HTML for inspection (CSRF tokens redacted; `rendered` runs it through Playwright) |
 | `!fra update` | Pull the latest code, install deps and restart the bot |
 | `!fra restart` | Restart the bot to reload `config.yaml` / `.env` (no code update) |
@@ -357,6 +360,33 @@ old copies are cleaned up. Channels: `automation.mission.panel_channel_id`
 `discord.channels.member_panel` (member management) — all settable live
 with `!fra set`; 0 disables a panel. The manual commands still exist for a
 forced repost.
+
+### Missions-database forum
+
+Every mission MissionChief can generate (from the game's own
+`einsaetze.json`) gets its **own forum post**, fully in English: credits,
+generating building, vehicle/equipment requirements, trainings, unlock
+prerequisites, patients (count, transport chance, hospital departments),
+prisoners, vehicles to tow, POIs and expandable missions. The bot manages
+the forum itself — it creates the 18-tag set (9 disciplines like Fire/EMS/
+Police/Water, 9 attributes like Patients/Prisoners/High Credits, max 5 per
+post) and turns "require a tag" on.
+
+Point it at a forum with `!fra set missions_forum <forum channel id>` and
+enable the daily check with `!fra set automation.missions_forum.enabled on`
+(runs at `sync_time`, default 04:00). New missions are posted; a mission
+whose data changed gets its existing post **edited in place** (no bump, no
+duplicate — dedup lives in SQLite, and `!fra missionsforum adopt` can
+rebuild that mapping from the thread titles after a database loss).
+Missions removed from the game keep their post. The initial ~450-mission
+backfill is paced (2 s between posts, at most `max_posts_per_run` per run,
+default 100), so it spreads over a few runs; `!fra missionsforum sync`
+runs a pass on demand.
+
+Optionally (`!fra set announce_new on`, default **off**) each brand-new
+mission is announced in `discord.channels.mission_announce` (default
+`1524842963316773036`) with a link to its forum post. The initial backfill
+never announces.
 
 ### Updating from Discord
 

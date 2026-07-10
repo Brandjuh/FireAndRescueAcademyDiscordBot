@@ -1790,6 +1790,64 @@ class TaxWarningsRepo:
         )
 
 
+class MissionsForumRepo:
+    """mission_key → forum-thread mapping for the missions-database forum.
+
+    The primary key is what guarantees no mission is ever posted twice;
+    ``content_hash`` (raw einsaetze.json data + format version) decides
+    whether an existing post needs an in-place edit."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def get(self, mission_key: str) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM missions_forum_posts WHERE mission_key = ?",
+            (mission_key,),
+        ) as cur:
+            return await cur.fetchone()
+
+    async def count(self) -> int:
+        async with self._db.conn.execute(
+            "SELECT COUNT(*) AS n FROM missions_forum_posts"
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def record(
+        self, mission_key: str, thread_id: int, content_hash: str, name: str
+    ) -> None:
+        now = utcnow_iso()
+        await self._db.execute(
+            "INSERT INTO missions_forum_posts (mission_key, thread_id, name, "
+            "content_hash, posted_at, updated_at, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(mission_key) DO UPDATE SET "
+            "thread_id = excluded.thread_id, name = excluded.name, "
+            "content_hash = excluded.content_hash, "
+            "updated_at = excluded.updated_at, last_seen_at = excluded.last_seen_at",
+            (mission_key, thread_id, name, content_hash, now, now, now),
+        )
+
+    async def touch_seen(self, mission_keys: list[str]) -> None:
+        """Mark keys as still present in the JSON (bulk, no content change)."""
+        if not mission_keys:
+            return
+        now = utcnow_iso()
+        await self._db.conn.executemany(
+            "UPDATE missions_forum_posts SET last_seen_at = ? WHERE mission_key = ?",
+            [(now, key) for key in mission_keys],
+        )
+        await self._db.conn.commit()
+
+    async def delete(self, mission_key: str) -> None:
+        """Forget a mapping (e.g. its thread was deleted by hand)."""
+        await self._db.execute(
+            "DELETE FROM missions_forum_posts WHERE mission_key = ?",
+            (mission_key,),
+        )
+
+
 def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
     """(daily, monthly) period keys for the current New York game day."""
     from zoneinfo import ZoneInfo

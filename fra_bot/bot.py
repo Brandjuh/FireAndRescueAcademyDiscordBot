@@ -113,6 +113,11 @@ class FRABot(commands.Bot):
         from .services.tax_warnings import TaxWarningService
 
         self.tax_warnings = TaxWarningService(cfg, self.mc, self.db)
+        # The missions-database forum: every einsaetze.json mission as a
+        # tagged forum post, synced daily.
+        from .services.missions_forum import MissionsForumService
+
+        self.missions_forum = MissionsForumService(cfg, self.mc, self.db, self)
         # On-command alliance hospital/prison level + extension upgrades.
         self.building_upgrade = BuildingUpgradeService(cfg, self.mc, self.db)
 
@@ -395,6 +400,19 @@ class FRABot(commands.Bot):
                 name="board-cleanup",
                 initial_delay_seconds=330.0,
             )
+        # Daily missions-forum sync: post new einsaetze.json missions,
+        # refresh changed ones. Discord-only writes; the JSON fetch is a
+        # paced read, so this is safe regardless of dry_run.
+        if automation.missions_forum.enabled:
+            hour, minute = _parse_hhmm(
+                automation.missions_forum.sync_time, default=(4, 0)
+            )
+            sched.add_daily_job(
+                self._guarded(self._missions_forum_pass, "missions-forum"),
+                at=dt.time(hour, minute),
+                timezone=self.cfg.reports.timezone,
+                name="missions-forum",
+            )
         # Member tax (5% donation) warnings: escalating in-game PMs, reset
         # the moment a member fixes their donation. Every action lands in
         # the admin channel.
@@ -412,6 +430,15 @@ class FRABot(commands.Bot):
             automation.building.enabled, automation.events.enabled,
             automation.mission.enabled,
         )
+
+    async def _missions_forum_pass(self) -> None:
+        """One missions-forum sync, with anything noteworthy (new posts,
+        edits, new tags, failures) mirrored to the admin channel."""
+        summary = await self.missions_forum.sync()
+        if summary.get("error") or summary.get("changed"):
+            await self.notify_admin(
+                "📚 **Missions forum**\n" + "\n".join(summary["lines"])[:1800]
+            )
 
     async def _tax_warning_pass(self) -> None:
         """One warning scan, with every action mirrored to the admin

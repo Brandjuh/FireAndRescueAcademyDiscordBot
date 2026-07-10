@@ -900,6 +900,67 @@ class AdminCog(commands.Cog):
         body = "\n".join(lines) if lines else "Nobody — everyone meets the minimum. 🎉"
         await ctx.send(f"{head}\n{body}"[:1900])
 
+    @fra.group(
+        name="missionsforum",
+        aliases=["missionforum", "mforum"],
+        invoke_without_command=True,
+    )
+    async def missions_forum_group(self, ctx: commands.Context) -> None:
+        """Missions-database forum status. Subcommands: `sync [limit|force]`
+        runs a sync now; `adopt` rebuilds the mapping from existing posts."""
+        lines = await self.bot.missions_forum.status_lines()
+        await ctx.send("📚 **Missions forum**\n" + "\n".join(lines)[:1900])
+
+    @missions_forum_group.command(name="sync")
+    async def missions_forum_sync(
+        self, ctx: commands.Context, arg: str = ""
+    ) -> None:
+        """Run a missions-forum sync now. `!fra missionsforum sync 25` caps
+        this run at 25 posts; `!fra missionsforum sync force` re-renders
+        every post even when nothing changed."""
+        lock = self.bot.job_lock("missions-forum")
+        if lock.locked():
+            await ctx.send("⏳ A missions-forum sync is already running.")
+            return
+        force = arg.strip().lower() == "force"
+        limit = None
+        if not force and arg.strip():
+            try:
+                limit = max(1, int(arg))
+            except ValueError:
+                await ctx.send("⚠️ Use a number (post cap) or `force`.")
+                return
+        message = await ctx.send("⏳ Syncing the missions forum…")
+        async with lock:
+            try:
+                summary = await self.bot.missions_forum.sync(
+                    limit=limit, force=force
+                )
+            except Exception as exc:  # surfaced to the operator, not a crash
+                log.exception("Manual missions-forum sync failed")
+                await message.edit(content=f"❌ Sync failed: {exc}")
+                return
+        icon = "❌" if summary.get("error") else "✅"
+        await message.edit(
+            content=f"{icon} Missions forum:\n" + "\n".join(summary["lines"])[:1800]
+        )
+
+    @missions_forum_group.command(name="adopt")
+    async def missions_forum_adopt(self, ctx: commands.Context) -> None:
+        """Rebuild the mission→post mapping from the forum's thread titles
+        (recovery after a database loss — prevents duplicate posts)."""
+        forum = self.bot.missions_forum.forum()
+        if forum is None:
+            await ctx.send(
+                "⚠️ No missions forum configured — `!fra set missions_forum <id>`."
+            )
+            return
+        message = await ctx.send("⏳ Scanning forum threads…")
+        adopted = await self.bot.missions_forum.adopt(forum)
+        await message.edit(
+            content=f"✅ Adopted {adopted} post(s). Content refreshes on the next sync."
+        )
+
     @fra.command(name="nextmission")
     async def next_mission(self, ctx: commands.Context) -> None:
         """Show which mission/event is up next and where (for the eventpinger)."""
