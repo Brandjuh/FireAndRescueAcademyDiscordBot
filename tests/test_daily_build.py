@@ -100,10 +100,11 @@ OVERPASS_DATA = {"elements": [
 
 
 class FakeClient:
-    def __init__(self, *, funds, api_json, alliance_json="[]"):
+    def __init__(self, *, funds, api_json, alliance_json="[]", reverse_address=None):
         self._funds_html = f"<div>Alliance Funds: {funds:,} Credits</div>"
         self._api_json = api_json
         self._alliance_json = alliance_json
+        self._reverse_address = reverse_address
 
     def url(self, path):
         return path
@@ -115,6 +116,9 @@ class FakeClient:
             return self._alliance_json
         if path == "/verband/kasse":
             return self._funds_html
+        if path.startswith("/reverse_address"):
+            # None mimics an unusable answer (rendered page) -> fallback.
+            return self._reverse_address or "<html></html>"
         return "<html></html>"
 
 
@@ -155,7 +159,8 @@ async def db(tmp_path):
 
 
 def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", alliance_json="[]",
-         overpass_data=None, enabled=True, min_funds=2_000_000, seed=0):
+         overpass_data=None, enabled=True, min_funds=2_000_000, seed=0,
+         reverse_address=None):
     from fra_bot.db.repos import RunsRepo, StateRepo
     from fra_bot.services.buildings import BuildingsService
 
@@ -175,7 +180,8 @@ def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", alliance_json="[]"
             from fra_bot.services.building_upgrade import UpgradeReport
             return UpgradeReport(mode="LIVE")
 
-    svc.client = FakeClient(funds=funds, api_json=api_json, alliance_json=alliance_json)
+    svc.client = FakeClient(funds=funds, api_json=api_json, alliance_json=alliance_json,
+                            reverse_address=reverse_address)
     svc.state = StateRepo(db)
     svc.runs = RunsRepo(db)
     svc._geocoder = FakeGeo()
@@ -238,10 +244,20 @@ async def test_daily_build_runs_once_per_day(db):
     assert await svc.daily_build(force=True)    # force bypasses the guard
 
 
+async def test_daily_build_prefers_games_reverse_address(db):
+    # Most OSM facilities carry no addr:* tags; the game's own
+    # /reverse_address endpoint (worldwide — same code as Leitstellenspiel)
+    # is the first source for the missing address.
+    svc = _svc(db, dry_run=True,
+               reverse_address="12 Ring Road, Accra, Greater Accra, Ghana")
+    lines = await svc.daily_build()
+    assert all("12 Ring Road, Accra" in line for line in lines)
+
+
 async def test_daily_build_reverse_geocodes_missing_osm_address(db):
-    # Most OSM facilities carry no addr:* tags and MissionChief's own
-    # pin→address lookup is US-centric — the candidate must reach the
-    # builder with OUR reverse-geocoded address, or worldwide builds are
+    # When the game endpoint answers with something unusable (rendered
+    # page / empty), our reverse geocoder supplies the address — the
+    # candidate must never reach the builder address-less, or the build is
     # refused with "no address could be resolved".
     svc = _svc(db, dry_run=True)
     lines = await svc.daily_build()

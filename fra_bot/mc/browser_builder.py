@@ -373,11 +373,13 @@ class BrowserBuilder:
                     " return a ? a.value : ''; }"
                 ) or "").strip()
 
-                # MissionChief's own reverse_address is US-centric and returns
-                # nothing for many valid worldwide spots. When it's empty, fall
-                # back to OUR geocoded address (the location is fine — the build
-                # runs on the coordinates) and fill the field so it isn't blank.
-                # Only refuse when there's no address from either source.
+                # The page fills #building_address through its own pin lookup
+                # (/reverse_address — worldwide, same code as Leitstellenspiel),
+                # but that in-page hook doesn't always fire under automation.
+                # When the field stays empty, fall back to the address the
+                # caller resolved (the build runs on the coordinates either
+                # way) and fill the field so it isn't blank. Only refuse when
+                # there's no address from either source.
                 if not resolved_address:
                     fallback = (address or "").strip()
                     if fallback:

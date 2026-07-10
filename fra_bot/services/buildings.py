@@ -1107,26 +1107,57 @@ class BuildingsService(BoardRequestService):
         return None
 
     async def _with_address(self, candidate, city: str):
-        """Guarantee the candidate carries an address. Most OSM facilities
-        have no addr:* tags, and MissionChief's own pin→address lookup is
-        US-centric — without this, a worldwide build is refused with "no
-        address could be resolved". Our reverse geocoder works worldwide;
-        as a last resort the facility name + city is address enough (the
-        build itself runs on the coordinates)."""
+        """Guarantee the candidate carries an address — most OSM facilities
+        have no addr:* tags, and the browser flow's in-page address autofill
+        doesn't always fire under automation, so an address-less candidate
+        used to be refused with "no address could be resolved".
+
+        Sources, best first: MissionChief's own /reverse_address endpoint
+        (what the pin lookup itself uses — worldwide, and exactly what the
+        game would fill), then our reverse geocoder, then facility name +
+        city (the build runs on the coordinates, so any real text works)."""
         if candidate.address:
             return candidate
-        address = None
-        try:
-            address, _ = await self._geocoder.reverse(
-                candidate.latitude, candidate.longitude
-            )
-        except GeocodeError as exc:
-            log.warning(
-                "daily build: reverse geocode of %.5f,%.5f failed (%s); "
-                "using the facility name as the address",
-                candidate.latitude, candidate.longitude, exc,
-            )
+        address = await self._game_reverse_address(
+            candidate.latitude, candidate.longitude
+        )
+        if not address:
+            try:
+                address, _ = await self._geocoder.reverse(
+                    candidate.latitude, candidate.longitude
+                )
+            except GeocodeError as exc:
+                log.warning(
+                    "daily build: reverse geocode of %.5f,%.5f failed (%s); "
+                    "using the facility name as the address",
+                    candidate.latitude, candidate.longitude, exc,
+                )
         return replace(candidate, address=address or f"{candidate.name}, {city}")
+
+    async def _game_reverse_address(
+        self, latitude: float, longitude: float
+    ) -> str | None:
+        """MissionChief's marker reverse-address endpoint — the same lookup
+        the /buildings/new pin uses (the reference bot called it before every
+        submit). Returns the address text, or None on any failure."""
+        path = f"/reverse_address?latitude={latitude}&longitude={longitude}"
+        try:
+            text = (
+                await self.client.fetch_page(
+                    path, referer=self.client.url("/buildings/new")
+                )
+            ).strip()
+        except MissionChiefError as exc:
+            log.warning(
+                "daily build: /reverse_address for %.5f,%.5f failed (%s)",
+                latitude, longitude, exc,
+            )
+            return None
+        # The endpoint answers with a bare address line; anything that looks
+        # like a rendered page (re-login, error) is not an address.
+        if not text or "<" in text or "\n" in text or len(text) > 200:
+            return None
+        return text
 
     async def _existing_buildings(self) -> list:
         """Current buildings (with coords) for the proximity dedup: our own
