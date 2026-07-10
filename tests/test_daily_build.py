@@ -122,6 +122,9 @@ class FakeGeo:
     async def search(self, query):
         return GeocodeResult(40.0, -74.0, f"Center of {query}", "nominatim_search")
 
+    async def reverse(self, latitude, longitude):
+        return (f"1 Main St, Faketown {latitude:.3f}", None)
+
 
 class FakeOverpass:
     def __init__(self, data):
@@ -233,6 +236,31 @@ async def test_daily_build_runs_once_per_day(db):
     assert len(first) == 2
     assert await svc.daily_build() == []       # same day -> guard blocks
     assert await svc.daily_build(force=True)    # force bypasses the guard
+
+
+async def test_daily_build_reverse_geocodes_missing_osm_address(db):
+    # Most OSM facilities carry no addr:* tags and MissionChief's own
+    # pin→address lookup is US-centric — the candidate must reach the
+    # builder with OUR reverse-geocoded address, or worldwide builds are
+    # refused with "no address could be resolved".
+    svc = _svc(db, dry_run=True)
+    lines = await svc.daily_build()
+    assert all("1 Main St, Faketown" in line for line in lines)
+
+
+async def test_daily_build_names_the_place_when_reverse_fails(db):
+    from fra_bot.geo.geocoder import GeocodeError
+
+    class DeadReverseGeo(FakeGeo):
+        async def reverse(self, latitude, longitude):
+            raise GeocodeError("reverse endpoint down", transient=True)
+
+    svc = _svc(db, dry_run=True)
+    svc._geocoder = DeadReverseGeo()
+    lines = await svc.daily_build()
+    # Falls back to "facility name, city" — never an empty address.
+    assert any("at City Hospital, " in line for line in lines)
+    assert any("at State Prison, " in line for line in lines)
 
 
 async def test_daily_build_force_runs_even_when_disabled(db):
