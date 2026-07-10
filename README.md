@@ -233,6 +233,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra rotation remove\|on\|off <id>` | Remove, pause or resume a rotation entry |
 | `!fra testbuild <hospital\|prison> <location>` | Test the building flow for a location (dry-run drives the form without submitting) |
 | `!fra dailybuild` | Run the daily worldwide auto-build now (works with the schedule off; dry-run only reports) |
+| `!fra taxwarnings [scan]` | List members below the 5% donation minimum with their warning count; `scan` runs a warning pass now |
 | `!fra dump <path> [rendered]` | Upload a MissionChief page's HTML for inspection (CSRF tokens redacted; `rendered` runs it through Playwright) |
 | `!fra update` | Pull the latest code, install deps and restart the bot |
 | `!fra restart` | Restart the bot to reload `config.yaml` / `.env` (no code update) |
@@ -306,6 +307,27 @@ treats that as *waiting*, not a failure: the request stays queued, all free
 starts back off for an hour (the bot knows what it started, so it doesn't
 hammer doomed attempts), and only a request that keeps being refused for
 48 hours is surfaced as failed. Owner coin starts bypass the backoff.
+
+### Member tax warnings (5% donation)
+
+The old bot's warning system, ported. Every 6 hours (when
+`automation.tax_warnings.enabled` is on) the bot walks the freshly synced
+roster: a member below the minimum donation (default 5%) gets an in-game
+PM — a friendly reminder first, then two official warnings, at least 7
+days apart, capped at three. Brand-new members get a 24h grace period.
+After the third unresolved warning the member is flagged **KICK DUE** in
+the admin channel; the kick only happens automatically when
+`tax_warnings.auto_kick` is switched on (off by default). Every action
+(warning sent, reset, kick flag) is posted to the admin channel.
+
+**A member who fixes their donation is reset immediately** — warnings
+stop the moment the roster shows the rate at/above the minimum, and a
+later dip starts the ladder over at warning 1 instead of jumping straight
+to a kick. Honours the global `dry_run` (reports what it would send).
+`!fra taxwarnings` lists everyone below the minimum with their warning
+count; `!fra taxwarnings scan` runs a pass on demand. All knobs are
+live-settable via `!fra set` (`tax_warnings.min_rate`, `min_days_between`,
+`grace_hours`, `max_per_run`, `auto_kick`, `interval_hours`).
 
 ### Built-in eventpinger
 

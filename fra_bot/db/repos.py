@@ -1720,6 +1720,76 @@ class LinksRepo:
         )
 
 
+class TaxWarningsRepo:
+    """Per-member tax (alliance donation) warning state for the automated
+    5%-donation warning system."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def get(self, mc_user_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM tax_warnings WHERE mc_user_id = ?", (mc_user_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def all_open(self) -> list[aiosqlite.Row]:
+        """Members with an unresolved warning trail (count > 0, not kicked)."""
+        async with self._db.conn.execute(
+            "SELECT * FROM tax_warnings WHERE warning_count > 0 "
+            "AND kicked_at IS NULL"
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def record_warning(
+        self, mc_user_id: int, username: str, *, count: int
+    ) -> None:
+        now = utcnow_iso()
+        await self._db.execute(
+            "INSERT INTO tax_warnings (mc_user_id, username, warning_count, "
+            "last_warning_at, resolved_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?) "
+            "ON CONFLICT(mc_user_id) DO UPDATE SET username = excluded.username, "
+            "warning_count = excluded.warning_count, "
+            "last_warning_at = excluded.last_warning_at, "
+            "resolved_at = NULL, updated_at = excluded.updated_at",
+            (mc_user_id, username, count, now, now),
+        )
+
+    async def mark_resolved(self, mc_user_id: int) -> None:
+        """The member fixed their donation: warnings reset so they stop
+        immediately, and a later dip starts over at warning 1 (a fresh
+        friendly reminder — the old gap doesn't apply to a new dip)."""
+        now = utcnow_iso()
+        await self._db.execute(
+            "UPDATE tax_warnings SET warning_count = 0, last_warning_at = NULL, "
+            "kick_flagged_at = NULL, resolved_at = ?, updated_at = ? "
+            "WHERE mc_user_id = ?",
+            (now, now, mc_user_id),
+        )
+
+    async def mark_kick_flagged(self, mc_user_id: int) -> None:
+        now = utcnow_iso()
+        await self._db.execute(
+            "UPDATE tax_warnings SET kick_flagged_at = ?, updated_at = ? "
+            "WHERE mc_user_id = ?",
+            (now, now, mc_user_id),
+        )
+
+    async def mark_kicked(self, mc_user_id: int) -> None:
+        now = utcnow_iso()
+        await self._db.execute(
+            "UPDATE tax_warnings SET kicked_at = ?, updated_at = ? "
+            "WHERE mc_user_id = ?",
+            (now, now, mc_user_id),
+        )
+
+    async def clear(self, mc_user_id: int) -> None:
+        """Forget a member entirely (left the alliance)."""
+        await self._db.execute(
+            "DELETE FROM tax_warnings WHERE mc_user_id = ?", (mc_user_id,)
+        )
+
+
 def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
     """(daily, monthly) period keys for the current New York game day."""
     from zoneinfo import ZoneInfo

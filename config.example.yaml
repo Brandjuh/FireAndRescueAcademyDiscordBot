@@ -123,6 +123,22 @@ automation:
     panel_channel_id: 1425234755842080890
     # Board requests are self-serve; skip members below this contribution.
     min_contribution_rate: 5.0
+  tax_warnings:
+    # Automated member tax (alliance donation) warnings, like the old bot:
+    # members below min_rate get an in-game PM — a friendly reminder first,
+    # then two official warnings, at least min_days_between days apart,
+    # capped at three. New members get grace_hours before the first one.
+    # After the third unresolved warning the member is flagged KICK DUE in
+    # the admin channel; the kick only happens automatically with auto_kick
+    # on. A member who fixes their donation is RESET immediately — warnings
+    # stop, and a later dip starts over at warning 1. Honours dry_run.
+    enabled: false
+    min_rate: 5.0
+    min_days_between: 7
+    grace_hours: 24
+    max_per_run: 5
+    auto_kick: false
+    interval_hours: 6
 
 geocoding:
   # Turns a place name / address into coordinates. (Google Maps links never

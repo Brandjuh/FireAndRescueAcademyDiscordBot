@@ -134,6 +134,20 @@ class MissionAutomationConfig:
 
 
 @dataclass(frozen=True)
+class TaxWarningsConfig:
+    """Automated member tax (5% alliance donation) warnings: in-game PMs
+    with escalating severity, a kick flag after three unresolved warnings,
+    and an immediate reset once the member fixes their donation."""
+    enabled: bool
+    min_rate: float
+    min_days_between: int
+    grace_hours: int
+    max_per_run: int
+    auto_kick: bool
+    interval_hours: int
+
+
+@dataclass(frozen=True)
 class AutomationConfig:
     dry_run: bool
     reply_to_board: bool
@@ -141,6 +155,7 @@ class AutomationConfig:
     building: BuildingAutomationConfig
     events: EventsAutomationConfig
     mission: MissionAutomationConfig
+    tax_warnings: TaxWarningsConfig
 
 
 @dataclass(frozen=True)
@@ -370,6 +385,29 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 min_contribution_rate=float(
                     _get(raw, "automation", "mission", "min_contribution_rate", default=5.0)
+                ),
+            ),
+            tax_warnings=TaxWarningsConfig(
+                enabled=bool(
+                    _get(raw, "automation", "tax_warnings", "enabled", default=False)
+                ),
+                min_rate=float(
+                    _get(raw, "automation", "tax_warnings", "min_rate", default=5.0)
+                ),
+                min_days_between=int(
+                    _get(raw, "automation", "tax_warnings", "min_days_between", default=7)
+                ),
+                grace_hours=int(
+                    _get(raw, "automation", "tax_warnings", "grace_hours", default=24)
+                ),
+                max_per_run=int(
+                    _get(raw, "automation", "tax_warnings", "max_per_run", default=5)
+                ),
+                auto_kick=bool(
+                    _get(raw, "automation", "tax_warnings", "auto_kick", default=False)
+                ),
+                interval_hours=int(
+                    _get(raw, "automation", "tax_warnings", "interval_hours", default=6)
                 ),
             ),
         ),

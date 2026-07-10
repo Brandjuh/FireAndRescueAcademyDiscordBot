@@ -109,6 +109,10 @@ class FRABot(commands.Bot):
         )
         # The 12h board tidy-up: removes handled request posts (live only).
         self.board_cleanup = BoardCleanupService(cfg, self.mc, self.db)
+        # Member tax (5% donation) warnings — the old bot's system, ported.
+        from .services.tax_warnings import TaxWarningService
+
+        self.tax_warnings = TaxWarningService(cfg, self.mc, self.db)
         # On-command alliance hospital/prison level + extension upgrades.
         self.building_upgrade = BuildingUpgradeService(cfg, self.mc, self.db)
 
@@ -391,6 +395,16 @@ class FRABot(commands.Bot):
                 name="board-cleanup",
                 initial_delay_seconds=330.0,
             )
+        # Member tax (5% donation) warnings: escalating in-game PMs, reset
+        # the moment a member fixes their donation. Every action lands in
+        # the admin channel.
+        if automation.tax_warnings.enabled:
+            sched.add_interval_job(
+                self._guarded(self._tax_warning_pass, "tax-warnings"),
+                minutes=max(1, automation.tax_warnings.interval_hours) * 60,
+                name="tax-warnings",
+                initial_delay_seconds=900.0,
+            )
         log.info(
             "Background jobs scheduled (automation: dry_run=%s, training=%s, "
             "building=%s, events=%s, mission=%s)",
@@ -398,6 +412,15 @@ class FRABot(commands.Bot):
             automation.building.enabled, automation.events.enabled,
             automation.mission.enabled,
         )
+
+    async def _tax_warning_pass(self) -> None:
+        """One warning scan, with every action mirrored to the admin
+        channel so warnings/resets/kick flags are visible in Discord."""
+        lines = await self.tax_warnings.scan()
+        if lines:
+            await self.notify_admin(
+                "💰 **Tax warnings**\n" + "\n".join(lines)[:1800]
+            )
 
     def _guarded(self, func, name: str):
         """Wrap a sync job so scheduler jobs log-and-continue on errors,
