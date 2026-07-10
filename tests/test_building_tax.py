@@ -44,7 +44,7 @@ class _Client:
     def url(self, path):
         return path
 
-    async def fetch_page(self, path, *, referer=None):
+    async def fetch_page(self, path, *, referer=None, ajax=False):
         self.fetched.append(path)
         if "/alliance_costs/" in path:
             return "OK"                       # the set-tax GET
@@ -78,7 +78,7 @@ async def test_set_building_tax_refuses_unsupported_percent():
 
 async def test_set_building_tax_reports_missing_button_row():
     class NoRowClient(_Client):
-        async def fetch_page(self, path, *, referer=None):
+        async def fetch_page(self, path, *, referer=None, ajax=False):
             return "<html><body>personal building</body></html>"
 
     ok, detail = await set_building_tax(NoRowClient(), 777, 20)

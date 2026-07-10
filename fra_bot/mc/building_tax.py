@@ -78,6 +78,7 @@ async def set_building_tax(
         await client.fetch_page(
             f"/buildings/{building_id}/alliance_costs/{tax_id}",
             referer=client.url(page_path),
+            ajax=True,  # the page's own tax buttons call this via XHR
         )
     except MissionChiefError as exc:
         return False, f"tax update failed ({exc})"
