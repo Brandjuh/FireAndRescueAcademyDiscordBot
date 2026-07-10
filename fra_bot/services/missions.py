@@ -1436,8 +1436,6 @@ def _board_guide(default_kind: str, min_rate: float) -> str:
         "",
         "[b]Other options[/b]",
         "- name: My mission name",
-        "- custom: need_lf=25 need_elw1=6 water_needed=15000 (compact form "
-        "of the same thing)",
         "- saved: <name> (start one of the game's Saved Missions by name)",
         "- schedule: recurring (keeps coming back)",
         "",
