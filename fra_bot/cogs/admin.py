@@ -878,12 +878,40 @@ class AdminCog(commands.Cog):
         )
 
     @fra.command(name="taxwarnings", aliases=["taxwarning", "taxwarn"])
-    async def tax_warnings(self, ctx: commands.Context, action: str = "") -> None:
+    async def tax_warnings(
+        self, ctx: commands.Context, action: str = "", *, target: str = ""
+    ) -> None:
         """Member 5%-donation warnings. `!fra taxwarnings` lists everyone
         below the minimum with their warning count; `!fra taxwarnings scan`
         runs a warning pass now (works with the schedule off; dry-run only
-        reports)."""
+        reports); `!fra taxwarnings reset <all|username>` wipes recorded
+        warning trails (e.g. after warnings were logged but never
+        delivered)."""
         svc = self.bot.tax_warnings
+        if action.lower() == "reset":
+            from ..db.repos import TaxWarningsRepo
+
+            repo = TaxWarningsRepo(self.bot.db)
+            who = target.strip()
+            if not who:
+                await ctx.send(
+                    "⚠️ Say who: `!fra taxwarnings reset all` or "
+                    "`!fra taxwarnings reset <username>`."
+                )
+                return
+            if who.lower() == "all":
+                removed = await repo.reset_all()
+                await ctx.send(
+                    f"🧹 Cleared {removed} warning trail(s). Everyone starts "
+                    "fresh at warning 1."
+                )
+                return
+            removed = await repo.reset_by_username(who)
+            if removed:
+                await ctx.send(f"🧹 Warning trail for **{who}** cleared.")
+            else:
+                await ctx.send(f"Nothing recorded for `{who}` — nothing to clear.")
+            return
         if action.lower() == "scan":
             message = await ctx.send("⏳ Running a tax-warning scan…")
             lines = await svc.scan(force=True)
