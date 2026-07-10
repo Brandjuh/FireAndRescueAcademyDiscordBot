@@ -10,6 +10,7 @@ form-layout tweak degrades to a clear error instead of a wrong POST.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 from bs4 import BeautifulSoup
@@ -19,6 +20,13 @@ from .errors import MissionChiefError, ParseError
 log = logging.getLogger(__name__)
 
 NEW_MESSAGE_PATH = "/messages/new"
+
+# The flash MissionChief shows after an actual send (the reference bot's
+# delivery check). A POST that merely re-renders the compose form — bad
+# recipient, validation error — also returns HTTP 200, so the status code
+# alone must never be trusted.
+SUCCESS_MARKER = "message sent."
+_CONVERSATION_URL_RE = re.compile(r"/messages/\d+")
 
 _RECIPIENT_TOKENS = ("recipient", "receiver", "username", "user name", "to]")
 _SUBJECT_TOKENS = ("subject", "title")
@@ -32,6 +40,10 @@ class MessageForm:
     recipient_field: str | None = None
     subject_field: str | None = None
     body_field: str | None = None
+    # Rails forms often branch on the submit button's name (usually
+    # "commit"); it must be POSTed along like a browser would.
+    submit_name: str | None = None
+    submit_value: str = ""
 
 
 def parse_message_form(html: str) -> MessageForm:
@@ -52,7 +64,12 @@ def parse_message_form(html: str) -> MessageForm:
     parsed = MessageForm(action=form.get("action") or "/messages")
     for tag in form.find_all(("input", "textarea", "select")):
         name = tag.get("name")
-        if not name or tag.get("type") in ("submit", "button"):
+        if tag.get("type") == "submit":
+            if name and parsed.submit_name is None:
+                parsed.submit_name = name
+                parsed.submit_value = tag.get("value") or ""
+            continue
+        if not name or tag.get("type") == "button":
             continue
         if tag.name == "textarea":
             value = tag.get_text() or ""
@@ -115,16 +132,46 @@ def build_message_payload(
         payload[name] = overrides.get(name, value)
     for name, value in overrides.items():
         payload.setdefault(name, value)
+    if form.submit_name:
+        payload.setdefault(form.submit_name, form.submit_value)
     return payload
+
+
+def message_was_sent(html: str, final_url: str = "") -> bool:
+    """Did the POST actually deliver? True on the "Message Sent." flash or
+    when we landed on a conversation page (/messages/<id>)."""
+    if _CONVERSATION_URL_RE.search(final_url or ""):
+        return True
+    text = BeautifulSoup(html or "", "lxml").get_text(" ", strip=True)
+    return SUCCESS_MARKER in text.lower()
+
+
+def summarize_response(text: str, *, limit: int = 350) -> str:
+    """A short, token-redacted plain-text digest of a response for logs."""
+    text = re.sub(
+        r"<script\b[^>]*>.*?</script>", " ", str(text or ""),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"<style\b[^>]*>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL
+    )
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(
+        r"authenticity_token[^\s&<>\"]+", "authenticity_token=REDACTED",
+        text, flags=re.IGNORECASE,
+    )
+    return " ".join(text.split())[:limit]
 
 
 async def send_ingame_message(
     client, recipient: str, subject: str, body: str
 ) -> bool:
-    """Send an in-game PM to a MissionChief username. Returns success."""
+    """Send an in-game PM to a MissionChief username. Returns success —
+    which requires the game to CONFIRM delivery, not just an HTTP 2xx
+    (a validation failure re-renders the compose form with 200)."""
     try:
         form = parse_message_form(await client.fetch_page(NEW_MESSAGE_PATH))
-        status, _, _ = await client.post_form(
+        status, html, final_url = await client.post_form(
             form.action,
             build_message_payload(form, recipient, subject, body),
             referer=client.url(NEW_MESSAGE_PATH),
@@ -134,6 +181,12 @@ async def send_ingame_message(
         return False
     if status >= 400:
         log.warning("in-game PM to %s rejected (HTTP %s)", recipient, status)
+        return False
+    if not message_was_sent(html, final_url):
+        log.warning(
+            "in-game PM to %s NOT confirmed (HTTP %s, landed on %s): %s",
+            recipient, status, final_url or "?", summarize_response(html),
+        )
         return False
     log.info("in-game PM sent to %s (%s)", recipient, subject)
     return True

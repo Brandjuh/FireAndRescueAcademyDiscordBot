@@ -7,8 +7,10 @@ from fra_bot.db.database import Database
 from fra_bot.mc.errors import ParseError
 from fra_bot.mc.messages import (
     build_message_payload,
+    message_was_sent,
     parse_message_form,
     send_ingame_message,
+    summarize_response,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -19,14 +21,18 @@ COMPOSE_HTML = """
   <input type="text" name="message[recipient]" value=""/>
   <input type="text" name="message[subject]" value=""/>
   <textarea name="message[body]"></textarea>
-  <input type="submit" value="Send"/>
+  <input type="submit" name="commit" value="Send"/>
 </form>
 """
 
+SENT_HTML = "<html><body><div class='alert'>Message Sent.</div></body></html>"
+
 
 class FakeClient:
-    def __init__(self, *, post_status=200):
+    def __init__(self, *, post_status=200, post_html=SENT_HTML, post_url=""):
         self.post_status = post_status
+        self.post_html = post_html
+        self.post_url = post_url
         self.posts = []
 
     def url(self, path):
@@ -37,7 +43,7 @@ class FakeClient:
 
     async def post_form(self, path, data, **kwargs):
         self.posts.append((path, dict(data)))
-        return (self.post_status, {}, "")
+        return (self.post_status, self.post_html, self.post_url)
 
 
 def test_parse_message_form_finds_fields():
@@ -51,6 +57,8 @@ def test_parse_message_form_finds_fields():
     assert payload["message[subject]"] == "Hi"
     assert payload["message[body]"] == "Body text"
     assert payload["authenticity_token"] == "tok"
+    # The submit button rides along, like a real browser POST.
+    assert payload["commit"] == "Send"
 
 
 def test_parse_message_form_rejects_broken_layout():
@@ -67,6 +75,36 @@ async def test_send_ingame_message_posts_and_reports():
 
     rejected = FakeClient(post_status=422)
     assert await send_ingame_message(rejected, "Alice", "S", "B") is False
+
+
+async def test_unconfirmed_send_counts_as_failure():
+    """MissionChief re-renders the compose form with HTTP 200 when the
+    message was NOT sent — that must never be scored as delivered (it made
+    the tax warnings record sends that never happened)."""
+    rerendered = FakeClient(post_status=200, post_html=COMPOSE_HTML)
+    assert await send_ingame_message(rerendered, "Alice", "S", "B") is False
+
+
+async def test_conversation_redirect_counts_as_delivered():
+    client = FakeClient(
+        post_html="<html></html>",
+        post_url="https://www.missionchief.com/messages/12345",
+    )
+    assert await send_ingame_message(client, "Alice", "S", "B") is True
+
+
+def test_message_was_sent_signals():
+    assert message_was_sent(SENT_HTML) is True
+    assert message_was_sent("<b>MESSAGE SENT.</b>") is True   # case-proof
+    assert message_was_sent(COMPOSE_HTML) is False
+    assert message_was_sent("", "https://x/messages/9") is True
+    assert message_was_sent("", "https://x/messages/new") is False
+
+
+def test_summarize_response_redacts_the_csrf_token():
+    digest = summarize_response(COMPOSE_HTML + "authenticity_token=secret123")
+    assert "secret123" not in digest
+    assert "REDACTED" in digest
 
 
 def test_requester_dm_texts_match_reference_bot():

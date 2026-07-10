@@ -1789,6 +1789,17 @@ class TaxWarningsRepo:
             "DELETE FROM tax_warnings WHERE mc_user_id = ?", (mc_user_id,)
         )
 
+    async def reset_all(self) -> int:
+        """Wipe every warning trail (admin reset). Returns rows removed."""
+        return await self._db.execute("DELETE FROM tax_warnings")
+
+    async def reset_by_username(self, username: str) -> int:
+        """Wipe one member's warning trail by (case-insensitive) name."""
+        return await self._db.execute(
+            "DELETE FROM tax_warnings WHERE lower(username) = lower(?)",
+            (username,),
+        )
+
 
 class MissionsForumRepo:
     """mission_key → forum-thread mapping for the missions-database forum.
