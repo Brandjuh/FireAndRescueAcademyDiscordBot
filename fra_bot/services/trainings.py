@@ -370,6 +370,38 @@ class TrainingsService(BoardRequestService):
         }))
         return counts
 
+    async def cached_availability(self) -> dict | None:
+        """The last availability walk as ``{"counts": {...}, "at": epoch}``,
+        or None when no walk has completed yet."""
+        raw = await self.state.get(AVAILABILITY_STATE_KEY)
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("counts"), dict):
+            return None
+        return data
+
+    async def refresh_availability(
+        self, *, max_age_seconds: int = 50 * 60
+    ) -> dict | None:
+        """The hourly refresh behind the class-availability panel.
+
+        Reuses the cache when a recent walk (the guide refresh, or a prior
+        pass of this job) already collected the numbers — the two hourly
+        consumers must not double the game traffic — and walks the
+        academies otherwise. Returns the fresh cache entry, or None when
+        the walk failed and nothing usable is cached."""
+        cached = await self.cached_availability()
+        now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+        if cached and now - int(cached.get("at") or 0) < max_age_seconds:
+            return cached
+        if await self._collect_availability() is None:
+            return cached
+        return await self.cached_availability()
+
     async def parse_request(self, post: BoardPost) -> dict | None:
         matches, ambiguous = match_trainings(post.content)
         if not matches and not ambiguous:

@@ -73,6 +73,9 @@ discord:
     # Message panel (Send message / Check inbox / Reply buttons), placed
     # and maintained automatically. 0 = off.
     dm_panel: 1421242306136113254
+    # Class-availability panel: free training classes per agency, updated
+    # hourly (edited in place). 0 = off.
+    class_panel: 1421627971831070730
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
   # Role that is always pinged by the eventpinger (Notify-Event).

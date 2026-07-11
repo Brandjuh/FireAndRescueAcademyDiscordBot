@@ -222,6 +222,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra sync missions` | Advance the mission/event queue + rotation now |
 | `!fra missionpanel` | Force-repost the mission panel (panels also place/refresh themselves automatically) |
 | `!fra requestpanel` | Force-repost the training/building request panel |
+| `!fra classpanel` | Force-repost the class-availability panel with fresh numbers |
 | `!fra dmpanel` | Force-repost the message panel (configured channel, else the current one) |
 | `!fra rankroles [sync\|dryrun]` | Credit rank roles: status, run a sync now, or preview without changes |
 | `!membersync` | MemberSync health: link count, retry queue, verified-role config |
@@ -410,9 +411,12 @@ exactly **one** current panel: a missing/deleted panel is posted, a panel
 whose text changed with an update is **edited in place** (it keeps its
 position), a panel whose channel changed in config moves along, and stray
 old copies are cleaned up. Channels: `automation.mission.panel_channel_id`
-(mission), `discord.channels.request_panel` (training/building) and
-`discord.channels.member_panel` (member management) — all settable live
-with `!fra set`; 0 disables a panel. The manual commands still exist for a
+(mission), `discord.channels.request_panel` (training/building),
+`discord.channels.member_panel` (member management) and
+`discord.channels.class_panel` (free training classes per agency — an
+hourly job refreshes the counts and the panel is edited in place, so the
+channel always shows current numbers) — all settable live with
+`!fra set`; 0 disables a panel. The manual commands still exist for a
 forced repost.
 
 ### Missions-database forum

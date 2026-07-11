@@ -1,8 +1,9 @@
 """Panel keeper: the Discord panels place and replace themselves.
 
 Each panel (mission requests, training/building requests, member
-management) has a configured channel. On startup and every half hour the
-keeper makes sure that channel holds exactly ONE current panel:
+management, DM mirror, class availability) has a configured channel. On
+startup and every half hour the keeper makes sure that channel holds
+exactly ONE current panel:
 
 * missing (never posted, or someone deleted it) → post it;
 * text changed after a bot update → EDIT the existing message in place
@@ -78,6 +79,10 @@ class PanelKeeperCog(commands.Cog):
             PanelSpec(
                 "dms", "DmMirrorCog",
                 lambda: int(getattr(cfg.discord.channels, "dm_panel", 0) or 0),
+            ),
+            PanelSpec(
+                "classes", "ClassesPanelCog",
+                lambda: int(getattr(cfg.discord.channels, "class_panel", 0) or 0),
             ),
         ]
 
