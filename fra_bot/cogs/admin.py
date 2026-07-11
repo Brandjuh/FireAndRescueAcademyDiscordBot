@@ -1035,6 +1035,34 @@ class AdminCog(commands.Cog):
             content=f"✅ Adopted {adopted} post(s). Content refreshes on the next sync."
         )
 
+    @fra.group(name="dmmirror", aliases=["dms", "dmirror"], invoke_without_command=True)
+    async def dm_mirror_group(self, ctx: commands.Context) -> None:
+        """In-game DM mirror status. `!fra dmmirror scan` runs an inbox
+        scan now (works with the schedule off)."""
+        lines = await self.bot.dm_mirror.status_lines()
+        await ctx.send("📬 **DM mirror**\n" + "\n".join(lines)[:1900])
+
+    @dm_mirror_group.command(name="scan")
+    async def dm_mirror_scan(self, ctx: commands.Context) -> None:
+        """Scan the in-game PM inbox now and mirror conversations to the
+        forum."""
+        lock = self.bot.job_lock("dm-mirror")
+        if lock.locked():
+            await ctx.send("⏳ A DM-mirror scan is already running.")
+            return
+        message = await ctx.send("⏳ Scanning the in-game inbox…")
+        async with lock:
+            try:
+                summary = await self.bot.dm_mirror.scan()
+            except Exception as exc:  # surfaced to the operator, not a crash
+                log.exception("Manual DM-mirror scan failed")
+                await message.edit(content=f"❌ Scan failed: {exc}")
+                return
+        icon = "❌" if summary.get("error") else "✅"
+        await message.edit(
+            content=f"{icon} DM mirror:\n" + "\n".join(summary["lines"])[:1800]
+        )
+
     @fra.command(name="nextmission")
     async def next_mission(self, ctx: commands.Context) -> None:
         """Show which mission/event is up next and where (for the eventpinger)."""

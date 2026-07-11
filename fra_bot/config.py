@@ -73,6 +73,8 @@ class DiscordChannels:
     missions_forum: int = 0
     # Announcements for newly added missions (link to the forum post).
     mission_announce: int = 1524842963316773036
+    # In-game DM mirror forum: every PM conversation ↔ one thread.
+    dm_mirror: int = 1517694938501087342
 
 
 @dataclass(frozen=True)
@@ -152,6 +154,17 @@ class MissionsForumConfig:
 
 
 @dataclass(frozen=True)
+class DmMirrorConfig:
+    """In-game DM mirror: the inbox is scanned every ``interval`` minutes
+    and every PM conversation (incoming AND ones the bot account started)
+    is mirrored into the ``discord.channels.dm_mirror`` forum — one thread
+    per conversation. Staff replies typed in a thread are sent back into
+    the game conversation (those honour the global dry_run)."""
+    enabled: bool
+    interval: int  # minutes between inbox scans
+
+
+@dataclass(frozen=True)
 class TaxWarningsConfig:
     """Automated member tax (5% alliance donation) warnings: in-game PMs
     with escalating severity, a kick flag after three unresolved warnings,
@@ -175,6 +188,7 @@ class AutomationConfig:
     mission: MissionAutomationConfig
     tax_warnings: TaxWarningsConfig
     missions_forum: MissionsForumConfig
+    dm_mirror: DmMirrorConfig
 
 
 @dataclass(frozen=True)
@@ -341,6 +355,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 mission_announce=int(
                     channels.get("mission_announce", 1524842963316773036)
                 ),
+                dm_mirror=int(channels.get("dm_mirror", 1517694938501087342)),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])
@@ -425,6 +440,14 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                         raw, "automation", "missions_forum", "max_posts_per_run",
                         default=100,
                     )
+                ),
+            ),
+            dm_mirror=DmMirrorConfig(
+                enabled=bool(
+                    _get(raw, "automation", "dm_mirror", "enabled", default=False)
+                ),
+                interval=int(
+                    _get(raw, "automation", "dm_mirror", "interval", default=15)
                 ),
             ),
             tax_warnings=TaxWarningsConfig(

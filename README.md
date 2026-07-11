@@ -239,6 +239,8 @@ Requires Discord administrator permission or a role listed in
 | `!fra missionsforum adopt` | Rebuild the mission→post mapping from the forum's thread titles (DB-loss recovery, prevents duplicates) |
 | `!fra missionsforum stop` | Stop the running missions-forum sync/wipe after the current post |
 | `!fra missionsforum wipe CONFIRM` | Delete every mission post from the forum and forget the mapping (paced; a later sync reposts fresh) |
+| `!fra dmmirror` | In-game DM mirror status (forum, tracked conversations, scan schedule) |
+| `!fra dmmirror scan` | Scan the in-game PM inbox now and mirror conversations to the forum |
 | `!fra dump <path> [rendered]` | Upload a MissionChief page's HTML for inspection (CSRF tokens redacted; `rendered` runs it through Playwright) |
 | `!fra update` | Pull the latest code, install deps and restart the bot |
 | `!fra restart` | Restart the bot to reload `config.yaml` / `.env` (no code update) |
@@ -389,6 +391,26 @@ Optionally (`!fra set announce_new on`, default **off**) each brand-new
 mission is announced in `discord.channels.mission_announce` (default
 `1524842963316773036`) with a link to its forum post. The initial backfill
 never announces.
+
+### In-game DM mirror
+
+Every MissionChief PM conversation gets its own thread in the
+`discord.channels.dm_mirror` forum (default `1517694938501087342`). The
+inbox is scanned every `automation.dm_mirror.interval` minutes (default
+15, off by default — `!fra set automation.dm_mirror.enabled on`): incoming
+messages land in the matching thread, and conversations the bot account
+itself started (tax warnings, requester DMs, or a PM sent by hand in the
+game) are mirrored too — any conversation the mirror doesn't know yet is
+picked up whole, both directions (📥 member / 📤 us, with real timestamps).
+
+**Replying happens in Discord**: staff (admins, `admin_role_ids` or
+`staff_role_ids`) simply type in the thread and the bot posts it into the
+game conversation — ✅ means the game confirmed delivery, ⚠️ means it
+refused (with the reason). Messages starting with `!` are ignored so bot
+commands can be used inside a thread. Replies honour the global `dry_run`
+(the scan itself is read-only and always runs). Duplicates are prevented
+by a per-conversation timestamp marker, and a reply sent via Discord is
+not mirrored back on the next scan.
 
 ### Updating from Discord
 

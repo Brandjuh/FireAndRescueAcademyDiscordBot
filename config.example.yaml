@@ -66,6 +66,10 @@ discord:
     # New-mission announcements (link to the forum post) land here when
     # automation.missions_forum.announce_new is on.
     mission_announce: 1524842963316773036
+    # In-game DM mirror forum (see automation.dm_mirror): every PM
+    # conversation gets one thread here; replies in the thread go back
+    # into the game. 0 = off.
+    dm_mirror: 1517694938501087342
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
   # Role that is always pinged by the eventpinger (Notify-Event).
@@ -143,6 +147,16 @@ automation:
     # Posts/edits per sync run — spreads the initial ~450-mission backfill
     # over a few runs and keeps rate limits comfortable.
     max_posts_per_run: 100
+  dm_mirror:
+    # In-game DM mirror: scans the MissionChief PM inbox and mirrors every
+    # conversation — incoming messages AND conversations the bot account
+    # started (tax warnings, requester DMs) — into the
+    # discord.channels.dm_mirror forum, one thread per conversation. A
+    # staff reply typed in such a thread is sent back into the game
+    # conversation (✅ = delivered; replies honour dry_run). The scan
+    # itself is read-only and also runs in dry-run.
+    enabled: false
+    interval: 15              # minutes between inbox scans
   tax_warnings:
     # Automated member tax (alliance donation) warnings, like the old bot:
     # members below min_rate get an in-game PM — a friendly reminder first,
