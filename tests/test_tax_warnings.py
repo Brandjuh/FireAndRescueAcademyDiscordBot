@@ -4,10 +4,20 @@ per-run cap, kick flagging, and the reset the moment a member fixes it."""
 import datetime as dt
 from types import SimpleNamespace
 
+import pytest
 import pytest_asyncio
 
 from fra_bot.db.database import Database, utcnow_iso
 from fra_bot.services.tax_warnings import MAX_WARNINGS, TaxWarningService
+
+
+@pytest.fixture(autouse=True)
+def _no_send_spacing():
+    """Tests don't wait out the 90s anti-burst spacing between PMs."""
+    original = TaxWarningService.send_spacing
+    TaxWarningService.send_spacing = 0
+    yield
+    TaxWarningService.send_spacing = original
 
 
 class FakeClient:

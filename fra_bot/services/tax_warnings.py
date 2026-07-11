@@ -102,6 +102,10 @@ def _hours_since(iso: str | None, now: dt.datetime) -> float | None:
 
 
 class TaxWarningService:
+    # Seconds between two warning PMs in one scan (the reference bot's
+    # spacing; on top of the pacer's per-request delays).
+    send_spacing = 90.0
+
     def __init__(self, cfg: Config, client: MissionChiefClient, db: Database) -> None:
         self.cfg = cfg
         self.client = client
@@ -192,6 +196,13 @@ class TaxWarningService:
                 )
                 sent += 1
                 continue
+            if sent and self.send_spacing:
+                # The reference bot spaced warning PMs ~90s apart — a burst
+                # of near-identical messages is exactly what bot detection
+                # looks for. Keep that behaviour.
+                import asyncio
+
+                await asyncio.sleep(self.send_spacing)
             from ..mc.messages import send_ingame_message
 
             ok = await send_ingame_message(
