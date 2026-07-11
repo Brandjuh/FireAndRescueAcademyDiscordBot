@@ -27,7 +27,12 @@ from dataclasses import dataclass
 import aiohttp
 
 from ..db.repos import StateRepo
-from .maps_links import MapsLocation, is_short_link, parse_maps_url
+from .maps_links import (
+    MapsLocation,
+    extract_location_from_html,
+    is_short_link,
+    parse_maps_url,
+)
 
 log = logging.getLogger(__name__)
 
@@ -132,11 +137,16 @@ class Geocoder:
     async def resolve_maps_link(self, url: str) -> GeocodeResult:
         """Google Maps link → coordinates (+ address when available)."""
         await self.start()
-        expanded = url
+        expanded, body = url, None
         if is_short_link(url):
-            expanded = await self._expand_short_link(url)
+            expanded, body = await self._expand_short_link(url)
 
         location = parse_maps_url(expanded)
+        if not location.has_coordinates and not location.place_text and body:
+            # The short link did not redirect to a parseable Maps URL —
+            # Google sometimes hands bots an interstitial page (HTTP 200)
+            # with the real URL/coordinates only inside the HTML.
+            location = extract_location_from_html(body)
         if location.has_coordinates:
             address, place_type = None, None
             try:
@@ -157,13 +167,38 @@ class Geocoder:
         if location.place_text:
             return await self.search(location.place_text)
 
-        raise GeocodeError(f"No coordinates or place name found in {url}")
+        detail = f"No coordinates or place name found in {url}"
+        if expanded != url:
+            detail += f" (expanded to {expanded})"
+        elif body is not None:
+            detail += " (the short link did not redirect; interstitial page?)"
+        raise GeocodeError(detail)
 
-    async def _expand_short_link(self, url: str) -> str:
+    #: Browser UA for the GOOGLE short-link fetch only — Google hands bot
+    #: user agents an interstitial page instead of the redirect. Nominatim
+    #: keeps the identifying UA its usage policy requires.
+    _BROWSER_UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    )
+
+    async def _expand_short_link(self, url: str) -> tuple[str, str | None]:
+        """Follow a short link to ``(final url, html body or None)``. The
+        body travels along so the caller can mine an interstitial page
+        when the redirect chain didn't reach a parseable Maps URL."""
         assert self._session is not None
         try:
-            async with self._session.get(url, allow_redirects=True) as resp:
-                return str(resp.url)
+            async with self._session.get(
+                url, allow_redirects=True,
+                headers={"User-Agent": self._BROWSER_UA},
+            ) as resp:
+                body = None
+                if "text/html" in (resp.headers.get("Content-Type") or ""):
+                    try:
+                        body = (await resp.text())[:500_000]
+                    except (aiohttp.ClientError, UnicodeDecodeError):
+                        body = None
+                return str(resp.url), body
         except aiohttp.ClientError as exc:
             raise GeocodeError(f"Could not expand short link {url}: {exc}") from exc
 

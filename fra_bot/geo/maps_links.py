@@ -12,6 +12,7 @@ external geocoding service is only needed as a fallback:
 
 from __future__ import annotations
 
+import html as html_mod
 import re
 import urllib.parse
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ _AT_RE = re.compile(r"@(-?\d+\.\d+),(-?\d+\.\d+)")
 _QUERY_KEYS = ("q", "ll", "query", "center", "destination")
 _LATLNG_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$")
 _PLACE_RE = re.compile(r"/maps/place/([^/@?]+)")
+_SEARCH_PLACE_RE = re.compile(r"/maps/(?:search|dir)/([^/@?]+)")
 
 
 @dataclass(frozen=True)
@@ -108,7 +110,7 @@ def parse_maps_url(url: str) -> MapsLocation:
                 break
 
     place_text = None
-    place = _PLACE_RE.search(url)
+    place = _PLACE_RE.search(url) or _SEARCH_PLACE_RE.search(url)
     if place:
         place_text = _clean_place_text(urllib.parse.unquote_plus(place.group(1)))
     else:
@@ -136,6 +138,43 @@ def _clean_place_text(text: str) -> str | None:
         text = urllib.parse.unquote(text)
     text = text.replace("+", " ")
     return " ".join(text.split()) or None
+
+
+# Where an interstitial page hides the real Maps URL: canonical/og:url
+# tags, a meta refresh, or a data-url attribute.
+_HTML_URL_PATTERNS = (
+    re.compile(r"<link[^>]+rel=[\"']canonical[\"'][^>]+href=[\"']([^\"']+)", re.IGNORECASE),
+    re.compile(r"property=[\"']og:url[\"'][^>]+content=[\"']([^\"']+)", re.IGNORECASE),
+    re.compile(r"content=[\"']\d+;\s*url=([^\"']+)", re.IGNORECASE),
+    re.compile(r"data-url=[\"']([^\"']+)", re.IGNORECASE),
+)
+# Google Maps' own page state: [[[zoom, LNG, LAT — note the order.
+_APP_STATE_RE = re.compile(r"\[\[\[\d+(?:\.\d+)?,(-?\d+\.\d+),(-?\d+\.\d+)")
+
+
+def extract_location_from_html(page_html: str) -> MapsLocation:
+    """Last-resort extraction when a short link does NOT redirect: Google
+    sometimes answers a bot's request with an interstitial/consent page
+    (HTTP 200), leaving the real Maps URL — or the coordinates themselves —
+    only inside the HTML."""
+    for pattern in _HTML_URL_PATTERNS:
+        match = pattern.search(page_html)
+        if match:
+            location = parse_maps_url(html_mod.unescape(match.group(1)))
+            if location.has_coordinates or location.place_text:
+                return location
+    for link in find_maps_links(html_mod.unescape(page_html)):
+        if is_short_link(link):
+            continue
+        location = parse_maps_url(link)
+        if location.has_coordinates or location.place_text:
+            return location
+    match = _APP_STATE_RE.search(page_html)
+    if match:
+        lng, lat = float(match.group(1)), float(match.group(2))
+        if _valid(lat, lng):
+            return MapsLocation(latitude=lat, longitude=lng, place_text=None)
+    return MapsLocation(latitude=None, longitude=None, place_text=None)
 
 
 def is_short_link(url: str) -> bool:
