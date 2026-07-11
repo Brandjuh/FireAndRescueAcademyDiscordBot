@@ -144,7 +144,7 @@ automation:
     # Announce brand-new missions (with a link to the forum post) in
     # discord.channels.mission_announce. Off by default.
     announce_new: false
-    # Posts/edits per sync run — spreads the initial ~450-mission backfill
+    # Posts/edits per sync run — spreads the initial ~1,200-mission backfill
     # over a few runs and keeps rate limits comfortable.
     max_posts_per_run: 100
   dm_mirror:
