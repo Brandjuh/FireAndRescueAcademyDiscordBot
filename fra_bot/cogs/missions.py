@@ -514,7 +514,10 @@ class MissionsCog(commands.Cog):
             cfg.events.min_contribution_rate if spec.kind == "event"
             else cfg.mission.min_contribution_rate
         )
-        verdict = await contribution_gate(self.bot.db, interaction.user.id, min_rate)
+        verdict = await contribution_gate(
+            self.bot.db, interaction.user.id, min_rate,
+            members_interval_minutes=self.bot.cfg.sync.members_interval,
+        )
         if not verdict.ok:
             # The log entry: a terminal row, announced to the admin log only
             # (channel_id None) — the member gets the reason right here.

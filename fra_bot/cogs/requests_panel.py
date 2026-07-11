@@ -324,6 +324,7 @@ class RequestsCog(commands.Cog):
         verdict = await contribution_gate(
             self.bot.db, interaction.user.id,
             self.bot.cfg.automation.training.min_contribution_rate,
+            members_interval_minutes=self.bot.cfg.sync.members_interval,
         )
         if not verdict.ok:
             await self._log_rejection(
@@ -408,6 +409,7 @@ class RequestsCog(commands.Cog):
         verdict = await contribution_gate(
             self.bot.db, interaction.user.id,
             self.bot.cfg.automation.building.min_contribution_rate,
+            members_interval_minutes=self.bot.cfg.sync.members_interval,
         )
         if not verdict.ok:
             await self._log_rejection(
