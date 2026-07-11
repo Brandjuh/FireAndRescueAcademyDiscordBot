@@ -218,6 +218,30 @@ class MemberSyncCog(commands.Cog):
         )
         await ctx.send(f"✅ Linked {member.mention} to MC `{mc_id}` and granted the role.")
 
+    @commands.command(name="membersync")
+    @is_fra_admin()
+    async def membersync_status(self, ctx: commands.Context) -> None:
+        """MemberSync health: link counts, the retry queue, role config."""
+        links = await self.service.links.all_approved()
+        queued = await self.service.links.queue_all()
+        role = self._role(self._guild())
+        lines = [
+            f"verified role: {role.mention if role else '⚠️ not set (`!fra set verified_role @role`)'}",
+            f"approved links: {len(links)}",
+            f"retry queue: {len(queued)} member(s)",
+        ]
+        for row in queued[:10]:
+            lines.append(
+                f"• <@{row['discord_id']}> — attempt "
+                f"{row['attempts']}/{QUEUE_MAX_ATTEMPTS}"
+            )
+        if len(queued) > 10:
+            lines.append(f"… and {len(queued) - 10} more")
+        await ctx.send(
+            "🔗 **MemberSync**\n" + "\n".join(lines)[:1900],
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @commands.command(name="verifyall")
     @is_fra_admin()
     async def verify_all(self, ctx: commands.Context) -> None:
@@ -339,6 +363,30 @@ class MemberSyncCog(commands.Cog):
                 await self.bot.notify_admin(
                     f"👋 Removed Verified from {member.mention} — "
                     f"MC `{mc_user_id}` left the alliance."
+                )
+            # The old bot's auto-restore, ported: everyone with a valid
+            # link who is still in the alliance carries the role — an
+            # accidentally removed role heals within the hour, and a
+            # member who REJOINS the alliance gets it back automatically.
+            for discord_id, mc_user_id in await self.service.restore_candidates():
+                member = guild.get_member(discord_id)
+                if member is None or role in member.roles:
+                    continue
+                try:
+                    await member.add_roles(
+                        role,
+                        reason="MemberSync auto-restore: approved link, "
+                               "still in the alliance",
+                    )
+                except discord.HTTPException as exc:
+                    log.warning("membersync: could not restore role for %s: %s",
+                                member, exc)
+                    continue
+                log.info("membersync: restored verified role for %s (MC %s)",
+                         member, mc_user_id)
+                await self.bot.notify_admin(
+                    f"♻️ Restored Verified for {member.mention} — approved "
+                    f"link, MC `{mc_user_id}` is (still) in the alliance."
                 )
         except Exception:
             log.exception("membersync prune loop failed")

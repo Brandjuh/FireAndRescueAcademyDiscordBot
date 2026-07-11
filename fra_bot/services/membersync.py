@@ -316,3 +316,18 @@ class MemberSyncService:
             if link["mc_user_id"] not in active
             and (link["updated_at"] or "") < grace_cutoff
         ]
+
+    async def restore_candidates(self) -> list[tuple[int, int]]:
+        """Approved links whose MC member IS active in the alliance — the
+        old bot's hourly auto-restore: anyone with a valid link should
+        carry the verified role, so an accidentally removed role heals
+        itself and a member who rejoins the alliance gets it back without
+        re-verifying. The cog only acts on members missing the role."""
+        active = await self.members.active_members()
+        if len(active) < MIN_SAFE_ROSTER_COUNT:
+            return []
+        return [
+            (link["discord_id"], link["mc_user_id"])
+            for link in await self.links.all_approved()
+            if link["mc_user_id"] in active
+        ]
