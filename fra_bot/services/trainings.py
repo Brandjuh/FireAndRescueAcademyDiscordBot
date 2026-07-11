@@ -504,14 +504,21 @@ class TrainingsService(BoardRequestService):
         return await self.cached_availability()
 
     async def parse_request(self, post: BoardPost) -> dict | None:
-        matches, ambiguous = match_trainings(post.content)
+        # Match against the LIVE course catalog (harvested from the academy
+        # pages) — the built-in list goes stale as the game adds courses,
+        # and a missing name used to fuzz onto the nearest wrong one.
+        catalog = await merged_course_catalog(self.state)
+        matches, ambiguous = match_trainings(post.content, catalog)
         if not matches and not ambiguous:
             return None  # chatter, not a training request
         return self.request_data(
             post,
             {
                 "trainings": [
-                    {"discipline": m.discipline, "name": m.name, "duration": m.duration_days}
+                    {
+                        "discipline": m.discipline, "name": m.name,
+                        "duration": m.duration_days, "count": m.count,
+                    }
                     for m in matches
                 ],
                 "ambiguous": [
@@ -914,6 +921,8 @@ def _overview_guide(min_rate: float) -> str:
         "- Type one or more training names from the agency posts below.",
         "- You can request multiple classes in one post, one per line or "
         "separated by commas.",
+        "- Want several copies of one course? Prefix a count: 3x HazMat "
+        "(maximum 4 per request).",
         "- Small typos are supported, but the exact names below work best.",
         "- Some trainings exist in more than one academy type. For those, use "
         "the prefixed text shown in the agency posts.",

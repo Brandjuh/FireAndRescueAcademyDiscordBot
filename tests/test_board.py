@@ -292,3 +292,47 @@ async def test_post_reply_sets_last_error_reasons():
     board = BoardClient(RejectClient())
     assert await board.post_reply(15305, "[FRA] hi") is False
     assert "HTTP 422" in board.last_error
+
+
+# -- matcher hardening (the "technical rescue training" incident) ------------
+
+def test_unknown_course_no_longer_fuzzes_onto_the_nearest_name():
+    # "technical rescue training" used to hit Search and Rescue Training at
+    # ratio 0.784 (threshold 0.78) and flag Coastal Rescue as ambiguous —
+    # the bot opened the WRONG class. Different courses sharing a tail must
+    # not match; the member gets "could not be processed" instead.
+    matches, ambiguous = match_trainings("technical rescue training")
+    assert matches == [] and ambiguous == []
+
+
+def test_live_catalog_matches_courses_the_builtin_list_lacks():
+    live = {"fire": {"Technical Rescue Training": 4, "HazMat": 3}}
+    matches, _ = match_trainings("Technical rescue training", live)
+    assert [(m.discipline, m.name) for m in matches] == [
+        ("fire", "Technical Rescue Training")
+    ]
+
+
+def test_copy_counts_parse_and_cap():
+    live = {"fire": {"Technical Rescue Training": 4}}
+    matches, _ = match_trainings("3x technical rescue training", live)
+    assert matches[0].count == 3
+    matches, _ = match_trainings("technical rescue training x2", live)
+    assert matches[0].count == 2
+    # Repeated lines sum, capped at 4.
+    matches, _ = match_trainings(
+        "3x technical rescue training\n3x technical rescue training", live
+    )
+    assert matches[0].count == 4
+
+
+def test_typo_tolerance_survives_the_stricter_fuzz():
+    for text, expected in (
+        ("HazMta", "HazMat"),
+        ("k9", "K-9"),
+        ("police avation", "Police Aviation"),
+        ("swift water rescue trainng", "Swift Water Rescue Training"),
+    ):
+        matches, ambiguous = match_trainings(text)
+        names = [m.name for m in matches] + [a.name for a in ambiguous]
+        assert expected in names, (text, names)
