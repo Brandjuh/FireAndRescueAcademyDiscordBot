@@ -300,6 +300,7 @@ class FakeThread:
         self.starter_deleted = False
         self.jump_url = f"https://discord.com/channels/1/{self.id}"
         self.edit_calls = []
+        self.messages = []  # follow-up messages sent into the thread
         self._bot = bot
         self._forum = forum
         bot.add_channel(self)
@@ -316,6 +317,10 @@ class FakeThread:
                 SimpleNamespace(status=404, reason="Not Found"), "gone"
             )
         return self.starter
+
+    async def send(self, content=None, *, embed=None, allowed_mentions=None):
+        self.messages.append((content, embed))
+        return FakeMessage(self.id + 900000, embed)
 
     async def edit(self, **kwargs):
         self.edit_calls.append(kwargs)
@@ -415,7 +420,7 @@ class FakeBot:
         return channel
 
 
-def _cfg(**overrides):
+def _cfg(*, announce_role=0, **overrides):
     auto = SimpleNamespace(
         enabled=True, sync_time="04:00", announce_new=False, max_posts_per_run=100
     )
@@ -424,7 +429,8 @@ def _cfg(**overrides):
     return SimpleNamespace(
         missionchief=SimpleNamespace(base_url=BASE_URL),
         discord=SimpleNamespace(
-            channels=SimpleNamespace(missions_forum=900, mission_announce=901)
+            channels=SimpleNamespace(missions_forum=900, mission_announce=901),
+            mission_announce_role_id=announce_role,
         ),
         automation=SimpleNamespace(missions_forum=auto),
     )
@@ -828,6 +834,69 @@ async def test_duplicate_keys_in_payload_are_skipped(db):
     # No flip-flopping on the next run either.
     summary = await service.sync()
     assert summary["updated"] == 0 and summary["skipped"] == 3
+
+
+async def test_game_change_posts_update_note_in_thread_and_pings(db):
+    """A REAL data change: the thread gets a fresh full card as a new
+    message (readable history + forum bump) and ONE bundled ping goes to
+    the announcement channel with the configured role."""
+    payload = _missions()
+    cfg = _cfg(announce_new=True, announce_role=777)
+    service, forum, announce, _ = _service(db, payload, cfg)
+    await service.sync()  # backfill completes → announcements armed
+    payload[0]["average_credits"] = 99999
+    payload[1]["requirements"]["firetrucks"] = 9
+    summary = await service.sync()
+    assert summary["updated"] == 2
+    thread = next(t for t in forum.threads if "#297" in t.name)
+    # In-thread update note with the current card.
+    content, embed = thread.messages[-1]
+    assert "Mission updated" in content
+    fields = {f.name: f.value for f in embed.fields}
+    assert fields["💰 Credits"] == "99,999 average"
+    assert thread.archived is True  # re-archived afterwards
+    # One bundled announcement for both changes, with the role ping.
+    assert len(announce.sent) == 1
+    assert "2 missions updated" in announce.sent[0]
+    assert "<@&777>" in announce.sent[0]
+    assert "Overturned Fuel Truck" in announce.sent[0]
+
+
+async def test_format_only_rerender_stays_silent(db):
+    """A bot-side re-render (format bump / legacy row) must not post
+    update notes or ping — only a real game change may."""
+    payload = _missions()
+    cfg = _cfg(announce_new=True)
+    service, forum, announce, _ = _service(db, payload, cfg)
+    await service.sync()
+    # Simulate a pre-migration row (unknown data hash) with a stale
+    # content hash — exactly what a format bump looks like.
+    await db.execute(
+        "UPDATE missions_forum_posts SET content_hash = 'stale', "
+        "data_hash = NULL WHERE mission_key = '297'"
+    )
+    summary = await service.sync()
+    assert summary["updated"] == 1
+    thread = next(t for t in forum.threads if "#297" in t.name)
+    assert thread.messages == []  # starter edited, no update note
+    assert announce.sent == []
+    # The data hash is now known, so the NEXT real change does announce.
+    payload[0]["average_credits"] = 1
+    summary = await service.sync()
+    assert summary["updated"] == 1
+    assert len(thread.messages) == 1
+    assert len(announce.sent) == 1
+
+
+async def test_new_mission_announce_includes_role_ping(db):
+    payload = _missions()[:2]
+    cfg = _cfg(announce_new=True, announce_role=777)
+    service, _, announce, _ = _service(db, payload, cfg)
+    await service.sync()
+    payload.append(json.loads(json.dumps(OVERLAY)))
+    await service.sync()
+    assert len(announce.sent) == 1
+    assert announce.sent[0].startswith("<@&777> 🆕")
 
 
 async def test_announce_off_by_default(db):

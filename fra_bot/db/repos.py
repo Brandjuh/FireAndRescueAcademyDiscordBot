@@ -1832,18 +1832,24 @@ class MissionsForumRepo:
             return list(await cur.fetchall())
 
     async def record(
-        self, mission_key: str, thread_id: int, content_hash: str, name: str
+        self,
+        mission_key: str,
+        thread_id: int,
+        content_hash: str,
+        name: str,
+        data_hash: str | None = None,
     ) -> None:
         now = utcnow_iso()
         await self._db.execute(
             "INSERT INTO missions_forum_posts (mission_key, thread_id, name, "
-            "content_hash, posted_at, updated_at, last_seen_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "content_hash, data_hash, posted_at, updated_at, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(mission_key) DO UPDATE SET "
             "thread_id = excluded.thread_id, name = excluded.name, "
             "content_hash = excluded.content_hash, "
+            "data_hash = excluded.data_hash, "
             "updated_at = excluded.updated_at, last_seen_at = excluded.last_seen_at",
-            (mission_key, thread_id, name, content_hash, now, now, now),
+            (mission_key, thread_id, name, content_hash, data_hash, now, now, now),
         )
 
     async def touch_seen(self, mission_keys: list[str]) -> None:
