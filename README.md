@@ -419,6 +419,11 @@ commands can be used inside a thread. Replies honour the global `dry_run`
 by a per-conversation timestamp marker, and a reply sent via Discord is
 not mirrored back on the next scan.
 
+There is also a **message panel** with buttons (like the old bot):
+✉️ Send message (form), 📥 Check inbox, ↩️ Reply by conversation number —
+self-maintained in `discord.channels.dm_panel` (default the event-pings
+channel, `0` disables it), staff-gated, results shown privately.
+
 ### Updating from Discord
 
 `!fra update` fetches the latest code on the bot's branch, installs any

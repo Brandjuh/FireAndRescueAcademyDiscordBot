@@ -201,6 +201,11 @@ class FRABot(commands.Bot):
         requests_cog = self.get_cog("RequestsCog")
         if requests_cog is not None:
             self.add_view(RequestPanelView(requests_cog))
+        dm_cog = self.get_cog("DmMirrorCog")
+        if dm_cog is not None:
+            from .cogs.dm_mirror import DmPanelView
+
+            self.add_view(DmPanelView(dm_cog))
 
         # Register the /mission slash command with the guild for fast
         # propagation (global sync can take up to an hour).

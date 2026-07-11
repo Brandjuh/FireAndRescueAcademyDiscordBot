@@ -447,6 +447,55 @@ def test_extract_conversation_id_paths():
     assert extract_conversation_id("<p>nothing</p>", "https://x/messages/new") is None
 
 
+async def test_reply_by_conversation_id(db):
+    """The panel's Reply button routes by conversation id directly."""
+    service, forum, mc, _ = _service(db)
+    await service.scan()
+    ok, _detail = await service.reply_to_conversation("9001", "Direct reply")
+    assert ok is True
+    data = dict(mc.posts[0][1])
+    assert data["message[conversation_id]"] == "9001"
+    assert data["message[body]"] == "Direct reply"
+
+
+def test_panel_exposes_stable_custom_ids():
+    from fra_bot.cogs.dm_mirror import (
+        PANEL_REPLY_ID,
+        PANEL_SCAN_ID,
+        PANEL_SEND_ID,
+        DmMirrorCog,
+        DmPanelView,
+    )
+
+    cog = DmMirrorCog.__new__(DmMirrorCog)
+    embed = DmMirrorCog.panel_embed(cog)
+    assert embed.title == "📬 MissionChief messages"
+    view = DmPanelView(cog)
+    ids = {child.custom_id for child in view.children}
+    # Stable ids: persistent buttons must survive restarts.
+    assert ids == {PANEL_SEND_ID, PANEL_SCAN_ID, PANEL_REPLY_ID}
+
+
+def test_panel_keeper_maintains_the_dm_panel():
+    from fra_bot.cogs.panels import PanelKeeperCog
+
+    keeper = PanelKeeperCog.__new__(PanelKeeperCog)
+    keeper.bot = SimpleNamespace(
+        cfg=SimpleNamespace(
+            automation=SimpleNamespace(
+                mission=SimpleNamespace(panel_channel_id=1)
+            ),
+            discord=SimpleNamespace(
+                channels=SimpleNamespace(
+                    request_panel=2, member_panel=3, dm_panel=4
+                )
+            ),
+        )
+    )
+    specs = {spec.key: spec.channel_id() for spec in keeper._specs()}
+    assert specs["dms"] == 4
+
+
 def test_settings_expose_the_new_keys():
     from fra_bot.core import settings as rt
 

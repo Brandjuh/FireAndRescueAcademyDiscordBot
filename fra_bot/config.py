@@ -75,6 +75,9 @@ class DiscordChannels:
     mission_announce: int = 1524842963316773036
     # In-game DM mirror forum: every PM conversation ↔ one thread.
     dm_mirror: int = 1517694938501087342
+    # The message panel (Send Message / Check Inbox / Reply buttons) —
+    # the old bot kept it in the event-pings channel; 0 = off.
+    dm_panel: int = 1421242306136113254
 
 
 @dataclass(frozen=True)
@@ -356,6 +359,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                     channels.get("mission_announce", 1524842963316773036)
                 ),
                 dm_mirror=int(channels.get("dm_mirror", 1517694938501087342)),
+                dm_panel=int(channels.get("dm_panel", 1421242306136113254)),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])

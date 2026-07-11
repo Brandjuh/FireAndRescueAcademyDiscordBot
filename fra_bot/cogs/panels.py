@@ -75,6 +75,10 @@ class PanelKeeperCog(commands.Cog):
                 "member", "DossierCog",
                 lambda: int(getattr(cfg.discord.channels, "member_panel", 0) or 0),
             ),
+            PanelSpec(
+                "dms", "DmMirrorCog",
+                lambda: int(getattr(cfg.discord.channels, "dm_panel", 0) or 0),
+            ),
         ]
 
     def _spec(self, key: str) -> PanelSpec | None:
