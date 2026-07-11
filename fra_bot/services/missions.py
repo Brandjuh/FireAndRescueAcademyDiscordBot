@@ -67,6 +67,7 @@ from ..mc.parsers.missions_custom import (
     CustomMission,
     build_custom_mission_payload,
     find_saved_mission,
+    parse_saved_missions,
 )
 from ..mc.parsers.mission_spec import (
     PRESET_TYPE_IDS,
@@ -80,6 +81,11 @@ log = logging.getLogger(__name__)
 
 # A board request is done with the board once it reaches one of these.
 _TERMINAL_STATUSES = frozenset({"done", "failed", "skipped"})
+
+#: State key caching the game's Saved Missions dropdown for the Discord
+#: chooser: {"names": [...], "at": epoch}. Filled opportunistically on
+#: every large-mission form fetch and by the periodic refresh job.
+SAVED_MISSIONS_STATE_KEY = "saved_missions_list"
 
 # Give up on a mission after this many transient-error retries (condition
 # waits for the cooldown don't count).
@@ -303,6 +309,52 @@ class MissionScheduler:
                 "caption": entry["caption"],
             }
         return None
+
+    # -- the game's Saved Missions list (for the Discord chooser) --------
+
+    async def _cache_saved_missions(self, html: str) -> None:
+        """Cache the Saved Missions dropdown captions from a large-mission
+        form page. Best effort; an empty parse never clobbers a known list
+        (a glitchy page is indistinguishable from a truly empty dropdown)."""
+        try:
+            names = [s.caption for s in parse_saved_missions(html)]
+        except Exception:  # noqa: BLE001 — the cache must never break a start
+            return
+        if not names:
+            return
+        await self.state.set(SAVED_MISSIONS_STATE_KEY, json.dumps({
+            "names": names[:50],
+            "at": int(datetime.datetime.now(datetime.timezone.utc).timestamp()),
+        }))
+
+    async def saved_mission_names(self) -> list[str]:
+        """The cached Saved Missions captions (may lag the game a little)."""
+        raw = await self.state.get(SAVED_MISSIONS_STATE_KEY)
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return []
+        names = data.get("names") if isinstance(data, dict) else None
+        return [str(n) for n in names] if isinstance(names, list) else []
+
+    async def refresh_saved_missions(self) -> list[str]:
+        """Fetch the large-mission form and refresh the Saved Missions
+        cache — the periodic job behind the Discord chooser's list. Runs as
+        bulk traffic (pure maintenance); on failure the old cache stands."""
+        from ..core.pacing import bulk_traffic
+
+        try:
+            with bulk_traffic():
+                html = await self.client.fetch_page(
+                    EVENT_KINDS["large"]["new_path"]
+                )
+        except MissionChiefError as exc:
+            log.warning("saved-missions refresh failed: %s", exc)
+            return await self.saved_mission_names()
+        await self._cache_saved_missions(html)
+        return await self.saved_mission_names()
 
     async def poll(self) -> None:
         """Scan the request board(s), then advance the queue/rotation.
@@ -1075,6 +1127,10 @@ class MissionScheduler:
         except MissionChiefError as exc:
             return StartOutcome("form_error", f"could not load mission form ({exc}); will retry")
         form = parse_event_form(html)
+        if kind != "event":
+            # Free ride: the large form carries the Saved Missions dropdown —
+            # keep the Discord chooser's list current on every start attempt.
+            await self._cache_saved_missions(html)
 
         # Coins ignore the free cooldown; only the free path must wait.
         if not allow_coins:

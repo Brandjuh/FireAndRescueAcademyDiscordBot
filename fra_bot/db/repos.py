@@ -1279,27 +1279,26 @@ class MissionsRepo:
         ) as cur:
             return list(await cur.fetchall())
 
-    async def previous_mission_options(self, limit: int = 24) -> list[aiosqlite.Row]:
-        """Distinct previously requested saved/custom large missions, newest
-        first — the mission panel's "previously created missions" choices.
-        Failed/cancelled ones are excluded so a bad saved-mission name isn't
+    async def previous_saved_names(self, limit: int = 24) -> list[str]:
+        """Distinct saved-mission names previously requested, newest first —
+        the Discord chooser's fallback when the game's dropdown hasn't been
+        cached yet. Failed/cancelled ones are excluded so a bad name isn't
         offered forever; dry-run outcomes ('skipped') remain valid options.
-        SQLite's MAX(id) bare-column rule makes every other column come from
-        that newest row, so a re-run picks up the latest custom_values."""
+        (Customs are deliberately absent: custom Own missions are requested
+        on the in-game board only — Discord's UI can't carry the values.)"""
         async with self._db.conn.execute(
             """
-            SELECT MAX(id) AS id, kind, mission_source, saved_name, caption,
-                   custom_values
+            SELECT saved_name
             FROM scheduled_missions
-            WHERE kind = 'large' AND mission_source IN ('saved', 'custom')
-              AND COALESCE(saved_name, caption) IS NOT NULL
+            WHERE kind = 'large' AND mission_source = 'saved'
+              AND saved_name IS NOT NULL
               AND status NOT IN ('failed', 'cancelled')
-            GROUP BY mission_source, COALESCE(saved_name, caption)
+            GROUP BY saved_name
             ORDER BY MAX(id) DESC LIMIT ?
             """,
             (limit,),
         ) as cur:
-            return list(await cur.fetchall())
+            return [row["saved_name"] for row in await cur.fetchall()]
 
     async def next_pending(self) -> aiosqlite.Row | None:
         """The member request at the head of the line — the next thing the

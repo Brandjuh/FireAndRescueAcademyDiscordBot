@@ -484,6 +484,16 @@ class FRABot(commands.Bot):
                 name="class-availability",
                 initial_delay_seconds=180.0,
             )
+        # Saved-missions list for the Discord mission chooser: one form
+        # fetch per pass (also refreshed opportunistically on every large
+        # mission start).
+        sched.add_interval_job(
+            self._guarded(self.missions_service.refresh_saved_missions,
+                          "saved-missions"),
+            minutes=360,
+            name="saved-missions",
+            initial_delay_seconds=600.0,
+        )
         log.info(
             "Background jobs scheduled (automation: dry_run=%s, training=%s, "
             "building=%s, events=%s, mission=%s)",

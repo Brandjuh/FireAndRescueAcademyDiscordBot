@@ -135,14 +135,17 @@ async def test_panel_embed_renders_counts_and_timestamp(db):
     await cog.reload_snapshot()
     embed = cog.panel_embed()
     assert "🚒 Fire Station: **2** classes" in embed.description
-    assert "<t:" in embed.description and ":R>" in embed.description
+    assert "Last updated <t:" in embed.description
+    assert "Next update expected <t:" in embed.description
     assert "/training" in embed.description
 
 
 async def test_panel_embed_placeholder_before_first_walk(db):
     cog = ClassesPanelCog(FakeBot(db=db, trainings=_service(db)))
     await cog.reload_snapshot()
-    assert "hasn't finished yet" in cog.panel_embed().description
+    description = cog.panel_embed().description
+    assert "No availability numbers yet" in description
+    assert "update is expected within the hour" in description
 
 
 def test_keeper_registers_the_classes_panel():

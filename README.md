@@ -291,11 +291,15 @@ remainder is retried automatically as classrooms free up.
 **Mission panel = the kind menu.** The panel carries two buttons —
 **Alliance event** and **Large scale alliance mission** — each opening a
 flow with only its own options. Events pick a schedule and fill the
-event options in the modal; large missions also pick the mission data:
-a **preset**, a **previously created** saved/custom mission (one-click,
-values prefilled), a saved mission, or custom Own-mission units. A bare
-**/mission** shows the same two-way menu; `/mission location:…` queues
-directly.
+event options in the modal; large missions pick the mission data: a
+**preset**, or one of the game's **saved missions** picked from a list
+(the Saved Missions dropdown is cached from the mission form — refreshed
+on every large-mission start and by a 6-hourly job; DB history of
+successfully used names is the fallback). **Custom Own missions are
+deliberately not requestable through Discord** — the required-unit
+values don't fit its forms; the in-game mission board carries the
+copy-paste template. A bare **/mission** shows the same two-way menu;
+`/mission location:…` queues directly.
 
 **Outcome notifications** for Discord requests go to the member as a
 Discord DM; if DMs are closed the bot sends an in-game PM instead
