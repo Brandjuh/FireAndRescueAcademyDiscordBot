@@ -816,6 +816,24 @@ class AdminCog(commands.Cog):
         else:
             await ctx.send(f"Mission #{mission_id} not found.")
 
+    @fra.command(name="savedmissions")
+    async def saved_missions(self, ctx: commands.Context) -> None:
+        """List the game's Saved Missions exactly as the bot sees them on
+        the mission form (also refreshes the Discord chooser's cache)."""
+        async with ctx.typing():
+            names = await self.bot.missions_service.refresh_saved_missions()
+        if names:
+            lines = "\n".join(f"`{i}.` {name}" for i, name in enumerate(names, 1))
+            await ctx.send(f"💾 **Saved missions on the form ({len(names)}):**\n{lines}"[:1900])
+            return
+        await ctx.send(
+            "❌ No saved missions visible on the mission form. Either the "
+            "alliance has none saved, or the game draws the block with "
+            "JavaScript and Playwright isn't installed. "
+            "`!fra dump /missionAllianceNew rendered` uploads the page for "
+            "inspection."
+        )
+
     @fra.command(name="coinmission", aliases=["paidmission"])
     async def coin_mission(self, ctx: commands.Context, *, spec_text: str = "") -> None:
         """Start a mission/event using COINS — owner-only.

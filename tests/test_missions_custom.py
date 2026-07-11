@@ -190,3 +190,17 @@ def test_saved_mission_round_trips_into_payload():
     assert body["mission_position[mission_custom][caption]"] == "Wildfire"
     assert body[value_field_name("need_lf")] == "100"
     assert body[value_field_name("need_brush_truck")] == "100"
+
+
+def test_find_saved_mission_tolerates_case_and_whitespace():
+    from fra_bot.mc.parsers.missions_custom import find_saved_mission
+
+    html = (
+        "<a class='mission_custom_saved_restore' "
+        "params='{\"caption\": \"[WF]  Wildfire\", \"need_lf\": \"10\"}'>"
+        "[WF]  Wildfire (Alice)</a>"
+    )
+    assert find_saved_mission(html, "[wf] wildfire") is not None
+    assert find_saved_mission(html, " [WF] Wildfire ") is not None
+    assert find_saved_mission(html, "Wildfire") is not None  # contains
+    assert find_saved_mission(html, "Tornado") is None

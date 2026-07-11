@@ -1297,3 +1297,48 @@ async def test_coin_start_bypasses_backoff_and_pings(db):
     outcome = await sched.run_coin_mission(spec, confirm=True)
     assert outcome.state == "started"                      # coins ignore it
     assert len(await EventPingsRepo(db).unposted()) == 1
+
+
+def test_saved_not_found_error_lists_visible_captions(tmp_path):
+    from fra_bot.services.missions import MissionScheduler, _SavedMissionNotFound
+    import pytest
+
+    svc = MissionScheduler.__new__(MissionScheduler)
+    html = (
+        "<a class='mission_custom_saved_restore' "
+        "params='{\"caption\": \"Big Fire\"}'>Big Fire</a>"
+        "<a class='mission_custom_saved_restore' "
+        "params='{\"caption\": \"Dock Blaze\"}'>Dock Blaze</a>"
+    )
+    with pytest.raises(_SavedMissionNotFound) as excinfo:
+        svc._build_body(
+            None, html, kind="large", source="saved", preset_type_id=None,
+            caption=None, custom_values={}, saved_name="[WF] Wildfire",
+            latitude=1.0, longitude=2.0, address="x",
+        )
+    message = str(excinfo.value)
+    assert "Big Fire" in message and "Dock Blaze" in message
+
+    with pytest.raises(_SavedMissionNotFound) as excinfo:
+        svc._build_body(
+            None, "<html>no anchors</html>", kind="large", source="saved",
+            preset_type_id=None, caption=None, custom_values={},
+            saved_name="[WF] Wildfire", latitude=1.0, longitude=2.0, address="x",
+        )
+    assert "NO saved missions" in str(excinfo.value)
+
+
+async def test_saved_missions_html_returns_plain_when_anchors_present(tmp_path):
+    from fra_bot.services.missions import MissionScheduler
+
+    svc = MissionScheduler.__new__(MissionScheduler)
+    html = (
+        "<a class='mission_custom_saved_restore' "
+        "params='{\"caption\": \"Big Fire\"}'>Big Fire</a>"
+    )
+    assert await svc._saved_missions_html(html) == html
+    # No anchors + no Playwright in the test env -> plain HTML comes back.
+    from types import SimpleNamespace
+    svc.cfg = SimpleNamespace(missionchief=SimpleNamespace(base_url="https://x"))
+    svc.client = SimpleNamespace(session=SimpleNamespace(cookie_jar=[]))
+    assert await svc._saved_missions_html("<html></html>") == "<html></html>"
