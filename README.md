@@ -250,7 +250,35 @@ Requires Discord administrator permission or a role listed in
 | `!fra restart` | Restart the bot to reload `config.yaml` / `.env` (no code update) |
 
 Members request missions with the **/mission** slash command or the panel
-button (see below).
+button (see below); trainings and buildings have their own panel plus the
+matching **/training** and **/building** slash commands, which open the
+exact same flows.
+
+### Discord request intake checks
+
+Every Discord-sourced request (panel button or slash command) is checked
+**at intake**, before anything queues:
+
+* **contribution gate** — the member's approved `!verify` link resolves
+  their MissionChief account; the roster contribution rate must meet the
+  feature's minimum
+  (`automation.<training|building|events|mission>.min_contribution_rate`).
+  No verified link → the request is refused with instructions to verify
+  first.
+* **building requests** additionally resolve the Google Maps pin right
+  away: the location must geocode and must be detected as a real hospital
+  or prison. A good request queues (the funds floor is still checked at
+  build time); a bad one is rejected on the spot **with the reason**.
+* every refusal still writes a request row (status `skipped`/`cancelled`
+  with a `rejected at intake: …` detail), announced in the admin log — so
+  there is always a log entry.
+
+Accepted requests carry the resolved MC identity (`requester_mc_id`), so
+the services' execute-time contribution checks keep working as a second
+line of defence, exactly like board requests. The mission chooser offers
+the large-scale **presets** and the member's **previously created**
+saved/custom missions as one-click options; a bare **/mission** opens the
+chooser, `/mission location:…` queues directly.
 
 ### Missions & events
 

@@ -243,14 +243,17 @@ class AutomationCog(commands.Cog):
             )
             if row["requester_name"]:
                 embed.add_field(name="Requester", value=row["requester_name"][:_FIELD_LIMIT])
-            embed.add_field(
-                name="Board post",
-                value=(
-                    f"[#{row['post_id']}]"
-                    f"(https://www.missionchief.com/alliance_threads/"
-                    f"{row['thread_id']})"
-                )[:_FIELD_LIMIT],
-            )
+            if row["thread_id"]:
+                embed.add_field(
+                    name="Board post",
+                    value=(
+                        f"[#{row['post_id']}]"
+                        f"(https://www.missionchief.com/alliance_threads/"
+                        f"{row['thread_id']})"
+                    )[:_FIELD_LIMIT],
+                )
+            else:
+                embed.add_field(name="Source", value="Discord panel / slash command")
             details = self._payload_summary(row["payload"])
             if details:
                 embed.add_field(name="Details", value=details[:_FIELD_LIMIT], inline=False)
