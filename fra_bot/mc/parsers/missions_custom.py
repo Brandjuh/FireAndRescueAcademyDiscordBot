@@ -270,18 +270,24 @@ def parse_saved_missions(html: str) -> list[SavedMission]:
     return out
 
 
+def _fold_caption(text: str) -> str:
+    """Case- and whitespace-insensitive caption form ("[WF]  Wildfire" ==
+    "[wf] wildfire") — members retype names by hand."""
+    return " ".join((text or "").split()).lower()
+
+
 def find_saved_mission(html: str, name: str) -> SavedMission | None:
-    """Find a saved mission by (case-insensitive) caption."""
-    wanted = (name or "").strip().lower()
+    """Find a saved mission by (case/whitespace-insensitive) caption."""
+    wanted = _fold_caption(name)
     if not wanted:
         return None
     matches = parse_saved_missions(html)
     for saved in matches:
-        if saved.caption.strip().lower() == wanted:
+        if _fold_caption(saved.caption) == wanted:
             return saved
     # Loose contains-match as a convenience when the exact caption is long.
     for saved in matches:
-        if wanted in saved.caption.strip().lower():
+        if wanted in _fold_caption(saved.caption):
             return saved
     return None
 

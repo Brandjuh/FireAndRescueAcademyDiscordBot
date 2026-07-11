@@ -353,8 +353,44 @@ class MissionScheduler:
         except MissionChiefError as exc:
             log.warning("saved-missions refresh failed: %s", exc)
             return await self.saved_mission_names()
+        html = await self._saved_missions_html(html)
         await self._cache_saved_missions(html)
         return await self.saved_mission_names()
+
+    def _playwright_cookies(self) -> list[dict]:
+        return [
+            {
+                "name": cookie.key,
+                "value": cookie.value,
+                "url": self.cfg.missionchief.base_url,
+            }
+            for cookie in self.client.session.cookie_jar
+        ]
+
+    async def _saved_missions_html(self, plain_html: str) -> str:
+        """HTML that actually carries the Saved Missions anchors. When the
+        plain form has none, the block may be drawn by JavaScript — retry
+        once with a browser-rendered fetch (only if Playwright is there).
+        Falls back to the plain HTML on any failure."""
+        if parse_saved_missions(plain_html):
+            return plain_html
+        from ..mc.browser_builder import BrowserBuilder, render_page
+
+        if not BrowserBuilder.available():
+            return plain_html
+        try:
+            rendered = await render_page(
+                self.cfg.missionchief.base_url,
+                self._playwright_cookies(),
+                EVENT_KINDS["large"]["new_path"],
+            )
+        except Exception as exc:  # noqa: BLE001 — a fallback must not raise
+            log.warning("rendered saved-missions fetch failed: %s", exc)
+            return plain_html
+        if parse_saved_missions(rendered):
+            log.info("saved missions found via the rendered form (JS-drawn)")
+            return rendered
+        return plain_html
 
     async def poll(self) -> None:
         """Scan the request board(s), then advance the queue/rotation.
@@ -1127,10 +1163,16 @@ class MissionScheduler:
         except MissionChiefError as exc:
             return StartOutcome("form_error", f"could not load mission form ({exc}); will retry")
         form = parse_event_form(html)
+        saved_html = html
         if kind != "event":
+            if source == "saved":
+                # The lookup must see the anchors even when the block is
+                # JS-drawn; the rendered fallback only triggers when the
+                # plain HTML has none.
+                saved_html = await self._saved_missions_html(html)
             # Free ride: the large form carries the Saved Missions dropdown —
             # keep the Discord chooser's list current on every start attempt.
-            await self._cache_saved_missions(html)
+            await self._cache_saved_missions(saved_html)
 
         # Coins ignore the free cooldown; only the free path must wait.
         if not allow_coins:
@@ -1159,7 +1201,8 @@ class MissionScheduler:
         # Build the right body.
         try:
             body = self._build_body(
-                form, html, kind=kind, source=source, preset_type_id=preset_type_id,
+                form, saved_html, kind=kind, source=source,
+                preset_type_id=preset_type_id,
                 caption=caption, custom_values=custom_values, saved_name=saved_name,
                 latitude=latitude, longitude=longitude, address=address,
                 event_type_id=chosen_event_id, area=area, shape=shape,
@@ -1295,8 +1338,17 @@ class MissionScheduler:
         if source == "saved":
             saved = find_saved_mission(html, saved_name or "")
             if saved is None:
+                captions = [s.caption for s in parse_saved_missions(html)]
+                visible = (
+                    "visible: " + ", ".join(captions[:10])
+                    + (f" (+{len(captions) - 10} more)" if len(captions) > 10 else "")
+                    if captions else
+                    "the form shows NO saved missions — run `!fra savedmissions` "
+                    "to diagnose"
+                )
                 raise _SavedMissionNotFound(
-                    f"saved mission '{saved_name}' not found in the dropdown"
+                    f"saved mission '{saved_name}' not found in the dropdown — "
+                    + visible
                 )
             return build_custom_mission_payload(
                 form, saved.to_custom(), latitude=latitude, longitude=longitude,
