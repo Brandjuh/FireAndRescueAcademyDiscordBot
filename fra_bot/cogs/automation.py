@@ -8,8 +8,10 @@ Besides the admin-log embed, a published row can trigger (both mirror the
 reference bot's behaviour):
 
 * a **requester DM** when the request came from the Discord panel
-  (``payload.discord_user_id``) — success and sent-to-admins texts, with a
-  channel-mention fallback (auto-deleted after 15 min) when DMs are closed;
+  (``payload.discord_user_id``) — success and sent-to-admins texts. When
+  the Discord DM can't be delivered (DMs closed), the fallback is an
+  **in-game PM** (mirrored into the DM forum) — never a mention in the
+  request channel;
 * an **approve/deny decision embed** in the ``admin_approvals`` channel
   when a training/building request fails — Approve re-queues the request
   for a fresh attempt, Deny closes it with a reason that is posted back to
@@ -45,8 +47,6 @@ _STATUS_COLOUR = {
     "waiting": discord.Colour.orange(),
 }
 _STATUS_ICON = {"done": "✅", "failed": "❌", "skipped": "⏭️", "waiting": "⏳"}
-
-DM_FALLBACK_DELETE_SECONDS = 15 * 60
 
 # The reference bot's "how to join" block, Discord-markdown flavour.
 _JOIN_INSTRUCTIONS_MD = (
@@ -302,18 +302,43 @@ class AutomationCog(commands.Cog):
             return
         except (discord.Forbidden, discord.HTTPException, discord.NotFound):
             pass
-        # DMs closed: mention in the request channel, cleaned up after a
-        # while — the reference bot's fallback.
-        channel_id = data.get("channel_id")
-        channel = self.bot.get_channel(int(channel_id)) if channel_id else None
-        if channel is not None:
-            try:
-                await channel.send(
-                    f"<@{int(user_id)}> {text}"[:1900],
-                    delete_after=DM_FALLBACK_DELETE_SECONDS,
-                )
-            except discord.HTTPException:
-                log.warning("DM fallback to channel %s failed", channel_id)
+        # Discord DMs closed: fall back to an in-game PM — never a mention
+        # in the request channel (public outcome pings are just noise).
+        await self._notify_ingame_fallback(row, text)
+
+    async def _notify_ingame_fallback(self, row, text: str) -> None:
+        """Deliver an undeliverable requester DM as an in-game PM instead,
+        mirrored into the DM forum like every outgoing message. The MC name
+        resolves from the request's verified identity (``requester_mc_id``
+        → roster); older rows fall back to the stored requester name."""
+        from ..db.repos import MembersRepo
+
+        name = None
+        if row["requester_mc_id"]:
+            roster = await MembersRepo(self.bot.db).active_members()
+            member = roster.get(int(row["requester_mc_id"]))
+            if member is not None:
+                name = member["name"]
+        name = name or row["requester_name"]
+        if not name:
+            log.warning(
+                "request %s: DMs closed and no MC identity — outcome only in "
+                "the admin log", row["id"],
+            )
+            return
+        plain = text.replace("**", "").replace("`", "")
+        try:
+            result = await self.bot.dm_mirror.send_new(
+                name, f"{str(row['kind']).title()} request", plain[:2000]
+            )
+        except Exception:
+            log.exception("request %s: in-game PM fallback errored", row["id"])
+            return
+        if not result.get("ok"):
+            log.warning(
+                "request %s: in-game PM fallback to %s failed: %s",
+                row["id"], name, result.get("detail"),
+            )
 
     # -- admin approve/deny ----------------------------------------------
 

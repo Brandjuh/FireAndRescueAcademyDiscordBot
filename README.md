@@ -275,10 +275,28 @@ Every Discord-sourced request (panel button or slash command) is checked
 
 Accepted requests carry the resolved MC identity (`requester_mc_id`), so
 the services' execute-time contribution checks keep working as a second
-line of defence, exactly like board requests. The mission chooser offers
-the large-scale **presets** and the member's **previously created**
-saved/custom missions as one-click options; a bare **/mission** opens the
-chooser, `/mission location:…` queues directly.
+line of defence, exactly like board requests.
+
+**Trainings run first.** An accepted Discord training request executes
+IMMEDIATELY (the intake kicks the queue, sharing the poll's job lock) —
+no waiting for the next scheduled pass — and every board poll now runs
+member requests before guide upkeep; the slow academy availability walk
+runs as low-priority bulk traffic. The training chooser (panel button or
+`/training`) opens with the cached free-class counts per agency.
+
+**Mission panel = the kind menu.** The panel carries two buttons —
+**Alliance event** and **Large scale alliance mission** — each opening a
+flow with only its own options. Events pick a schedule and fill the
+event options in the modal; large missions also pick the mission data:
+a **preset**, a **previously created** saved/custom mission (one-click,
+values prefilled), a saved mission, or custom Own-mission units. A bare
+**/mission** shows the same two-way menu; `/mission location:…` queues
+directly.
+
+**Outcome notifications** for Discord requests go to the member as a
+Discord DM; if DMs are closed the bot sends an in-game PM instead
+(mirrored into the DM forum) — it never mentions the member in the
+request channel.
 
 ### Missions & events
 

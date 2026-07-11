@@ -46,7 +46,8 @@ from ..services.intake import contribution_gate
 
 log = logging.getLogger(__name__)
 
-PANEL_BUTTON_ID = "fra:mission:new"
+PANEL_EVENT_ID = "fra:mission:event"
+PANEL_LARGE_ID = "fra:mission:large"
 _POST_PAUSE_SECONDS = 1.2
 _DESC_LIMIT = 4096
 
@@ -246,33 +247,25 @@ def _values_text(raw: str | None) -> str:
 
 
 class MissionChooserView(discord.ui.View):
-    """Ephemeral chooser shown after the panel button (and by a bare
-    ``/mission``): pick kind / schedule / mission data, then open the details
-    modal. The mission-data select carries the large-scale presets as
-    one-click options; a second select offers the previously created
-    saved/custom missions from the queue history. Not persistent (created
-    per click)."""
+    """Ephemeral chooser for ONE kind — the member already picked **Alliance
+    event** or **Large scale mission** (panel button or the two-way menu
+    behind a bare ``/mission``). Events only choose a schedule (their options
+    live in the modal); large missions also pick the mission data — the
+    presets as one-click options, plus the previously created saved/custom
+    missions from the queue history. Not persistent (created per click)."""
 
-    def __init__(self, cog: "MissionsCog", previous: list | None = None) -> None:
+    def __init__(
+        self, cog: "MissionsCog", kind: str, previous: list | None = None
+    ) -> None:
         super().__init__(timeout=300)
         self._cog = cog
-        self.kind = "large"
+        self.kind = kind                # fixed: "large" | "event"
         self.schedule = "once"
         self.source = "preset"          # preset | custom | saved
         self.preset: str | None = None  # preset display name, if one was picked
         self.pick = None                # a previously created mission (row)
         self._previous = {str(row["id"]): row for row in (previous or [])}
 
-        self.kind_select = discord.ui.Select(
-            placeholder="Kind — large scale mission or event",
-            options=[
-                discord.SelectOption(label="Large scale alliance mission",
-                                     value="large", default=True, emoji="🚨"),
-                discord.SelectOption(label="Alliance event", value="event", emoji="🎉"),
-            ],
-            row=0,
-        )
-        self.kind_select.callback = self._pick_kind
         self.schedule_select = discord.ui.Select(
             placeholder="Schedule — one-time or recurring",
             options=[
@@ -280,69 +273,68 @@ class MissionChooserView(discord.ui.View):
                 discord.SelectOption(label="Recurring (add to rotation)",
                                      value="recurring", emoji="🔁"),
             ],
-            row=1,
+            row=0,
         )
         self.schedule_select.callback = self._pick_schedule
-        self.source_select = discord.ui.Select(
-            placeholder="Mission data — a preset, custom, or a saved mission",
-            options=[
-                discord.SelectOption(
-                    label="Standard large mission", value="preset", default=True,
-                    description="a standard mission at the location", emoji="🚨",
-                ),
-                *[
-                    discord.SelectOption(label=f"Preset: {name}"[:100],
-                                         value=f"preset:{name}"[:100], emoji="📋")
-                    for name in sorted(_PRESET_BY_NAME)
-                ],
-                discord.SelectOption(
-                    label="Custom Own mission", value="custom",
-                    description="you supply the required units", emoji="🛠️",
-                ),
-                discord.SelectOption(
-                    label="Saved mission", value="saved",
-                    description="type one of the game's Saved Missions", emoji="💾",
-                ),
-            ],
-            row=2,
-        )
-        self.source_select.callback = self._pick_source
+        self.source_select: discord.ui.Select | None = None
         self.prev_select: discord.ui.Select | None = None
-        if self._previous:
-            self.prev_select = discord.ui.Select(
-                placeholder="Optional — re-run a previously created mission",
+        if kind == "large":
+            self.source_select = discord.ui.Select(
+                placeholder="Mission data — a preset, custom, or a saved mission",
                 options=[
                     discord.SelectOption(
-                        label=(row["saved_name"] or row["caption"] or "?")[:100],
-                        value=str(row["id"]),
-                        description=(
-                            "Saved mission" if row["mission_source"] == "saved"
-                            else "Custom Own mission"
-                        ),
-                        emoji="💾" if row["mission_source"] == "saved" else "🛠️",
-                    )
-                    for row in self._previous.values()
-                ][:25],
-                row=3,
+                        label="Standard large mission", value="preset", default=True,
+                        description="a standard mission at the location", emoji="🚨",
+                    ),
+                    *[
+                        discord.SelectOption(label=f"Preset: {name}"[:100],
+                                             value=f"preset:{name}"[:100], emoji="📋")
+                        for name in sorted(_PRESET_BY_NAME)
+                    ],
+                    discord.SelectOption(
+                        label="Custom Own mission", value="custom",
+                        description="you supply the required units", emoji="🛠️",
+                    ),
+                    discord.SelectOption(
+                        label="Saved mission", value="saved",
+                        description="type one of the game's Saved Missions", emoji="💾",
+                    ),
+                ],
+                row=1,
             )
-            self.prev_select.callback = self._pick_previous
+            self.source_select.callback = self._pick_source
+            if self._previous:
+                self.prev_select = discord.ui.Select(
+                    placeholder="Optional — re-run a previously created mission",
+                    options=[
+                        discord.SelectOption(
+                            label=(row["saved_name"] or row["caption"] or "?")[:100],
+                            value=str(row["id"]),
+                            description=(
+                                "Saved mission" if row["mission_source"] == "saved"
+                                else "Custom Own mission"
+                            ),
+                            emoji="💾" if row["mission_source"] == "saved" else "🛠️",
+                        )
+                        for row in self._previous.values()
+                    ][:25],
+                    row=2,
+                )
+                self.prev_select.callback = self._pick_previous
         self.go_btn = discord.ui.Button(
             label="Continue", style=discord.ButtonStyle.primary, emoji="➡️", row=4,
         )
         self.go_btn.callback = self._cont
-        for item in (self.kind_select, self.schedule_select, self.source_select,
-                     *((self.prev_select,) if self.prev_select else ()), self.go_btn):
+        for item in (self.schedule_select,
+                     *((self.source_select,) if self.source_select else ()),
+                     *((self.prev_select,) if self.prev_select else ()),
+                     self.go_btn):
             self.add_item(item)
 
     @staticmethod
     def _mark(select: discord.ui.Select, value: str | None) -> None:
         for option in select.options:
             option.default = option.value == value
-
-    async def _pick_kind(self, interaction: discord.Interaction) -> None:
-        self.kind = self.kind_select.values[0]
-        self._mark(self.kind_select, self.kind)
-        await interaction.response.edit_message(view=self)
 
     async def _pick_schedule(self, interaction: discord.Interaction) -> None:
         self.schedule = self.schedule_select.values[0]
@@ -392,24 +384,62 @@ class MissionChooserView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
 
+class MissionKindPickView(discord.ui.View):
+    """The two-way choice menu — **Alliance event** or **Large scale
+    alliance mission** — shown ephemerally by a bare ``/mission``. The
+    panel carries the same two buttons persistently."""
+
+    def __init__(self, cog: "MissionsCog") -> None:
+        super().__init__(timeout=300)
+        self._cog = cog
+        event_btn = discord.ui.Button(
+            label="Alliance event", style=discord.ButtonStyle.primary, emoji="🎉",
+        )
+        event_btn.callback = self._pick_event
+        large_btn = discord.ui.Button(
+            label="Large scale alliance mission",
+            style=discord.ButtonStyle.primary, emoji="🚨",
+        )
+        large_btn.callback = self._pick_large
+        self.add_item(event_btn)
+        self.add_item(large_btn)
+
+    async def _pick_event(self, interaction: discord.Interaction) -> None:
+        await self._cog.open_chooser(interaction, "event")
+
+    async def _pick_large(self, interaction: discord.Interaction) -> None:
+        await self._cog.open_chooser(interaction, "large")
+
+
 class MissionPanelView(discord.ui.View):
-    """Persistent panel; re-registered at startup so its button survives
-    restarts."""
+    """Persistent panel; re-registered at startup so its buttons survive
+    restarts. The kind choice IS the panel: one button per kind."""
 
     def __init__(self, cog: "MissionsCog") -> None:
         super().__init__(timeout=None)
         self._cog = cog
 
     @discord.ui.button(
-        label="Request a mission",
+        label="Alliance event",
         style=discord.ButtonStyle.primary,
-        emoji="🚨",
-        custom_id=PANEL_BUTTON_ID,
+        emoji="🎉",
+        custom_id=PANEL_EVENT_ID,
     )
-    async def request(
+    async def request_event(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        await self._cog.open_chooser(interaction)
+        await self._cog.open_chooser(interaction, "event")
+
+    @discord.ui.button(
+        label="Large scale alliance mission",
+        style=discord.ButtonStyle.primary,
+        emoji="🚨",
+        custom_id=PANEL_LARGE_ID,
+    )
+    async def request_large(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self._cog.open_chooser(interaction, "large")
 
 
 class MissionsCog(commands.Cog):
@@ -425,14 +455,20 @@ class MissionsCog(commands.Cog):
 
     # -- request intake --------------------------------------------------
 
-    async def open_chooser(self, interaction: discord.Interaction) -> None:
-        """The guided flow behind the panel button and a bare ``/mission``:
-        the chooser, seeded with the previously created missions."""
-        previous = await self.repo.previous_mission_options()
+    async def open_chooser(self, interaction: discord.Interaction, kind: str) -> None:
+        """The guided flow for one kind, behind the panel buttons and the
+        two-way menu of a bare ``/mission``. The large chooser is seeded
+        with the previously created missions."""
+        if kind == "event":
+            text = ("🎉 **Alliance event** — pick a schedule, then press "
+                    "**Continue** for the location and event options:")
+            previous = []
+        else:
+            text = ("🚨 **Large scale alliance mission** — pick the schedule "
+                    "and mission data, then press **Continue**:")
+            previous = await self.repo.previous_mission_options()
         await interaction.response.send_message(
-            "Choose what you'd like to start, then press **Continue**:",
-            view=MissionChooserView(self, previous),
-            ephemeral=True,
+            text, view=MissionChooserView(self, kind, previous), ephemeral=True,
         )
 
     async def submit_request(
@@ -499,8 +535,12 @@ class MissionsCog(commands.Cog):
         call_volume: Literal["30", "45", "60"] = "45",
     ) -> None:
         if not (location or "").strip():
-            # A bare /mission opens the exact same guided flow as the panel.
-            await self.open_chooser(interaction)
+            # A bare /mission opens the same two-way choice as the panel.
+            await interaction.response.send_message(
+                "What would you like to start?",
+                view=MissionKindPickView(self),
+                ephemeral=True,
+            )
             return
         try:
             spec = build_spec(
@@ -575,16 +615,17 @@ class MissionsCog(commands.Cog):
             title="🚨 Request an alliance mission or event",
             colour=discord.Colour.blurple(),
             description=(
-                "Click below to request a **large scale alliance mission** or an "
-                "**alliance event**. Give a location (a place name like "
-                "*Grand Rapids*, or a maps link), choose one-time or recurring, "
-                "and pick the mission data: a **preset**, a **previously "
-                "created mission**, a saved mission, or your own custom "
-                "Own-mission units. The bot queues it and starts it at the "
-                "next free slot.\n\n"
-                "**/mission** does the same — bare it opens this chooser, "
-                "with options it queues directly. You need a verified account "
-                "(`!verify`) with enough alliance contribution."
+                "**🎉 Alliance event**\n"
+                "Pick a schedule, then give the location and the event "
+                "options (type, area, shape, call volume).\n\n"
+                "**🚨 Large scale alliance mission**\n"
+                "Pick the schedule and the mission data — a **preset**, a "
+                "**previously created mission**, a saved mission, or your "
+                "own custom Own-mission units — then give the location.\n\n"
+                "The bot queues your request and starts it at the next free "
+                "slot. **/mission** does the same: bare it opens this menu, "
+                "with options it queues directly. You need a verified "
+                "account (`!verify`) with enough alliance contribution."
             ),
         )
 

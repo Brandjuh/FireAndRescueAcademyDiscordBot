@@ -82,9 +82,24 @@ class FakeMissionService:
         return 40 + len(self.calls)
 
 
+class FakeTrainingsService:
+    """Captures the immediate-execution kick from the Discord intake."""
+
+    def __init__(self):
+        self.executed = asyncio.Event()
+
+    async def execute_queue_now(self):
+        self.executed.set()
+        return 1
+
+
 class FakeBot(SimpleNamespace):
     async def wait_until_ready(self):
         await asyncio.Event().wait()  # park the task loops forever
+
+    def job_lock(self, name):
+        locks = self.__dict__.setdefault("_locks", {})
+        return locks.setdefault(name, asyncio.Lock())
 
 
 class FakeResponse:
@@ -125,7 +140,10 @@ class FakeInteraction:
 
 
 def _requests_cog(db, geocoder=None):
-    bot = FakeBot(db=db, cfg=_cfg(), geocoder=geocoder or FakeGeocoder())
+    bot = FakeBot(
+        db=db, cfg=_cfg(), geocoder=geocoder or FakeGeocoder(),
+        trainings=FakeTrainingsService(),
+    )
     return RequestsCog(bot)
 
 
@@ -203,7 +221,53 @@ async def test_training_intake_carries_mc_identity(db):
         assert len(rows) == 1
         assert rows[0]["requester_mc_id"] == 42
         assert rows[0]["status"] == "pending"
-        assert "queued" in interaction.sent[0]
+        assert "✅" in interaction.sent[0]
+    finally:
+        cog.cog_unload()
+
+
+async def test_training_intake_kicks_the_queue_immediately(db):
+    # Opening a training is FIRST priority: the queue runs the moment the
+    # request is created, not at the next scheduled pass.
+    await _seed_member(db, 42, "Alice", 10.0, discord_id=100)
+    cog = _requests_cog(db)
+    try:
+        interaction = FakeInteraction()
+        await cog.submit_training(interaction, "fire", "HazMat", remind=False)
+        await asyncio.wait_for(cog.bot.trainings.executed.wait(), timeout=2)
+        assert "right now" in interaction.sent[0]
+    finally:
+        cog.cog_unload()
+
+
+async def test_training_intake_does_not_kick_when_automation_off(db):
+    await _seed_member(db, 42, "Alice", 10.0, discord_id=100)
+    cog = _requests_cog(db)
+    cog.bot.cfg.automation.training.enabled = False
+    try:
+        interaction = FakeInteraction()
+        await cog.submit_training(interaction, "fire", "HazMat", remind=False)
+        await asyncio.sleep(0)  # let any (wrong) kick task run
+        assert not cog.bot.trainings.executed.is_set()
+        assert "automation is currently OFF" in interaction.sent[0]
+    finally:
+        cog.cog_unload()
+
+
+async def test_training_chooser_shows_cached_availability(db):
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.trainings import AVAILABILITY_STATE_KEY
+
+    cog = _requests_cog(db)
+    try:
+        assert await cog._availability_line() is None  # never collected yet
+        await StateRepo(db).set(AVAILABILITY_STATE_KEY, json.dumps({
+            "counts": {"fire": 3, "police": 1, "ems": 0, "coastal": 2},
+            "at": 1_750_000_000,
+        }))
+        line = await cog._availability_line()
+        assert "Fire" in line and "**3**" in line
+        assert "<t:1750000000:R>" in line
     finally:
         cog.cog_unload()
 
@@ -441,7 +505,7 @@ async def test_chooser_offers_presets_and_previous_missions(db):
             {"id": 2, "mission_source": "custom", "saved_name": None,
              "caption": "Dock Blaze", "custom_values": '{"need_lf": 25}'},
         ]
-        view = MissionChooserView(cog, previous)
+        view = MissionChooserView(cog, "large", previous)
         source_values = [o.value for o in view.source_select.options]
         assert "preset:Major fire" in source_values
         assert "custom" in source_values and "saved" in source_values
@@ -449,7 +513,31 @@ async def test_chooser_offers_presets_and_previous_missions(db):
         labels = [o.label for o in view.prev_select.options]
         assert "Big Fire Drill" in labels and "Dock Blaze" in labels
         # No history -> no second select, the modal input still works.
-        assert MissionChooserView(cog, []).prev_select is None
+        assert MissionChooserView(cog, "large", []).prev_select is None
+    finally:
+        cog.cog_unload()
+
+
+async def test_event_chooser_has_no_mission_data_selects(db):
+    # The kind is chosen up front (panel buttons / two-way menu); the event
+    # chooser only asks for a schedule — its options live in the modal.
+    cog = _missions_cog(db, FakeMissionService())
+    try:
+        view = MissionChooserView(cog, "event")
+        assert view.kind == "event"
+        assert view.source_select is None and view.prev_select is None
+    finally:
+        cog.cog_unload()
+
+
+async def test_kind_pick_menu_offers_event_and_large(db):
+    from fra_bot.cogs.missions import MissionKindPickView
+
+    cog = _missions_cog(db, FakeMissionService())
+    try:
+        labels = [item.label for item in MissionKindPickView(cog).children]
+        assert "Alliance event" in labels
+        assert "Large scale alliance mission" in labels
     finally:
         cog.cog_unload()
 
@@ -460,3 +548,58 @@ def test_values_text_round_trip():
     )
     assert _values_text(None) == ""
     assert _values_text("not json") == ""
+
+
+# ---------------------------------------------------------------------------
+# Outcome notification: Discord DM -> in-game PM, never a channel mention
+# ---------------------------------------------------------------------------
+
+async def test_closed_dms_fall_back_to_ingame_pm(db):
+    import discord
+
+    from fra_bot.cogs.automation import AutomationCog
+
+    await _seed_member(db, 42, "Alice", 10.0, discord_id=100)
+
+    class ClosedDmUser:
+        async def send(self, text):
+            raise discord.Forbidden(
+                SimpleNamespace(status=403, reason="Forbidden"), "DMs closed"
+            )
+
+    sent_pms = []
+    channel_sends = []
+
+    async def send_new(name, subject, body):
+        sent_pms.append((name, subject, body))
+        return {"ok": True, "detail": "sent", "thread": None}
+
+    bot = FakeBot(
+        db=db, cfg=_cfg(),
+        dm_mirror=SimpleNamespace(send_new=send_new),
+        add_dynamic_items=lambda *items: None,
+        get_user=lambda uid: ClosedDmUser(),
+        get_channel=lambda cid: SimpleNamespace(send=channel_sends.append),
+    )
+    cog = AutomationCog(bot)
+    try:
+        row = {
+            "id": 9, "kind": "building", "status": "done",
+            "status_detail": "built hospital #5",
+            "requester_mc_id": 42, "requester_name": "Discord Nick",
+            "payload": json.dumps({
+                "discord_user_id": 100, "channel_id": 555,
+                "building_type": "hospital",
+                "address": "St Mary Hospital, Grand Rapids",
+                "latitude": 42.96, "longitude": -85.67, "building_id": 5,
+            }),
+        }
+        await cog._notify_requester(row)
+        assert len(sent_pms) == 1
+        name, subject, body = sent_pms[0]
+        assert name == "Alice"          # resolved via mc_id, not the nickname
+        assert subject == "Building request"
+        assert "APPROVED" in body and "**" not in body
+        assert channel_sends == []      # never a mention in the channel
+    finally:
+        cog.cog_unload()

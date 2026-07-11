@@ -33,12 +33,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from ..db.repos import AutomationRepo, RemindersRepo
+from ..db.repos import AutomationRepo, RemindersRepo, StateRepo
 from ..geo.geocoder import GeocodeError
 from ..geo.maps_links import find_maps_links
 from ..mc.trainings_catalog import DISCIPLINES
 from ..services.buildings import detect_building_type
 from ..services.intake import INTAKE_REJECTED_FLAG, contribution_gate
+from ..services.trainings import AVAILABILITY_STATE_KEY
 
 log = logging.getLogger(__name__)
 
@@ -194,12 +195,7 @@ class RequestPanelView(discord.ui.View):
     async def training(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        await interaction.response.send_message(
-            "Pick the academy type and the course, then press "
-            "**Request training**:",
-            view=TrainingChooserView(self._cog),
-            ephemeral=True,
-        )
+        await self._cog.open_training_chooser(interaction)
 
     @discord.ui.button(
         label="Request a building",
@@ -312,17 +308,37 @@ class RequestsCog(commands.Cog):
         notes = []
         if remind:
             notes.append(f"🔔 I'll ping you in ~{days} day(s) when it should be done")
-        if not self.bot.cfg.automation.training.enabled:
+        if self.bot.cfg.automation.training.enabled:
+            # Opening a training is FIRST priority: run the queue right now
+            # instead of letting the member wait for the next scheduled pass.
+            self._kick_training_queue()
+            timing = "I'm opening a **free class right now**"
+        else:
+            timing = "I'll open a free class once automation is back on"
             notes.append(
                 "⚠️ training automation is currently OFF — an admin must enable it"
             )
         note = ("\n" + " · ".join(notes)) if notes else ""
         await _send(
             interaction,
-            f"✅ Request **#{rid}** queued — **{training}** "
-            f"({_DISCIPLINE_LABEL.get(discipline, discipline)}). I'll open a "
-            f"free class at the next pass (~5 min).{note}",
+            f"✅ Request **#{rid}** — **{training}** "
+            f"({_DISCIPLINE_LABEL.get(discipline, discipline)}). {timing}; "
+            f"you'll get the result as a DM.{note}",
         )
+
+    def _kick_training_queue(self) -> None:
+        """Execute the training queue immediately in the background, sharing
+        the scheduled poll's job lock so the two can never overlap. Any
+        failure is retried by the normal poll — the request row is already
+        committed."""
+        async def _run() -> None:
+            try:
+                async with self.bot.job_lock("board-trainings"):
+                    await self.bot.trainings.execute_queue_now()
+            except Exception:
+                log.exception("immediate training execution failed")
+
+        asyncio.get_running_loop().create_task(_run())
 
     async def submit_building(
         self, interaction: discord.Interaction, link: str
@@ -449,17 +465,47 @@ class RequestsCog(commands.Cog):
 
     # -- slash commands (same flows as the panel buttons) -----------------
 
+    async def open_training_chooser(self, interaction: discord.Interaction) -> None:
+        """The training flow behind the panel button and ``/training``,
+        headed by the cached free-class counts so members see availability
+        at a glance (the hourly guide walk keeps the cache fresh — walking
+        every academy per click would hammer the game)."""
+        text = ("Pick the academy type and the course, then press "
+                "**Request training**:")
+        line = await self._availability_line()
+        if line:
+            text = f"{line}\n\n{text}"
+        await interaction.response.send_message(
+            text, view=TrainingChooserView(self), ephemeral=True,
+        )
+
+    async def _availability_line(self) -> str | None:
+        """Cached free classrooms per agency, or None when never collected."""
+        raw = await StateRepo(self.bot.db).get(AVAILABILITY_STATE_KEY)
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        counts = data.get("counts")
+        if not isinstance(counts, dict) or not counts:
+            return None
+        parts = [
+            f"{_DISCIPLINE_LABEL.get(key, key)} **{int(count)}**"
+            for key, count in counts.items()
+        ]
+        line = "📊 Free classes: " + " · ".join(parts)
+        if data.get("at"):
+            line += f" (as of <t:{int(data['at'])}:R>)"
+        return line
+
     @app_commands.command(
         name="training",
         description="Request a training — same flow as the request panel",
     )
     async def slash_training(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(
-            "Pick the academy type and the course, then press "
-            "**Request training**:",
-            view=TrainingChooserView(self),
-            ephemeral=True,
-        )
+        await self.open_training_chooser(interaction)
 
     @app_commands.command(
         name="building",

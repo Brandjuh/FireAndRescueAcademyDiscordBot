@@ -198,11 +198,16 @@ class BoardRequestService:
     async def poll(self) -> None:
         run_id = await self.runs.start(f"board_{self.kind}")
         try:
-            await self._ensure_guide()
-            # The board scan must NEVER starve the queue: a broken/unreachable
-            # thread would otherwise abort the poll before _execute_ready(),
-            # leaving Discord-sourced (and previously detected) requests
-            # pending forever. Scan errors are recorded, the queue still runs.
+            # Member requests come FIRST: scan for new posts, run the queue,
+            # and only then do guide upkeep — a guide refresh can be slow
+            # (e.g. the trainings availability walk) and must never make a
+            # member wait for their class/building/mission.
+            #
+            # The board scan must NEVER starve the queue either: a broken or
+            # unreachable thread would otherwise abort the poll before
+            # _execute_ready(), leaving Discord-sourced (and previously
+            # detected) requests pending forever. Scan errors are recorded,
+            # the queue still runs.
             detected = 0
             fresh_count = 0
             scan_error: str | None = None
@@ -216,6 +221,7 @@ class BoardRequestService:
                 )
 
             executed = await self._execute_ready()
+            await self._ensure_guide()
 
             await self.runs.finish(
                 run_id,
@@ -287,6 +293,13 @@ class BoardRequestService:
                 self.kind, self.thread_id, len(fresh_posts),
             )
         return detected, len(fresh_posts)
+
+    async def execute_queue_now(self) -> int:
+        """Run the claimable request queue RIGHT NOW — no board scan, no
+        guide upkeep. The Discord intake kicks this the moment a member's
+        request is created, so it never waits for the next scheduled pass.
+        Callers hold the job's shared lock to stay out of the poll's way."""
+        return await self._execute_ready()
 
     async def _execute_ready(self) -> int:
         """Execute all claimable (pending + due-waiting) requests."""
