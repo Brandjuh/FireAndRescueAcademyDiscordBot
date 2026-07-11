@@ -52,6 +52,7 @@ async def _seed_member(db, mc_id, name, rate, *, discord_id=None, status="approv
 
 def _cfg():
     return SimpleNamespace(
+        sync=SimpleNamespace(members_interval=60),
         automation=SimpleNamespace(
             dry_run=True,
             training=SimpleNamespace(enabled=True, min_contribution_rate=5.0),
@@ -182,13 +183,21 @@ async def test_gate_rejects_pending_link(db):
     assert not verdict.ok and verdict.reason == "not_linked"
 
 
-async def test_gate_rejects_low_contribution_with_numbers(db):
+async def test_gate_rejects_low_contribution_with_numbers_and_retry_eta(db):
+    import datetime as dt
+
     await _seed_member(db, 42, "Alice", 2.0, discord_id=100)
     verdict = await contribution_gate(db, 100, 5.0)
     assert not verdict.ok and verdict.reason == "low_contribution"
     assert verdict.mc_user_id == 42
     assert "2%" in verdict.rejection_text and "5%" in verdict.rejection_text
     assert "2%" in verdict.log_detail
+    # A member who just fixed their alliance tax is told when the roster
+    # refreshes and to retry after that (no live per-member check exists).
+    now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    assert verdict.retry_at is not None and verdict.retry_at > now
+    assert f"<t:{verdict.retry_at}:R>" in verdict.rejection_text
+    assert "try again" in verdict.rejection_text
 
 async def test_gate_passes_good_contribution(db):
     await _seed_member(db, 42, "Alice", 5.0, discord_id=100)
