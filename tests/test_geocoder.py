@@ -196,3 +196,32 @@ def test_locationiq_style_key_param(db):
     )
     url = g._geocode_url("/reverse", {"lat": "1", "lon": "2"})
     assert "key=abc" in url and "api_key=" not in url
+
+
+async def test_short_link_interstitial_body_is_mined_for_coordinates(geo):
+    """A short link that does NOT redirect (Google interstitial, HTTP 200)
+    still resolves when the page body carries the real Maps URL."""
+    async def fake_expand(url):
+        return url, (
+            "<html><link rel=\"canonical\" href=\"https://www.google.com/"
+            "maps/place/Somewhere/@40.1,-74.2,15z\"/></html>"
+        )
+
+    async def fake_reverse(lat, lng):
+        return "Somewhere, USA", "forest"
+
+    geo._expand_short_link = fake_expand
+    geo.reverse = fake_reverse
+    result = await geo.resolve_maps_link("https://maps.app.goo.gl/uRjpSAxq7")
+    assert abs(result.latitude - 40.1) < 1e-6
+    assert abs(result.longitude + 74.2) < 1e-6
+
+
+async def test_unresolvable_short_link_error_names_the_interstitial(geo):
+    async def fake_expand(url):
+        return url, "<html>consent wall with nothing useful</html>"
+
+    geo._expand_short_link = fake_expand
+    with pytest.raises(GeocodeError) as excinfo:
+        await geo.resolve_maps_link("https://maps.app.goo.gl/uRjpSAxq7")
+    assert "did not redirect" in str(excinfo.value)

@@ -94,3 +94,45 @@ def test_double_encoded_place_text_cleaned():
     loc = parse_maps_url(url)
     assert not loc.has_coordinates
     assert loc.place_text == "St. Olav's University Hospital"
+
+
+def test_search_and_dir_urls_yield_place_text():
+    from fra_bot.geo.maps_links import parse_maps_url
+
+    assert parse_maps_url(
+        "https://www.google.com/maps/search/Grand+Canyon"
+    ).place_text == "Grand Canyon"
+    assert parse_maps_url(
+        "https://www.google.com/maps/dir/Yosemite+Village/"
+    ).place_text == "Yosemite Village"
+
+
+def test_extract_location_from_interstitial_html():
+    from fra_bot.geo.maps_links import extract_location_from_html
+
+    canonical = (
+        "<html><link rel=\"canonical\" href=\"https://www.google.com/maps/"
+        "place/Yosemite/@37.865,-119.538,15z\"/></html>"
+    )
+    loc = extract_location_from_html(canonical)
+    assert (loc.latitude, loc.longitude, loc.place_text) == (
+        37.865, -119.538, "Yosemite"
+    )
+
+    refresh = (
+        "<meta http-equiv=\"refresh\" "
+        "content=\"0; url=https://www.google.com/maps?q=48.85,2.35\">"
+    )
+    loc = extract_location_from_html(refresh)
+    assert (loc.latitude, loc.longitude) == (48.85, 2.35)
+
+    app_state = "window.APP_INITIALIZATION_STATE=[[[12.0,-119.538,37.865]"
+    loc = extract_location_from_html(app_state)  # [zoom, lng, lat] order
+    assert (loc.latitude, loc.longitude) == (37.865, -119.538)
+
+    body_link = (
+        "<a href=\"https://www.google.com/maps/search/Grand+Canyon/data\">x</a>"
+    )
+    assert extract_location_from_html(body_link).place_text == "Grand Canyon"
+
+    assert extract_location_from_html("<html>nothing here</html>").latitude is None
