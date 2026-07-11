@@ -1063,6 +1063,29 @@ class AdminCog(commands.Cog):
             content=f"{icon} DM mirror:\n" + "\n".join(summary["lines"])[:1800]
         )
 
+    @fra.command(name="dm")
+    async def dm_send(self, ctx: commands.Context, *, spec: str = "") -> None:
+        """Start a new in-game PM from Discord (the old bot's Send Message):
+        `!fra dm <username> | <subject> | <body>`. The username is matched
+        case-insensitively against the alliance roster; the conversation is
+        mirrored into the DM forum right away so you can continue there."""
+        parts = [p.strip() for p in spec.split("|", 2)]
+        if len(parts) != 3 or not all(parts):
+            await ctx.send(
+                "⚠️ Use: `!fra dm <username> | <subject> | <body>` "
+                "(three parts separated by `|`)."
+            )
+            return
+        recipient, subject, body = parts
+        message = await ctx.send(f"⏳ Sending PM to **{recipient}**…")
+        result = await self.bot.dm_mirror.send_new(recipient, subject, body)
+        if not result["ok"]:
+            await message.edit(content=f"❌ Not sent: {result['detail']}"[:1900])
+            return
+        thread = result.get("thread")
+        where = f" — continue in {thread.mention}" if thread is not None else ""
+        await message.edit(content=f"✅ PM sent to **{recipient}**{where}")
+
     @fra.command(name="nextmission")
     async def next_mission(self, ctx: commands.Context) -> None:
         """Show which mission/event is up next and where (for the eventpinger)."""

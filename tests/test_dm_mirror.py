@@ -76,6 +76,16 @@ CONV_9002_HTML = """
 
 SENT_HTML = "<html><body>Message Sent.</body></html>"
 
+COMPOSE_HTML = """
+<form action="/messages" method="post">
+  <input type="hidden" name="authenticity_token" value="tok"/>
+  <input type="text" name="message[recipient]" value=""/>
+  <input type="text" name="message[subject]" value=""/>
+  <textarea name="message[body]"></textarea>
+  <input type="submit" name="commit" value="Send"/>
+</form>
+"""
+
 
 # ---------------------------------------------------------------------------
 # Parsers
@@ -140,11 +150,17 @@ class FakeMC:
     async def fetch_page(self, path, **kwargs):
         if path == "/messages":
             return self.inbox_html
+        if path.rstrip("/").endswith("/messages/new"):
+            return COMPOSE_HTML
         cid = path.rsplit("/", 1)[-1]
         return self.conversations[cid]
 
+    @staticmethod
+    def _pairs(data):
+        return list(data.items()) if isinstance(data, dict) else list(data)
+
     async def post_form(self, path, data, **kwargs):
-        self.posts.append((path, list(data)))
+        self.posts.append((path, self._pairs(data)))
         return (200, self.reply_response, "https://www.missionchief.com/messages/9001")
 
 
@@ -365,6 +381,70 @@ async def test_unconfigured_forum_reports(db):
     service = DmMirrorService(cfg, FakeMC(), db, bot)
     summary = await service.scan()
     assert summary["error"]
+
+
+async def _seed_member(db, mc_user_id, name):
+    await db.execute(
+        "INSERT INTO members (mc_user_id, name, first_seen_at, last_seen_at) "
+        "VALUES (?, ?, '2026-01-01T00:00:00', '2026-07-01T00:00:00')",
+        (mc_user_id, name),
+    )
+
+
+async def test_send_new_resolves_roster_name_and_mirrors_immediately(db):
+    service, forum, mc, _ = _service(db)
+    await _seed_member(db, 111, "Alex1129")
+
+    # The game reports the new conversation as id 777 via the redirect.
+    async def post_form(path, data, **kwargs):
+        mc.posts.append((path, mc._pairs(data)))
+        return (200, SENT_HTML, "https://www.missionchief.com/messages/777")
+
+    mc.post_form = post_form
+    mc.conversations["777"] = CONV_9002_HTML.replace("9002", "777").replace(
+        "4m1rudin", "Alex1129"
+    )
+    # Case-insensitive roster match ("alex1129" -> "Alex1129").
+    result = await service.send_new("alex1129", "Hello", "Welcome to FRA!")
+    assert result["ok"] is True
+    assert result["thread"] is not None
+    assert "#777" in result["thread"].name
+    # Sent to the game with the exact roster casing.
+    _, payload = mc.posts[0]
+    assert dict(payload)["message[recipient]"] == "Alex1129"
+    # The mapping exists, so thread replies work right away.
+    assert (await DmMirrorRepo(db).get("777"))["thread_id"] == result["thread"].id
+
+
+async def test_send_new_refuses_non_members_with_suggestions(db):
+    service, _, mc, _ = _service(db)
+    await _seed_member(db, 111, "Alex1129")
+    result = await service.send_new("Alex1130", "Hi", "Body")
+    assert result["ok"] is False
+    assert "not an alliance member" in result["detail"]
+    assert "Alex1129" in result["detail"]  # did-you-mean
+    assert mc.posts == []
+
+
+async def test_send_new_honours_dry_run(db):
+    service, _, mc, _ = _service(db, _cfg(dry_run=True))
+    await _seed_member(db, 111, "Alex1129")
+    result = await service.send_new("Alex1129", "Hi", "Body")
+    assert result["ok"] is False and "dry-run" in result["detail"]
+    assert mc.posts == []
+
+
+def test_extract_conversation_id_paths():
+    from fra_bot.mc.messages import extract_conversation_id
+
+    assert extract_conversation_id("", "https://x/messages/777") == "777"
+    assert extract_conversation_id(
+        '<input name="message[conversation_id]" value="88"/>'
+    ) == "88"
+    assert extract_conversation_id(
+        '<a href="/messages/99">conversation</a>'
+    ) == "99"
+    assert extract_conversation_id("<p>nothing</p>", "https://x/messages/new") is None
 
 
 def test_settings_expose_the_new_keys():

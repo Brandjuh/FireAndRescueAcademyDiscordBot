@@ -241,6 +241,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra missionsforum wipe CONFIRM` | Delete every mission post from the forum and forget the mapping (paced; a later sync reposts fresh) |
 | `!fra dmmirror` | In-game DM mirror status (forum, tracked conversations, scan schedule) |
 | `!fra dmmirror scan` | Scan the in-game PM inbox now and mirror conversations to the forum |
+| `!fra dm <username> \| <subject> \| <body>` | Start a new in-game PM (roster-matched username); the conversation is mirrored to the DM forum immediately |
 | `!fra dump <path> [rendered]` | Upload a MissionChief page's HTML for inspection (CSRF tokens redacted; `rendered` runs it through Playwright) |
 | `!fra update` | Pull the latest code, install deps and restart the bot |
 | `!fra restart` | Restart the bot to reload `config.yaml` / `.env` (no code update) |
