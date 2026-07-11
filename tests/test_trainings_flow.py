@@ -667,3 +667,79 @@ async def test_all_failed_reply_uses_could_not_be_processed(db):
     assert "Training request could not be processed for Alice." in replies[0]
     assert "exists in multiple academy types" in replies[0]
     assert "Fire Station - Lifeguard Training" in replies[0]
+
+
+# -- multi-class requests (Discord: up to 4 copies of one course) ------------
+
+async def test_clamp_class_count_bounds():
+    from fra_bot.services.trainings import clamp_class_count
+
+    assert clamp_class_count(0) == 1
+    assert clamp_class_count(1) == 1
+    assert clamp_class_count("3") == 3
+    assert clamp_class_count(9) == 4       # MAX_CLASSES_PER_REQUEST
+    assert clamp_class_count(None) == 1
+    assert clamp_class_count("junk") == 1
+
+
+async def test_multi_class_request_opens_every_copy_once(db):
+    """count=3 opens the course three times but schedules ONE reminder
+    (the copies share start + duration)."""
+    svc, _ = _service(db, dry_run=True)
+    rid = await svc.requests.create(
+        kind="training", thread_id=0, post_id=1,
+        requester_name="Alice", requester_mc_id=None,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat",
+                           "duration": 3, "count": 3}],
+            "ambiguous": [],
+            "discord_user_id": 42, "channel_id": 7, "remind": True,
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+
+    row = await svc.requests.get(rid)
+    assert row["status"] == "done"
+    results = json.loads(row["payload"])["results"]
+    assert [r["outcome"] for r in results] == ["opened"] * 3
+    async with db.conn.execute("SELECT * FROM training_reminders") as cur:
+        assert len(await cur.fetchall()) == 1
+
+
+async def test_multi_class_parks_the_remainder_when_rooms_run_out(db):
+    """count=2 with one free room: the first copy opens (verified by the
+    room-count drop), the second finds no room and is parked with its
+    remaining count for the next pass."""
+    one_room = ACADEMY_PAGE.replace("<option value='2'>2</option>", "")
+    no_rooms = one_room.replace("<option value='1'>1</option>", "")
+    svc, client = _service(db, dry_run=False)
+    calls = {"n": 0}
+    orig_fetch = client.fetch_page
+
+    async def fetch(path, *, referer=None):
+        if path == "/buildings/4951748":
+            calls["n"] += 1
+            return one_room if calls["n"] == 1 else no_rooms
+        return await orig_fetch(path, referer=referer)
+
+    client.fetch_page = fetch
+    rid = await svc.requests.create(
+        kind="training", thread_id=0, post_id=2,
+        requester_name="Alice", requester_mc_id=None,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat",
+                           "duration": 3, "count": 2}],
+            "ambiguous": [],
+            "discord_user_id": 42, "channel_id": 7,
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+
+    assert len(client.posts) == 1          # only the first copy was posted
+    row = await svc.requests.get(rid)
+    assert row["status"] == "waiting"
+    pending = json.loads(row["payload"])["pending_trainings"]
+    assert pending == [{"discipline": "fire", "name": "HazMat", "count": 1}]
+    assert "HazMat" in row["status_detail"]

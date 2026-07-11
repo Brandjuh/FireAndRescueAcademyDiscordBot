@@ -43,6 +43,16 @@ MAX_ACADEMY_LIST_PAGES = 10
 ALLIANCE_SIGNUP_SECONDS = 3600  # class stays open to the alliance for 1h
 BOARD_FEE = 0                   # board classes are free
 RETRY_MINUTES = 15              # backoff between busy retries (bounded by MAX_ATTEMPTS)
+CLASS_CAPACITY = 10             # people per class (game constant, informational)
+MAX_CLASSES_PER_REQUEST = 4     # copies of one course per request/run
+
+
+def clamp_class_count(value) -> int:
+    """A requested copy count, forced into 1..MAX_CLASSES_PER_REQUEST."""
+    try:
+        return max(1, min(MAX_CLASSES_PER_REQUEST, int(value)))
+    except (TypeError, ValueError):
+        return 1
 
 GUIDE_MARKER = "[FRA] 📋 How to request a TRAINING"
 
@@ -423,17 +433,24 @@ class TrainingsService(BoardRequestService):
         payload = json.loads(request["payload"] or "{}")
 
         if "pending_trainings" in payload:
-            # Retry: only the trainings still marked busy.
-            matches = [
-                TrainingMatch(discipline=t["discipline"], name=t["name"], duration_days=0)
+            # Retry: only the trainings (and copy counts) still marked busy.
+            match_counts = [
+                (
+                    TrainingMatch(discipline=t["discipline"], name=t["name"],
+                                  duration_days=0),
+                    clamp_class_count(t.get("count", 1)),
+                )
                 for t in payload["pending_trainings"]
             ]
             ambiguous: list[AmbiguousMatch] = []
         else:
-            matches = [
-                TrainingMatch(
-                    discipline=t["discipline"], name=t["name"],
-                    duration_days=t.get("duration", 0),
+            match_counts = [
+                (
+                    TrainingMatch(
+                        discipline=t["discipline"], name=t["name"],
+                        duration_days=t.get("duration", 0),
+                    ),
+                    clamp_class_count(t.get("count", 1)),
                 )
                 for t in payload.get("trainings", [])
             ]
@@ -457,13 +474,13 @@ class TrainingsService(BoardRequestService):
                 )
                 return
 
-        await self._process(request, payload, matches, ambiguous, announce=announce)
+        await self._process(request, payload, match_counts, ambiguous, announce=announce)
 
     async def _process(
         self,
         request,
         payload: dict,
-        matches: list[TrainingMatch],
+        match_counts: list[tuple[TrainingMatch, int]],
         ambiguous: list[AmbiguousMatch],
         *,
         announce: bool,
@@ -478,43 +495,64 @@ class TrainingsService(BoardRequestService):
 
         ambiguous_reasons = [self._ambiguity_help(a) for a in ambiguous]
 
-        for match in matches:
-            outcome = await self._open_training(match)
-            results.append({
-                "training": match.name,
-                "outcome": outcome["status"],
-                "building_id": outcome.get("building_id"),
-            })
-            if outcome["status"] == "opened":
-                opened_any = True
-                opened.append({
-                    "name": match.name,
-                    "building_id": outcome["building_id"],
-                    "dry_run": bool(outcome.get("dry_run")),
+        for match, want in match_counts:
+            # Discord requests may ask for several copies of the same class
+            # (capped at MAX_CLASSES_PER_REQUEST); board requests are 1.
+            remaining = want
+            reminder_scheduled = False
+            while remaining > 0:
+                outcome = await self._open_training(match)
+                results.append({
+                    "training": match.name,
+                    "outcome": outcome["status"],
+                    "building_id": outcome.get("building_id"),
                 })
-                await self._maybe_schedule_reminder(request_id, payload, match)
-            elif outcome["status"] == "uncertain":
-                opened_any = True
-                could_not.append(
-                    f"- {match.name}: submitted to academy "
-                    f"{outcome['building_id']} but the opening could not be "
-                    "confirmed — please double-check."
-                )
-            elif outcome["status"] == "busy":
-                pending.append(
-                    {"discipline": match.discipline, "name": match.name}
-                )
-            else:  # failed
-                could_not.append(
-                    f"- {match.name}: "
-                    f"{_friendly_failure(match.discipline, outcome['reason'])}"
-                )
+                if outcome["status"] == "opened":
+                    remaining -= 1
+                    opened_any = True
+                    opened.append({
+                        "name": match.name,
+                        "building_id": outcome["building_id"],
+                        "dry_run": bool(outcome.get("dry_run")),
+                    })
+                    if not reminder_scheduled:
+                        # The copies share start + duration: one ping covers all.
+                        await self._maybe_schedule_reminder(request_id, payload, match)
+                        reminder_scheduled = True
+                    continue
+                if outcome["status"] == "uncertain":
+                    # Submitted but unproven — NEVER re-post this copy (a
+                    # false negative would double-open it).
+                    remaining -= 1
+                    opened_any = True
+                    could_not.append(
+                        f"- {match.name}: submitted to academy "
+                        f"{outcome['building_id']} but the opening could not be "
+                        "confirmed — please double-check."
+                    )
+                    continue
+                if outcome["status"] == "busy":
+                    # Classrooms exhausted mid-way: park the copies still
+                    # wanted and retry them at the next pass.
+                    pending.append({
+                        "discipline": match.discipline, "name": match.name,
+                        "count": remaining,
+                    })
+                else:  # failed — permanent for this course, drop every copy
+                    could_not.append(
+                        f"- {match.name}: "
+                        f"{_friendly_failure(match.discipline, outcome['reason'])}"
+                    )
+                break
 
         next_attempt_at: str | None = None
         bump = False
         if pending:
             status = "waiting"
-            detail = "retrying: " + ", ".join(p["name"] for p in pending)
+            detail = "retrying: " + ", ".join(
+                f"{p['name']} ×{p['count']}" if p["count"] > 1 else p["name"]
+                for p in pending
+            )
             # Busy retries must be BOUNDED: bump attempts so MAX_ATTEMPTS can
             # end a hopeless request (e.g. no academy of that discipline
             # exists), and back off so each retry doesn't re-walk the whole
@@ -526,7 +564,7 @@ class TrainingsService(BoardRequestService):
         elif opened_any:
             status = "done"
             detail = "; ".join(f"{r['training']}: {r['outcome']}" for r in results)
-        elif matches:
+        elif match_counts:
             status = "failed"
             detail = "; ".join(f"{r['training']}: {r['outcome']}" for r in results)
         else:
@@ -553,7 +591,10 @@ class TrainingsService(BoardRequestService):
         if announce or opened_any or could_not:
             reply = _board_reply(
                 requester, opened, could_not, ambiguous_reasons,
-                pending=[p["name"] for p in pending] if pending and announce else [],
+                pending=[
+                    f"{p['name']} ×{p['count']}" if p["count"] > 1 else p["name"]
+                    for p in pending
+                ] if pending and announce else [],
             )
             if reply:
                 await self.reply_for(request, reply)
@@ -794,8 +835,10 @@ def _overview_guide(min_rate: float) -> str:
         "will not be opened automatically.",
         "",
         "[b]Discord requests[/b]",
-        "You can also request trainings through the Discord request panel, "
-        "with an optional reminder when the course should be finished.",
+        "You can also request trainings through the Discord request panel "
+        f"or /training: up to {MAX_CLASSES_PER_REQUEST} classes of the same "
+        f"course at once (each class holds {CLASS_CAPACITY} people), with an "
+        "optional reminder when the course should be finished.",
         "",
         "[b]Guide posts[/b]",
         "The bot keeps one post per agency below with the exact names to use.",

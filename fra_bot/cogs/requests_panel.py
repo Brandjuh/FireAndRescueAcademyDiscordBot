@@ -39,7 +39,12 @@ from ..geo.maps_links import find_maps_links
 from ..mc.trainings_catalog import DISCIPLINES
 from ..services.buildings import detect_building_type
 from ..services.intake import INTAKE_REJECTED_FLAG, contribution_gate
-from ..services.trainings import AVAILABILITY_STATE_KEY
+from ..services.trainings import (
+    AVAILABILITY_STATE_KEY,
+    CLASS_CAPACITY,
+    MAX_CLASSES_PER_REQUEST,
+    clamp_class_count,
+)
 
 log = logging.getLogger(__name__)
 
@@ -67,13 +72,15 @@ async def _send(interaction: discord.Interaction, content: str) -> None:
 
 
 class TrainingChooserView(discord.ui.View):
-    """Ephemeral, per-click chooser: academy type → course → submit."""
+    """Ephemeral, per-click chooser: academy type → course → number of
+    classes → submit."""
 
     def __init__(self, cog: "RequestsCog") -> None:
         super().__init__(timeout=300)
         self._cog = cog
         self.discipline: str | None = None
         self.training: str | None = None
+        self.count = 1
         self.remind = False
 
         self.d_select = discord.ui.Select(
@@ -92,20 +99,37 @@ class TrainingChooserView(discord.ui.View):
             row=1,
         )
         self.t_select.callback = self._pick_training
+        self.c_select = discord.ui.Select(
+            placeholder=f"3️⃣ How many classes? (1 class = {CLASS_CAPACITY} people)",
+            options=[
+                discord.SelectOption(
+                    label=(
+                        f"{n} class — {n * CLASS_CAPACITY} people" if n == 1
+                        else f"{n} classes — {n * CLASS_CAPACITY} people"
+                    ),
+                    value=str(n),
+                    default=(n == 1),
+                )
+                for n in range(1, MAX_CLASSES_PER_REQUEST + 1)
+            ],
+            row=2,
+        )
+        self.c_select.callback = self._pick_count
         self.remind_btn = discord.ui.Button(
             label="🔕 Remind me when it's done: off",
             style=discord.ButtonStyle.secondary,
-            row=2,
+            row=3,
         )
         self.remind_btn.callback = self._toggle_remind
         self.go_btn = discord.ui.Button(
             label="Request training",
             style=discord.ButtonStyle.success,
             emoji="🎓",
-            row=2,
+            row=3,
         )
         self.go_btn.callback = self._submit
-        for item in (self.d_select, self.t_select, self.remind_btn, self.go_btn):
+        for item in (self.d_select, self.t_select, self.c_select,
+                     self.remind_btn, self.go_btn):
             self.add_item(item)
 
     async def _pick_discipline(self, interaction: discord.Interaction) -> None:
@@ -126,6 +150,12 @@ class TrainingChooserView(discord.ui.View):
         self.training = self.t_select.values[0]
         for option in self.t_select.options:
             option.default = option.value == self.training
+        await interaction.response.edit_message(view=self)
+
+    async def _pick_count(self, interaction: discord.Interaction) -> None:
+        self.count = int(self.c_select.values[0])
+        for option in self.c_select.options:
+            option.default = option.value == self.c_select.values[0]
         await interaction.response.edit_message(view=self)
 
     async def _toggle_remind(self, interaction: discord.Interaction) -> None:
@@ -151,7 +181,8 @@ class TrainingChooserView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             await self._cog.submit_training(
-                interaction, self.discipline, self.training, remind=self.remind
+                interaction, self.discipline, self.training,
+                remind=self.remind, count=self.count,
             )
         except Exception as exc:  # noqa: BLE001 — show the member what broke
             log.exception("training request submit failed")
@@ -211,14 +242,20 @@ class RequestPanelView(discord.ui.View):
 
 def training_request_payload(
     discipline: str, training: str, *, user_id: int, channel_id: int | None,
-    remind: bool,
+    remind: bool, count: int = 1,
 ) -> dict:
     """The automation_requests payload for a Discord training request —
-    the same shape the board parser produces, plus the Discord flags."""
+    the same shape the board parser produces, plus the Discord flags.
+    ``count`` asks for several copies of the same class (each holds
+    :data:`CLASS_CAPACITY` people), capped at
+    :data:`MAX_CLASSES_PER_REQUEST` per run."""
     days = DISCIPLINES.get(discipline, {}).get(training, 0)
     return {
         "trainings": [
-            {"discipline": discipline, "name": training, "duration": days}
+            {
+                "discipline": discipline, "name": training, "duration": days,
+                "count": clamp_class_count(count),
+            }
         ],
         "ambiguous": [],
         "discord_user_id": user_id,
@@ -276,12 +313,13 @@ class RequestsCog(commands.Cog):
 
     async def submit_training(
         self, interaction: discord.Interaction, discipline: str, training: str,
-        *, remind: bool,
+        *, remind: bool, count: int = 1,
     ) -> None:
+        count = clamp_class_count(count)
         payload = training_request_payload(
             discipline, training,
             user_id=interaction.user.id, channel_id=interaction.channel_id,
-            remind=remind,
+            remind=remind, count=count,
         )
         verdict = await contribution_gate(
             self.bot.db, interaction.user.id,
@@ -305,6 +343,10 @@ class RequestsCog(commands.Cog):
             payload=json.dumps(payload),
         )
         days = payload["trainings"][0]["duration"]
+        classes = (
+            "a **free class**" if count == 1
+            else f"**{count} free classes** ({count * CLASS_CAPACITY} seats)"
+        )
         notes = []
         if remind:
             notes.append(f"🔔 I'll ping you in ~{days} day(s) when it should be done")
@@ -312,9 +354,9 @@ class RequestsCog(commands.Cog):
             # Opening a training is FIRST priority: run the queue right now
             # instead of letting the member wait for the next scheduled pass.
             self._kick_training_queue()
-            timing = "I'm opening a **free class right now**"
+            timing = f"I'm opening {classes} right now"
         else:
-            timing = "I'll open a free class once automation is back on"
+            timing = f"I'll open {classes} once automation is back on"
             notes.append(
                 "⚠️ training automation is currently OFF — an admin must enable it"
             )
@@ -522,9 +564,11 @@ class RequestsCog(commands.Cog):
             colour=discord.Colour.red(),
             description=(
                 "**🎓 Request a training** (or `/training`)\n"
-                "Pick the academy type and the course. I open a **free** class "
-                "that's open to the whole alliance for 1 hour to join. Optional: "
-                "a reminder when the course should be finished.\n\n"
+                "Pick the academy type, the course and how many classes "
+                f"(up to {MAX_CLASSES_PER_REQUEST}; each class holds "
+                f"{CLASS_CAPACITY} people). Classes are **free** and open to "
+                "the whole alliance for 1 hour to join. Optional: a reminder "
+                "when the course should be finished.\n\n"
                 "**🏥 Request a building** (or `/building`)\n"
                 "Paste a Google Maps link to a **real hospital or prison** — "
                 "the pin is checked on the spot and you're told immediately "

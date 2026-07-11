@@ -283,7 +283,10 @@ IMMEDIATELY (the intake kicks the queue, sharing the poll's job lock) —
 no waiting for the next scheduled pass — and every board poll now runs
 member requests before guide upkeep; the slow academy availability walk
 runs as low-priority bulk traffic. The training chooser (panel button or
-`/training`) opens with the cached free-class counts per agency.
+`/training`) opens with the cached free-class counts per agency, and lets
+the member request up to **4 classes** of the same course in one run
+(each class holds **10 people**); if not every copy fits right away, the
+remainder is retried automatically as classrooms free up.
 
 **Mission panel = the kind menu.** The panel carries two buttons —
 **Alliance event** and **Large scale alliance mission** — each opening a
