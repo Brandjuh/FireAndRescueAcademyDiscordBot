@@ -217,6 +217,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra top10 [daily\|monthly]` | Current income top-10 |
 | `!fra report list` | List every registered report and its periods |
 | `!fra report <name> [period]` | Render any report (`period`: today/yesterday/week/month/prev-month/year/prev-year/all; `daily`/`monthly` alias the income top-10) |
+| `!fra reports [add <report> <period> <cadence> <#channel> \| remove <nr> \| reset]` | Manage the scheduled report posts at runtime (stored override on top of `reports.scheduled`) |
 | `!fra automation` | Board automation switches, dry-run state, recent requests |
 | `!fra sync <trainings\|buildings\|events>` | Poll a board thread now |
 | `!fra sync missions` | Advance the mission/event queue + rotation now |

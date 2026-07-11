@@ -170,6 +170,17 @@ class FRABot(commands.Bot):
             log.info("settings: %s", line)
         self.mc.reconfigure_pacing(self.cfg.missionchief)
 
+        # Scheduled reports: keep the YAML list as the reset point, then
+        # apply the operator's `!fra reports` override on top.
+        from .core import scheduled_reports as sched_reports
+
+        self.yaml_scheduled_reports = self.cfg.reports.scheduled
+        if await sched_reports.apply_stored(self.cfg, StateRepo(self.db)):
+            log.info(
+                "settings: reports.scheduled overridden (%d entries via "
+                "!fra reports)", len(self.cfg.reports.scheduled),
+            )
+
         await self.mc.start()
         await self.geocoder.start()
 
