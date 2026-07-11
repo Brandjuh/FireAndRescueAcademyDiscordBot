@@ -38,30 +38,55 @@ _EXPIRED_DM = (
 )
 
 
-def _queued_reply(name: str) -> str:
-    expected = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1, minutes=45)
+def _queued_reply(name: str, eta: dt.datetime | None) -> str:
+    expected = eta or (
+        dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1, minutes=45)
+    )
     return (
         "⏳ **Not found in the roster yet.**\n\n"
         "You've been added to the verification queue.\n"
         "The system will automatically check every 2 minutes.\n\n"
-        f"**Expected completion:** <t:{int(expected.timestamp())}:R> "
-        "(in ~1 hour 45 minutes at most)\n\n"
+        "**Expected completion (next roster update):** "
+        f"<t:{int(expected.timestamp())}:R>\n\n"
         "**JUST WAIT** - you don't need to do anything else.\n"
         "Once found, you'll be automatically verified.\n\n"
         "**Tips:**\n"
         f"• Your current display name is: **{name}**\n"
         "• Make sure this matches your MissionChief name exactly "
         "(including capitalization)\n"
-        "• If you just joined the alliance, wait a few minutes for the "
-        "roster to update\n"
         "• You can provide your MC User ID by running `!verify <your_mc_id>`"
     )
+
+
+_NAME_MISMATCH = (
+    "❌ **We couldn't verify you.**\n\n"
+    "Your name is not in the alliance roster **and** the alliance logs show "
+    "no recent join under **{name}** — so your Discord nickname almost "
+    "certainly doesn't match your MissionChief name.\n\n"
+    "**To fix this:**\n"
+    "1. Set your **Discord server nickname** to your **MissionChief name "
+    "exactly** (including capitalization)\n"
+    "2. Run `!verify` again\n"
+    "3. Or skip the name matching entirely: `!verify <your_mc_user_id>`\n\n"
+    "**Need help?** Contact an administrator."
+)
+
+_CONTRIBUTION_REMINDER = (
+    "💰 **One more thing:** your alliance donation is currently below the "
+    "required minimum of 5% (Code of Conduct rule 4.1).\n\n"
+    "**How to set it:**\n"
+    "1. Open the menu → **Show Alliance**\n"
+    "2. Go to **Alliance Funds**\n"
+    "3. Set your donation to at least **5%**\n\n"
+    "These funds build the hospitals, prisons and academies everyone uses. "
+    "Thank you! 🚒"
+)
 
 
 class MemberSyncCog(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
-        self.service = MemberSyncService(bot.db)
+        self.service = MemberSyncService(bot.db, mc=bot.mc, cfg=bot.cfg)
         self.queue_loop.start()
         self.prune_loop.start()
 
@@ -125,20 +150,43 @@ class MemberSyncCog(commands.Cog):
                 "You don't need to run this command again. Just wait."
             )
             return
-        if outcome.outcome == "approved":
+        if outcome.outcome in ("approved", "approved_from_logs"):
             await self._grant_role(ctx.author, reason="MemberSync auto verified")
             await ctx.send(
                 "✅ **Verified!** Your account has been linked and you've "
                 "been granted the Verified role."
             )
+            dm = (
+                f"✅ Your MissionChief account `{outcome.mc_user_id}` has been "
+                "verified and linked to your Discord account!"
+            )
+            # Fresh joins (verified straight from the join logs) always
+            # start at 0% donation; roster members below the minimum get
+            # the same friendly nudge.
+            rate = outcome.contribution_rate
+            min_rate = self.bot.cfg.automation.tax_warnings.min_rate
+            if outcome.outcome == "approved_from_logs" or (
+                rate is not None and rate < min_rate
+            ):
+                dm += "\n\n" + _CONTRIBUTION_REMINDER
+            await self._dm(ctx.author, dm)
+            return
+        if outcome.outcome == "name_mismatch":
             await self._dm(
                 ctx.author,
-                f"✅ Your MissionChief account `{outcome.mc_user_id}` has been "
-                "verified and linked to your Discord account!",
+                _NAME_MISMATCH.format(name=ctx.author.display_name),
+            )
+            await ctx.send(
+                "❌ Not found in the roster **or** the recent join logs — "
+                "your nickname probably doesn't match your MissionChief "
+                "name. Check your DMs for how to fix it."
             )
             return
-        # queued
-        await self._dm(ctx.author, _queued_reply(ctx.author.display_name))
+        # queued (logs unreachable, or an unknown MC id was supplied)
+        await self._dm(
+            ctx.author,
+            _queued_reply(ctx.author.display_name, outcome.roster_eta),
+        )
         await ctx.send(
             "🔍 Not found in the roster yet — you've been added to the "
             "verification queue. Check your DMs for details."
