@@ -31,10 +31,9 @@ _EXPIRED_DM = (
     "**MissionChief name exactly** (including capitalization)\n"
     "2. If you just joined the alliance, wait a few minutes for the roster "
     "to update\n"
-    "3. Run the command `!verify` again to restart the verification process\n"
-    "4. If you still have issues, you can provide your MC User ID: "
-    "`!verify <your_mc_user_id>`\n\n"
-    "**Need help?** Contact an administrator if you continue to have issues."
+    "3. Run the command `!verify` again to restart the verification process\n\n"
+    "**Need help?** Contact an administrator — they can link your account "
+    "manually."
 )
 
 
@@ -53,8 +52,7 @@ def _queued_reply(name: str, eta: dt.datetime | None) -> str:
         "**Tips:**\n"
         f"• Your current display name is: **{name}**\n"
         "• Make sure this matches your MissionChief name exactly "
-        "(including capitalization)\n"
-        "• You can provide your MC User ID by running `!verify <your_mc_id>`"
+        "(including capitalization)"
     )
 
 
@@ -66,9 +64,9 @@ _NAME_MISMATCH = (
     "**To fix this:**\n"
     "1. Set your **Discord server nickname** to your **MissionChief name "
     "exactly** (including capitalization)\n"
-    "2. Run `!verify` again\n"
-    "3. Or skip the name matching entirely: `!verify <your_mc_user_id>`\n\n"
-    "**Need help?** Contact an administrator."
+    "2. Run `!verify` again\n\n"
+    "**Need help?** Contact an administrator — they can link your account "
+    "manually."
 )
 
 _CONTRIBUTION_REMINDER = (
@@ -126,17 +124,19 @@ class MemberSyncCog(commands.Cog):
 
     @commands.hybrid_command(name="verify")
     @commands.cooldown(1, 30, commands.BucketType.user)
-    async def verify(self, ctx: commands.Context, mc_id: int | None = None) -> None:
+    async def verify(self, ctx: commands.Context) -> None:
         """Link your Discord account to your MissionChief account.
 
-        Your server nickname must match your MissionChief name exactly, or
-        pass your MC user id: `!verify 123456`.
+        Your server nickname must match your MissionChief name exactly —
+        that match IS the proof of ownership (a self-supplied MC id would
+        let anyone claim any account). Admins can link exceptions with
+        `!link`.
         """
         if ctx.guild is None:
             await ctx.send("❌ This can only be used in a server.")
             return
         outcome = await self.service.request_verification(
-            ctx.author.id, ctx.author.display_name, mc_id, ctx.guild.id
+            ctx.author.id, ctx.author.display_name, None, ctx.guild.id
         )
         if outcome.outcome == "already_verified":
             await self._grant_role(ctx.author, reason="MemberSync: ensure verified role")
