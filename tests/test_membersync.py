@@ -57,6 +57,130 @@ async def test_verify_approves_on_match_and_queues_on_miss(db):
     assert twice.outcome == "already_queued"
 
 
+async def _seed_join_log(db, name, mc_id, *, hours_ago=0):
+    import datetime as dt
+
+    event_at = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours_ago)
+    ).isoformat(timespec="seconds")
+    await db.execute(
+        "INSERT INTO alliance_logs (signature, occurrence_index, raw_timestamp, "
+        "event_at, action_key, description, affected_name, affected_mc_id, "
+        "scraped_at) VALUES (?, 1, 'now', ?, 'added_to_alliance', "
+        "'added to the alliance', ?, ?, ?)",
+        (f"sig-{name}-{hours_ago}", event_at, name, mc_id, event_at),
+    )
+
+
+class _LogsPage:
+    def __init__(self, rows, has_table=True):
+        self.rows = rows
+        self.has_table = has_table
+
+
+class _FakeMC:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.fetches = 0
+
+    async def fetch_page(self, path, **kwargs):
+        self.fetches += 1
+        if self.fail:
+            raise RuntimeError("circuit open")
+        return "<html>logs</html>"
+
+
+async def test_fresh_join_verifies_instantly_from_stored_logs(db):
+    """Roster hasn't swept yet, but the join is in our stored logs (synced
+    every 15 min) → instant verification, no queue, no polling."""
+    svc = MemberSyncService(db)
+    await _seed_join_log(db, "FreshJoiner", 777)
+    outcome = await svc.request_verification(100, "freshjoiner", None, 1)
+    assert outcome.outcome == "approved_from_logs"
+    assert outcome.mc_user_id == 777
+    assert await svc.links.queue_get(100) is None
+
+
+async def test_fresh_join_verifies_via_live_log_check(db, monkeypatch):
+    """Not in the roster, not in stored logs (log sync hasn't run) → one
+    live fetch of the newest log page settles it."""
+    svc = MemberSyncService(db, mc=_FakeMC())
+    monkeypatch.setattr(
+        "fra_bot.services.membersync.parse_logs_page",
+        lambda html: _LogsPage([
+            {"action_key": "added_to_alliance", "affected_name": "LiveJoiner",
+             "affected_mc_id": 888},
+        ]),
+    )
+    outcome = await svc.request_verification(200, "LiveJoiner", None, 1)
+    assert outcome.outcome == "approved_from_logs"
+    assert outcome.mc_user_id == 888
+
+
+async def test_definitive_log_miss_reports_name_mismatch(db, monkeypatch):
+    """Logs readable, no join by this name → the nickname is wrong; say so
+    instead of queueing a check that cannot succeed."""
+    svc = MemberSyncService(db, mc=_FakeMC())
+    monkeypatch.setattr(
+        "fra_bot.services.membersync.parse_logs_page",
+        lambda html: _LogsPage([
+            {"action_key": "added_to_alliance", "affected_name": "SomeoneElse",
+             "affected_mc_id": 1},
+        ]),
+    )
+    outcome = await svc.request_verification(300, "WrongNick", None, 1)
+    assert outcome.outcome == "name_mismatch"
+    assert await svc.links.queue_get(300) is None  # NOT parked in the queue
+
+
+async def test_unreachable_logs_fall_back_to_queue_with_eta(db):
+    """Circuit breaker / network down → the old queue takes over, with an
+    ETA computed from the actual members-sweep schedule."""
+    import datetime as dt
+
+    svc = MemberSyncService(db, mc=_FakeMC(fail=True))
+    # A members sweep finished 10 minutes ago.
+    run_id = await svc.runs.start("members")
+    await svc.runs.finish(run_id, status="success")
+    outcome = await svc.request_verification(400, "Somebody", None, 1)
+    assert outcome.outcome == "queued"
+    assert outcome.roster_eta is not None
+    now = dt.datetime.now(dt.timezone.utc)
+    assert now < outcome.roster_eta < now + dt.timedelta(hours=2)
+    assert await svc.links.queue_get(400) is not None
+
+
+async def test_low_contribution_travels_with_the_approval(db):
+    svc = MemberSyncService(db)
+    await db.execute(
+        "INSERT INTO members (mc_user_id, name, contribution_rate, is_active, "
+        "first_seen_at, last_seen_at) VALUES (50, 'Cheapskate', 0.0, 1, "
+        "'2026-01-01', '2026-07-01')"
+    )
+    outcome = await svc.request_verification(500, "Cheapskate", None, 1)
+    assert outcome.outcome == "approved"
+    assert outcome.contribution_rate == 0.0
+
+
+async def test_prune_spares_links_fresher_than_the_roster_sweep(db):
+    """A link made from the join logs predates its roster row; the hourly
+    prune must not strip the role during that gap."""
+    svc = MemberSyncService(db)
+    for mc_id in range(1000, 1000 + 150):  # healthy roster (> safety floor)
+        await _seed_member(db, mc_id, f"Member{mc_id}")
+    await _seed_join_log(db, "JustJoined", 9999)
+    outcome = await svc.request_verification(600, "JustJoined", None, 1)
+    assert outcome.outcome == "approved_from_logs"
+    # 9999 is not in the roster yet — but the link is fresh: spared.
+    assert await svc.prune_candidates() == []
+    # Once the link is older than the grace window, it prunes normally.
+    await db.execute(
+        "UPDATE member_links SET updated_at = '2026-01-01T00:00:00' "
+        "WHERE discord_id = 600"
+    )
+    assert (600, 9999) in await svc.prune_candidates()
+
+
 async def test_backfill_matches_links_only_unlinked_roster_matches(db):
     """`!verifyall`: existing Discord members whose nickname matches the
     roster are picked up; already-linked members and non-members are not."""
@@ -137,6 +261,12 @@ async def test_prune_flags_leavers_with_safety_gate(db):
     assert await svc.prune_candidates() == []                 # still active
 
     await db.execute("UPDATE members SET is_active = 0 WHERE mc_user_id = 42")
+    # Fresh links sit in the prune grace window (see the log-verify flow);
+    # age the link past it — leavers then derole as before.
+    await db.execute(
+        "UPDATE member_links SET updated_at = '2026-01-01T00:00:00' "
+        "WHERE discord_id = 100"
+    )
     assert await svc.prune_candidates() == [(100, 42)]        # left -> derole
 
     # A collapsed roster (broken scrape) must never mass-derole.
