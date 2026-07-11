@@ -496,6 +496,19 @@ def test_panel_keeper_maintains_the_dm_panel():
     assert specs["dms"] == 4
 
 
+async def test_mirror_now_creates_the_thread_once(db):
+    """Send-time mirroring (tax warnings and friends): the conversation
+    thread appears immediately, and a second call reuses it."""
+    service, forum, _, _ = _service(db)
+    service._mc.conversations["777"] = CONV_9002_HTML.replace("9002", "777")
+    thread = await service.mirror_now("777", "4m1rudin", "Reminder")
+    assert thread is not None and "#777" in thread.name
+    assert len(forum.threads) == 1
+    again = await service.mirror_now("777", "4m1rudin", "Reminder")
+    assert again is not None and again.id == thread.id
+    assert len(forum.threads) == 1  # no duplicate
+
+
 def test_settings_expose_the_new_keys():
     from fra_bot.core import settings as rt
 

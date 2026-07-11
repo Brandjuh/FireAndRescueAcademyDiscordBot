@@ -123,6 +123,10 @@ class FRABot(commands.Bot):
         from .services.dm_mirror import DmMirrorService
 
         self.dm_mirror = DmMirrorService(cfg, self.mc, self.db, self)
+        # Sent tax warnings mirror into the DM forum at send time (like the
+        # reference bot): outgoing-only conversations live in the game's
+        # SENT box and may never show on the inbox page the scan reads.
+        self.tax_warnings.mirror = self.dm_mirror.mirror_now
         # On-command alliance hospital/prison level + extension upgrades.
         self.building_upgrade = BuildingUpgradeService(cfg, self.mc, self.db)
 

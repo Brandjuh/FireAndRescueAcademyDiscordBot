@@ -108,6 +108,30 @@ async def test_low_rate_member_gets_reminder_then_official_warnings(db, monkeypa
     assert "Warning" in sent[1][1]
 
 
+async def test_sent_warning_mirrors_to_the_dm_forum_at_send_time(db, monkeypatch):
+    """Outgoing-only conversations may never appear on the inbox page the
+    mirror scan reads — every sent warning mirrors immediately via the
+    hook, like the reference bot's _send_message_and_link."""
+    async def fake_send(client, recipient, subject, body):
+        return True
+
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
+    mirrored = []
+
+    async def fake_mirror(conversation_id, username, subject):
+        mirrored.append((conversation_id, username, subject))
+
+    await _add_member(db, 1, "Slacker", 1.0)
+    svc = TaxWarningService(_cfg(), FakeClient(), db)
+    svc.mirror = fake_mirror
+    lines = await svc.scan()
+    assert any("conv #9001" in line for line in lines)
+    assert mirrored == [("9001", "Slacker",
+                         "Reminder: Please set your alliance donation to 5%")]
+
+
 async def test_fixed_donation_resets_warnings_immediately(db, monkeypatch):
     async def fake_send(client, recipient, subject, body):
         return True

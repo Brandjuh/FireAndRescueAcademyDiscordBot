@@ -105,6 +105,12 @@ class TaxWarningService:
     # Seconds between two warning PMs in one scan (the reference bot's
     # spacing; on top of the pacer's per-request delays).
     send_spacing = 90.0
+    # Optional hook (set by the bot): mirror_now(conversation_id, username,
+    # subject) — mirrors each sent warning into the DM forum at send time,
+    # like the reference bot's _send_message_and_link. Outgoing-only
+    # conversations may never appear on the inbox page the scheduled
+    # mirror scan reads, so without this hook they stay invisible.
+    mirror = None
 
     def __init__(self, cfg: Config, client: MissionChiefClient, db: Database) -> None:
         self.cfg = cfg
@@ -218,6 +224,13 @@ class TaxWarningService:
             await self.warnings.record_warning(
                 member["mc_user_id"], str(member["name"]), count=level,
             )
+            if self.mirror is not None and conversation_id:
+                try:
+                    await self.mirror(
+                        conversation_id, str(member["name"]), subject
+                    )
+                except Exception:  # noqa: BLE001 — mirroring is best-effort
+                    log.exception("Could not mirror tax warning conversation")
             # The conversation id makes every "sent" claim verifiable:
             # /messages/<id> in the game must show this exact message.
             proof = f"conv #{conversation_id}" if conversation_id else "no conv id!"
