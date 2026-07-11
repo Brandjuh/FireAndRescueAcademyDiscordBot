@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 
 from ..config import Config
 from ..db.database import Database
@@ -59,6 +60,55 @@ GUIDE_MARKER = "[FRA] 📋 How to request a TRAINING"
 #: State key holding the last availability walk: {"counts": {...}, "at": epoch}.
 #: Written by the hourly guide refresh; read by the Discord training chooser.
 AVAILABILITY_STATE_KEY = "training_availability"
+
+#: State key holding the live-harvested course lists per agency:
+#: {"courses": {discipline: {name: days}}, "at": epoch}. The academies'
+#: education dropdowns ARE the authoritative course list — the built-in
+#: catalog is a snapshot that goes stale as the game adds courses.
+TRAINING_COURSES_STATE_KEY = "training_courses"
+
+_DAYS_SUFFIX_RE = re.compile(r"\s*\(\s*(\d+)\s*days?\s*\)\s*$", re.IGNORECASE)
+
+
+def _clean_course_label(label):
+    """An education-dropdown label as ``(course name, days-or-None)`` —
+    some labels carry a "(N days)" suffix, most are the bare name."""
+    match = _DAYS_SUFFIX_RE.search(label or "")
+    if match:
+        return label[: match.start()].strip(), int(match.group(1))
+    return (label or "").strip(), None
+
+
+def _static_days(discipline, name):
+    """Duration from the built-in catalog, tolerant of label variations."""
+    from ..mc.trainings_catalog import normalized_equals
+
+    for static_name, days in DISCIPLINES.get(discipline, {}).items():
+        if normalized_equals(static_name, name):
+            return days
+    return 0
+
+
+async def merged_course_catalog(state):
+    """Courses per agency for the Discord chooser: the live-harvested list
+    where one exists (it is what the academies actually offer right now),
+    the built-in catalog for agencies without a harvest yet."""
+    merged = {key: dict(DISCIPLINES.get(key, {})) for key in _AGENCY_ORDER}
+    raw = await state.get(TRAINING_COURSES_STATE_KEY)
+    if not raw:
+        return merged
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return merged
+    courses = data.get("courses") if isinstance(data, dict) else None
+    if not isinstance(courses, dict):
+        return merged
+    for key in _AGENCY_ORDER:
+        live = courses.get(key)
+        if isinstance(live, dict) and live:
+            merged[key] = {str(n): int(d or 0) for n, d in live.items()}
+    return merged
 
 # Display order + labels for the per-agency guide posts (the reference bot's
 # split: one overview post + one post per academy type, so no single post
@@ -354,6 +404,9 @@ class TrainingsService(BoardRequestService):
                     path = nxt
 
                 counts = {key: 0 for key in _AGENCY_ORDER}
+                harvest: dict[str, dict[str, int]] = {
+                    key: {} for key in _AGENCY_ORDER
+                }
                 seen: set[int] = set()
                 for listing in listings:
                     if listing.discipline not in counts or listing.building_id in seen:
@@ -370,6 +423,16 @@ class TrainingsService(BoardRequestService):
                                   listing.building_id, exc)
                         continue
                     counts[listing.discipline] += max(0, page.available_rooms)
+                    # Free ride: the education dropdown on this page IS the
+                    # authoritative course list — harvest it so the Discord
+                    # chooser never misses a newly added course.
+                    for label in page.courses:
+                        name, days = _clean_course_label(label)
+                        if not name:
+                            continue
+                        if days is None:
+                            days = _static_days(listing.discipline, name)
+                        harvest[listing.discipline].setdefault(name, days)
         except MissionChiefError as exc:
             log.warning("training availability: could not read academy list: %s", exc)
             return None
@@ -378,7 +441,35 @@ class TrainingsService(BoardRequestService):
             "counts": counts,
             "at": int(dt.datetime.now(dt.timezone.utc).timestamp()),
         }))
+        await self._store_course_harvest(harvest)
         return counts
+
+    async def _store_course_harvest(
+        self, harvest: dict[str, dict[str, int]]
+    ) -> None:
+        """Merge the walked course lists into state, per discipline — an
+        agency whose academies could not be read keeps its previous list
+        (an empty harvest is indistinguishable from a read failure)."""
+        raw = await self.state.get(TRAINING_COURSES_STATE_KEY)
+        stored: dict = {}
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict) and isinstance(data.get("courses"), dict):
+                    stored = data["courses"]
+            except ValueError:
+                stored = {}
+        changed = False
+        for key, courses in harvest.items():
+            if courses:
+                stored[key] = courses
+                changed = True
+        if not changed:
+            return
+        await self.state.set(TRAINING_COURSES_STATE_KEY, json.dumps({
+            "courses": stored,
+            "at": int(dt.datetime.now(dt.timezone.utc).timestamp()),
+        }))
 
     async def cached_availability(self) -> dict | None:
         """The last availability walk as ``{"counts": {...}, "at": epoch}``,

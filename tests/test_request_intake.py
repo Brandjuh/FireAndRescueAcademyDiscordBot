@@ -648,3 +648,61 @@ async def test_empty_dropdown_never_clobbers_a_known_list(db):
 async def test_saved_mission_names_empty_without_cache(db):
     svc = _mission_scheduler(db, {})
     assert await svc.saved_mission_names() == []
+
+# ---------------------------------------------------------------------------
+# Training chooser: live course list + pagination past Discord's 25-option cap
+# ---------------------------------------------------------------------------
+
+async def test_courses_for_prefers_the_live_harvest(db):
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.trainings import TRAINING_COURSES_STATE_KEY
+
+    await StateRepo(db).set(TRAINING_COURSES_STATE_KEY, json.dumps({
+        "courses": {"fire": {"Hotshot Crew Training": 0, "HazMat": 3}},
+        "at": 1,
+    }))
+    cog = _requests_cog(db)
+    try:
+        fire = dict(await cog.courses_for("fire"))
+        assert "Hotshot Crew Training" in fire
+        assert "Airport Firefighter" not in fire  # live list is authoritative
+        police = await cog.courses_for("police")
+        assert police  # no harvest yet -> built-in catalog fallback
+        # Reminder duration: live 0 falls back to the built-in catalog.
+        assert await cog.course_days("fire", "HazMat") == 3
+        assert await cog.course_days("fire", "Hotshot Crew Training") == 0
+    finally:
+        cog.cog_unload()
+
+
+async def test_course_select_paginates_past_25_options(db):
+    from fra_bot.cogs.requests_panel import TrainingChooserView
+
+    cog = _requests_cog(db)
+    try:
+        view = TrainingChooserView(cog)
+        view._courses = [(f"Course {i:02d}", 1) for i in range(30)]
+        view._apply_course_page()
+        assert len(view.t_select.options) == 25  # 24 courses + the page flip
+        assert view.t_select.options[-1].value == "_page"
+        assert "page 1/2" in view.t_select.placeholder
+        view._page += 1
+        view._apply_course_page()
+        labels = [o.value for o in view.t_select.options]
+        assert "Course 24" in labels and "Course 00" not in labels
+        assert "page 2/2" in view.t_select.placeholder
+    finally:
+        cog.cog_unload()
+
+
+async def test_course_select_stays_flat_under_25(db):
+    from fra_bot.cogs.requests_panel import TrainingChooserView
+
+    cog = _requests_cog(db)
+    try:
+        view = TrainingChooserView(cog)
+        view._courses = [("HazMat", 3)]
+        view._apply_course_page()
+        assert [o.value for o in view.t_select.options] == ["HazMat"]
+    finally:
+        cog.cog_unload()

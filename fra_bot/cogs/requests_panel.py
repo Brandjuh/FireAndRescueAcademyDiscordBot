@@ -44,6 +44,7 @@ from ..services.trainings import (
     CLASS_CAPACITY,
     MAX_CLASSES_PER_REQUEST,
     clamp_class_count,
+    merged_course_catalog,
 )
 
 log = logging.getLogger(__name__)
@@ -75,6 +76,9 @@ class TrainingChooserView(discord.ui.View):
     """Ephemeral, per-click chooser: academy type → course → number of
     classes → submit."""
 
+    #: Courses per select page; the 25th slot is the page-flip option.
+    PAGE_SIZE = 24
+
     def __init__(self, cog: "RequestsCog") -> None:
         super().__init__(timeout=300)
         self._cog = cog
@@ -82,6 +86,8 @@ class TrainingChooserView(discord.ui.View):
         self.training: str | None = None
         self.count = 1
         self.remind = False
+        self._courses: list[tuple[str, int]] = []
+        self._page = 0
 
         self.d_select = discord.ui.Select(
             placeholder="1️⃣ Pick the academy type",
@@ -135,19 +141,52 @@ class TrainingChooserView(discord.ui.View):
     async def _pick_discipline(self, interaction: discord.Interaction) -> None:
         self.discipline = self.d_select.values[0]
         self.training = None
-        courses = sorted(DISCIPLINES.get(self.discipline, {}).items())
-        self.t_select.options = [
-            discord.SelectOption(label=f"{name} ({days}d)"[:100], value=name[:100])
-            for name, days in courses
-        ][:25]
+        self._courses = await self._cog.courses_for(self.discipline)
+        self._page = 0
+        self._apply_course_page()
         self.t_select.disabled = False
-        self.t_select.placeholder = "2️⃣ Pick the course"
         for option in self.d_select.options:
             option.default = option.value == self.discipline
         await interaction.response.edit_message(view=self)
 
+    def _apply_course_page(self) -> None:
+        """Fill the course select with the current page. Discord caps a
+        select at 25 options; the live-harvested course lists can exceed
+        that, so page 24 at a time with a flip option in the 25th slot."""
+        pages = max(1, -(-len(self._courses) // self.PAGE_SIZE))
+        self._page %= pages
+        start = self._page * self.PAGE_SIZE
+        chunk = self._courses[start:start + self.PAGE_SIZE]
+        options = [
+            discord.SelectOption(
+                label=(f"{name} ({days}d)" if days else name)[:100],
+                value=name[:100],
+                default=name == self.training,
+            )
+            for name, days in chunk
+        ]
+        if pages > 1:
+            nxt = (self._page + 1) % pages + 1
+            options.append(discord.SelectOption(
+                label=f"➡️ More courses (to page {nxt}/{pages})"[:100],
+                value="_page",
+                description="flip to the next page of courses",
+            ))
+            self.t_select.placeholder = (
+                f"2️⃣ Pick the course (page {self._page + 1}/{pages})"
+            )
+        else:
+            self.t_select.placeholder = "2️⃣ Pick the course"
+        self.t_select.options = options
+
     async def _pick_training(self, interaction: discord.Interaction) -> None:
-        self.training = self.t_select.values[0]
+        value = self.t_select.values[0]
+        if value == "_page":
+            self._page += 1
+            self._apply_course_page()
+            await interaction.response.edit_message(view=self)
+            return
+        self.training = value
         for option in self.t_select.options:
             option.default = option.value == self.training
         await interaction.response.edit_message(view=self)
@@ -242,14 +281,17 @@ class RequestPanelView(discord.ui.View):
 
 def training_request_payload(
     discipline: str, training: str, *, user_id: int, channel_id: int | None,
-    remind: bool, count: int = 1,
+    remind: bool, count: int = 1, days: int | None = None,
 ) -> dict:
     """The automation_requests payload for a Discord training request —
     the same shape the board parser produces, plus the Discord flags.
     ``count`` asks for several copies of the same class (each holds
     :data:`CLASS_CAPACITY` people), capped at
-    :data:`MAX_CLASSES_PER_REQUEST` per run."""
-    days = DISCIPLINES.get(discipline, {}).get(training, 0)
+    :data:`MAX_CLASSES_PER_REQUEST` per run. ``days`` overrides the
+    built-in catalog duration (the chooser knows the live-harvested
+    one)."""
+    if days is None:
+        days = DISCIPLINES.get(discipline, {}).get(training, 0)
     return {
         "trainings": [
             {
@@ -320,6 +362,7 @@ class RequestsCog(commands.Cog):
             discipline, training,
             user_id=interaction.user.id, channel_id=interaction.channel_id,
             remind=remind, count=count,
+            days=await self.course_days(discipline, training),
         )
         verdict = await contribution_gate(
             self.bot.db, interaction.user.id,
@@ -522,6 +565,20 @@ class RequestsCog(commands.Cog):
         await interaction.response.send_message(
             text, view=TrainingChooserView(self), ephemeral=True,
         )
+
+    async def courses_for(self, discipline: str) -> list[tuple[str, int]]:
+        """(name, days) choices for the course select: the live-harvested
+        academy course list, built-in catalog as bootstrap fallback."""
+        catalog = await merged_course_catalog(StateRepo(self.bot.db))
+        return sorted(catalog.get(discipline, {}).items())
+
+    async def course_days(self, discipline: str, training: str) -> int:
+        """Course duration for the reminder estimate (live first)."""
+        catalog = await merged_course_catalog(StateRepo(self.bot.db))
+        days = catalog.get(discipline, {}).get(training)
+        if days:
+            return int(days)
+        return DISCIPLINES.get(discipline, {}).get(training, 0)
 
     async def _availability_line(self) -> str | None:
         """Cached free classrooms per agency, or None when never collected."""

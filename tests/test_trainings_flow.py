@@ -743,3 +743,54 @@ async def test_multi_class_parks_the_remainder_when_rooms_run_out(db):
     pending = json.loads(row["payload"])["pending_trainings"]
     assert pending == [{"discipline": "fire", "name": "HazMat", "count": 1}]
     assert "HazMat" in row["status_detail"]
+
+
+# -- live course harvest (the Discord dropdown must never miss a course) -----
+
+RICH_ACADEMY_PAGE = ACADEMY_PAGE.replace(
+    "<select name='education_select'><option value='12'>HazMat</option></select>",
+    "<select name='education_select'>"
+    "<option value='12'>HazMat</option>"
+    "<option value='31'>Hotshot Crew Training</option>"
+    "<option value='32'>Foam Firefighting Training (2 days)</option>"
+    "</select>",
+)
+
+
+async def test_availability_walk_harvests_the_live_course_list(db):
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.trainings import (
+        TRAINING_COURSES_STATE_KEY,
+        merged_course_catalog,
+    )
+
+    svc, client = _service(db, dry_run=True)
+    client.pages["/buildings/4951748"] = RICH_ACADEMY_PAGE
+    assert await svc._collect_availability() is not None
+
+    raw = await StateRepo(db).get(TRAINING_COURSES_STATE_KEY)
+    assert raw is not None
+    catalog = await merged_course_catalog(StateRepo(db))
+    fire = catalog["fire"]
+    # The live dropdown replaces the built-in fire list entirely.
+    assert set(fire) == {"HazMat", "Hotshot Crew Training",
+                         "Foam Firefighting Training"}
+    assert fire["HazMat"] == 3                     # days from the built-in catalog
+    assert fire["Foam Firefighting Training"] == 2  # days from the "(2 days)" label
+    assert fire["Hotshot Crew Training"] == 0       # brand new: unknown duration
+    # Agencies without an academy in the walk keep the built-in catalog.
+    assert catalog["police"]  # non-empty static fallback
+
+
+async def test_empty_harvest_keeps_the_previous_course_list(db):
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.trainings import merged_course_catalog
+
+    svc, client = _service(db, dry_run=True)
+    client.pages["/buildings/4951748"] = RICH_ACADEMY_PAGE
+    await svc._collect_availability()
+    # A later walk that can't read any academy page must not wipe the list.
+    client.pages["/buildings/4951748"] = "<html>maintenance</html>"
+    await svc._collect_availability()
+    catalog = await merged_course_catalog(StateRepo(db))
+    assert "Hotshot Crew Training" in catalog["fire"]

@@ -283,7 +283,11 @@ line of defence, exactly like board requests.
 IMMEDIATELY (the intake kicks the queue, sharing the poll's job lock) —
 no waiting for the next scheduled pass — and every board poll now runs
 member requests before guide upkeep; the slow academy availability walk
-runs as low-priority bulk traffic. The training chooser (panel button or
+runs as low-priority bulk traffic. That same walk **harvests the live
+course list** from every academy's education dropdown, so the training
+chooser's course menu always matches what the game actually offers (the
+built-in catalog is only the bootstrap fallback) and pages past Discord's
+25-option select cap when needed. The training chooser (panel button or
 `/training`) opens with the cached free-class counts per agency, and lets
 the member request up to **4 classes** of the same course in one run
 (each class holds **10 people**); if not every copy fits right away, the
