@@ -25,7 +25,11 @@ from ..db.repos import LinksRepo, MembersRepo
 
 log = logging.getLogger(__name__)
 
-QUEUE_MAX_ATTEMPTS = 30          # ~1 hour at the 2-minute loop interval
+# The retry window must straddle one FULL hourly members sweep, including
+# its jitter (±15%) and the sweep's own runtime (~47 pages at 4-9s): a
+# member who joins the alliance right after a sweep appears in the roster
+# up to ~75 minutes later. 45 attempts at the 2-minute loop = 90 minutes.
+QUEUE_MAX_ATTEMPTS = 45
 MIN_SAFE_ROSTER_COUNT = 100      # prune safety gate (alliance has ~950)
 
 
@@ -105,6 +109,26 @@ class MemberSyncService:
             discord_id, mc_user_id, status="approved", reviewer_id=reviewer_id
         )
         await self.links.queue_remove(discord_id)
+
+    # -- backfill (existing Discord members) --------------------------------
+
+    async def backfill_matches(
+        self, display_names: dict[int, str | None]
+    ) -> list[tuple[int, aiosqlite.Row]]:
+        """Discord members without an approved link whose nickname matches
+        an active roster member — the candidates for `!verifyall`, so
+        existing members never have to run `!verify` themselves."""
+        linked = {
+            link["discord_id"] for link in await self.links.all_approved()
+        }
+        matches: list[tuple[int, aiosqlite.Row]] = []
+        for discord_id, name in display_names.items():
+            if discord_id in linked or not name:
+                continue
+            member = await self.lookup(name, None)
+            if member is not None:
+                matches.append((discord_id, member))
+        return matches
 
     # -- background queue ---------------------------------------------------
 

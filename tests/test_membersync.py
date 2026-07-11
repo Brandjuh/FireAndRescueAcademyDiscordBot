@@ -57,6 +57,34 @@ async def test_verify_approves_on_match_and_queues_on_miss(db):
     assert twice.outcome == "already_queued"
 
 
+async def test_backfill_matches_links_only_unlinked_roster_matches(db):
+    """`!verifyall`: existing Discord members whose nickname matches the
+    roster are picked up; already-linked members and non-members are not."""
+    svc = MemberSyncService(db)
+    await _seed_member(db, 42, "Alice")
+    await _seed_member(db, 43, "Bob")
+    await _seed_member(db, 44, "GoneMember", active=0)
+    # Alice is already linked (she verified herself earlier).
+    await svc.request_verification(100, "Alice", None, 1)
+
+    matches = await svc.backfill_matches({
+        100: "Alice",          # already linked → skipped
+        200: "bob",            # case-insensitive roster match → linked
+        300: "Charlie",        # not in the alliance → skipped
+        400: "GoneMember",     # left the alliance → skipped
+        500: None,             # no nickname available → skipped
+    })
+    assert [(d, row["mc_user_id"]) for d, row in matches] == [(200, 43)]
+
+
+def test_queue_window_straddles_one_full_members_sweep():
+    """A fresh alliance join appears in the roster up to ~75 min later
+    (hourly sweep + jitter + sweep runtime); the retry window must be
+    comfortably longer, or verification expires right before the roster
+    catches up."""
+    assert QUEUE_MAX_ATTEMPTS * 2 >= 90  # minutes at the 2-minute loop
+
+
 async def test_queue_approves_when_roster_catches_up(db):
     svc = MemberSyncService(db)
     await svc.request_verification(200, "Bob", None, 1)
