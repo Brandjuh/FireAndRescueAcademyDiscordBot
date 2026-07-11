@@ -153,6 +153,26 @@ automation:
     # Posts/edits per sync run — spreads the initial ~1,200-mission backfill
     # over a few runs and keeps rate limits comfortable.
     max_posts_per_run: 100
+  rank_roles:
+    # Credit rank roles (the old bot's RoleBasedCredits): every verified/
+    # linked member carries ONE Discord rank role based on MissionChief
+    # earned credits — Probie (0) → Firefighter (200) → Senior Firefighter
+    # (10k) → Fire Apparatus Operator (100k) → Lieutenant (1M) → Captain
+    # (5M) → Staff Captain (20M) → Battalion Chief (50M) → Division Chief
+    # (1B) → Deputy Chief (2B) → Fire Chief (5B) → Fire Commissioner (10B).
+    # Promotions are congratulated in promotion_channel_id (only after the
+    # first sync established a baseline — no spam on rollout). Members who
+    # leave the alliance lose their rank roles automatically.
+    enabled: false
+    interval: 60                # minutes between syncs
+    promotion_channel_id: 543935264708362251
+    # Also congratulate a member's very FIRST rank assignment.
+    announce_first_assignment: false
+    # Override rank→role ids per rank key (defaults are the old bot's):
+    # role_ids:
+    #   probie: 669488072911618048
+    #   fire_commissioner: 1437513734364069940
+    role_ids: {}
   dm_mirror:
     # In-game DM mirror: scans the MissionChief PM inbox and mirrors every
     # conversation — incoming messages AND conversations the bot account

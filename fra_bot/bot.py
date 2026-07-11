@@ -127,6 +127,10 @@ class FRABot(commands.Bot):
         # reference bot): outgoing-only conversations live in the game's
         # SENT box and may never show on the inbox page the scan reads.
         self.tax_warnings.mirror = self.dm_mirror.mirror_now
+        # Credit rank roles (the old bot's RoleBasedCredits, ported).
+        from .services.rank_roles import RankRolesService
+
+        self.rank_roles = RankRolesService(cfg, self.db, self)
         # On-command alliance hospital/prison level + extension upgrades.
         self.building_upgrade = BuildingUpgradeService(cfg, self.mc, self.db)
 
@@ -438,6 +442,16 @@ class FRABot(commands.Bot):
                 name="missions-forum-catchup",
                 initial_delay_seconds=480.0,
             )
+        # Credit rank roles: hourly sync of Discord rank roles against
+        # MissionChief earned credits (Discord-only writes; role changes
+        # mirror the roster, like the verified role).
+        if automation.rank_roles.enabled:
+            sched.add_interval_job(
+                self._guarded(self._rank_roles_pass, "rank-roles"),
+                minutes=automation.rank_roles.interval,
+                name="rank-roles",
+                initial_delay_seconds=540.0,
+            )
         # In-game DM mirror: scan the PM inbox and mirror conversations to
         # the forum. Read-only on the game side, so it runs in dry-run too
         # (thread replies into the game DO honour dry_run).
@@ -496,6 +510,14 @@ class FRABot(commands.Bot):
         if await StateRepo(self.db).get(STATE_BACKFILL_DONE) is not None:
             return
         await self._missions_forum_pass()
+
+    async def _rank_roles_pass(self) -> None:
+        """One rank-role sync; noteworthy outcomes go to the admin channel."""
+        summary = await self.rank_roles.sync()
+        if summary.get("error") or summary.get("changed"):
+            await self.notify_admin(
+                "🎖️ **Rank roles**\n" + "\n".join(summary["lines"])[:1800]
+            )
 
     async def _dm_mirror_pass(self) -> None:
         """One DM inbox scan; only errors are surfaced to the admin channel

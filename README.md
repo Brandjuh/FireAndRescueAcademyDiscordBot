@@ -223,6 +223,8 @@ Requires Discord administrator permission or a role listed in
 | `!fra missionpanel` | Force-repost the mission panel (panels also place/refresh themselves automatically) |
 | `!fra requestpanel` | Force-repost the training/building request panel |
 | `!fra dmpanel` | Force-repost the message panel (configured channel, else the current one) |
+| `!fra rankroles [sync\|dryrun]` | Credit rank roles: status, run a sync now, or preview without changes |
+| `!membersync` | MemberSync health: link count, retry queue, verified-role config |
 | `!memberpanel` | Force-repost the member-management panel |
 | `!fra missions [limit]` | List recent scheduled missions and their status |
 | `!fra cancelmission <id>` | Cancel a not-yet-started scheduled mission |
