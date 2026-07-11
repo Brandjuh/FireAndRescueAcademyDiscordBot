@@ -1120,6 +1120,42 @@ class AdminCog(commands.Cog):
         where = f" — continue in {thread.mention}" if thread is not None else ""
         await message.edit(content=f"✅ PM sent to **{recipient}**{where}")
 
+    @fra.command(name="rankroles", aliases=["rankrole", "ranks"])
+    async def rank_roles(self, ctx: commands.Context, action: str = "") -> None:
+        """Credit rank roles. `!fra rankroles sync` runs a sync now;
+        `!fra rankroles dryrun` previews without changing anything."""
+        action = action.strip().lower()
+        if action in ("sync", "dryrun"):
+            lock = self.bot.job_lock("rank-roles")
+            if lock.locked():
+                await ctx.send("⏳ A rank-role sync is already running.")
+                return
+            message = await ctx.send(
+                "⏳ Previewing rank roles…" if action == "dryrun"
+                else "⏳ Syncing rank roles…"
+            )
+            async with lock:
+                try:
+                    summary = await self.bot.rank_roles.sync(
+                        dry_run=(action == "dryrun")
+                    )
+                except Exception as exc:
+                    log.exception("Manual rank-role sync failed")
+                    await message.edit(content=f"❌ Sync failed: {exc}")
+                    return
+            icon = "❌" if summary.get("error") else "✅"
+            await message.edit(
+                content=f"{icon} Rank roles:\n" + "\n".join(summary["lines"])[:1800]
+            )
+            return
+        auto = self.bot.cfg.automation.rank_roles
+        await ctx.send(
+            "🎖️ **Rank roles**\n"
+            f"schedule: {'every ' + str(auto.interval) + ' min' if auto.enabled else 'OFF'}\n"
+            f"promotions → <#{auto.promotion_channel_id}>\n"
+            "`!fra rankroles dryrun` previews, `!fra rankroles sync` runs now."
+        )
+
     @fra.command(name="nextmission")
     async def next_mission(self, ctx: commands.Context) -> None:
         """Show which mission/event is up next and where (for the eventpinger)."""

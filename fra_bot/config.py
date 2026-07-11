@@ -160,6 +160,19 @@ class MissionsForumConfig:
 
 
 @dataclass(frozen=True)
+class RankRolesConfig:
+    """Credit rank roles (the old bot's RoleBasedCredits): every linked
+    member carries one Discord rank role based on MissionChief earned
+    credits; promotions are congratulated in ``promotion_channel_id``.
+    ``role_ids`` overrides the built-in rank→role mapping per rank key."""
+    enabled: bool
+    interval: int  # minutes between syncs
+    promotion_channel_id: int
+    announce_first_assignment: bool
+    role_ids: dict[str, int]
+
+
+@dataclass(frozen=True)
 class DmMirrorConfig:
     """In-game DM mirror: the inbox is scanned every ``interval`` minutes
     and every PM conversation (incoming AND ones the bot account started)
@@ -195,6 +208,7 @@ class AutomationConfig:
     tax_warnings: TaxWarningsConfig
     missions_forum: MissionsForumConfig
     dm_mirror: DmMirrorConfig
+    rank_roles: RankRolesConfig
 
 
 @dataclass(frozen=True)
@@ -459,6 +473,33 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 interval=int(
                     _get(raw, "automation", "dm_mirror", "interval", default=15)
                 ),
+            ),
+            rank_roles=RankRolesConfig(
+                enabled=bool(
+                    _get(raw, "automation", "rank_roles", "enabled", default=False)
+                ),
+                interval=int(
+                    _get(raw, "automation", "rank_roles", "interval", default=60)
+                ),
+                promotion_channel_id=int(
+                    _get(
+                        raw, "automation", "rank_roles", "promotion_channel_id",
+                        default=543935264708362251,
+                    )
+                ),
+                announce_first_assignment=bool(
+                    _get(
+                        raw, "automation", "rank_roles",
+                        "announce_first_assignment", default=False,
+                    )
+                ),
+                role_ids={
+                    str(k): int(v)
+                    for k, v in (
+                        _get(raw, "automation", "rank_roles", "role_ids", default={})
+                        or {}
+                    ).items()
+                },
             ),
             tax_warnings=TaxWarningsConfig(
                 enabled=bool(
