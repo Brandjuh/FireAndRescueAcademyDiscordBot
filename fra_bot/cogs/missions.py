@@ -17,9 +17,11 @@ to MissionChief while in dry-run), so nothing here raises red flags.
 Every intake (panel and slash alike) runs the contribution gate before
 queueing; a refused request still writes a ``scheduled_missions`` row
 (status ``cancelled``) so there is always a log entry, announced to the
-admin log. The chooser offers the large-scale presets and the member's
-previously created saved/custom missions as one-click options — custom
-Own-mission values can also still be typed in the modal.
+admin log. The large-scale chooser offers the presets and the game's
+saved missions (cached from the mission form) as one-click options.
+Custom Own missions are deliberately NOT requestable through Discord —
+the required-unit values don't fit its forms; the in-game mission board
+carries the copy-paste template for those.
 """
 
 from __future__ import annotations
@@ -136,9 +138,10 @@ def build_spec(
 
 class MissionDetailsModal(discord.ui.Modal):
     """Collects the free-text fields; which ones appear depends on the source
-    the member picked in the chooser. Prefill defaults carry a chooser pick
-    (a preset, or a previously created saved/custom mission) into the modal,
-    where the member can still adjust them."""
+    the member picked in the chooser. A saved-mission pick from the chooser's
+    list prefills the name, still editable. (Custom Own missions are NOT
+    offered here: their required-unit values don't fit Discord's modal
+    limits — the in-game mission board carries the copy-paste template.)"""
 
     def __init__(
         self,
@@ -149,8 +152,6 @@ class MissionDetailsModal(discord.ui.Modal):
         source: str,
         preset: str | None = None,
         saved_default: str | None = None,
-        name_default: str | None = None,
-        custom_default: str | None = None,
     ) -> None:
         super().__init__(title="Request a mission")
         self._cog = cog
@@ -166,9 +167,7 @@ class MissionDetailsModal(discord.ui.Modal):
         )
         self.add_item(self.location)
 
-        self.name = None
         self.saved = None
-        self.custom = None
         self.event_type = None
         self.area = None
         self.shape = None
@@ -194,20 +193,6 @@ class MissionDetailsModal(discord.ui.Modal):
             self.add_item(self.area)
             self.add_item(self.shape)
             self.add_item(self.call_volume)
-        elif source == "custom":
-            self.name = discord.ui.TextInput(
-                label="Mission name", required=False, max_length=30,
-                placeholder="defaults to the location",
-                default=(name_default or "")[:30] or None,
-            )
-            self.custom = discord.ui.TextInput(
-                label="Required units (key=value …)",
-                style=discord.TextStyle.paragraph, max_length=500,
-                placeholder="need_lf=25 need_elw1=6 water_needed=15000",
-                default=(custom_default or "")[:500] or None,
-            )
-            self.add_item(self.name)
-            self.add_item(self.custom)
         elif source == "saved":
             self.saved = discord.ui.TextInput(
                 label="Saved mission name",
@@ -225,9 +210,7 @@ class MissionDetailsModal(discord.ui.Modal):
             schedule=self._schedule,
             source=self._source,
             preset=self._preset,
-            name=str(self.name) if self.name else None,
             saved=str(self.saved) if self.saved else None,
-            custom=str(self.custom) if self.custom else None,
             event_type=str(self.event_type) if self.event_type else None,
             area=str(self.area) if self.area else None,
             shape=str(self.shape) if self.shape else None,
@@ -235,36 +218,26 @@ class MissionDetailsModal(discord.ui.Modal):
         )
 
 
-def _values_text(raw: str | None) -> str:
-    """A stored custom_values JSON dict back to the modal's `k=v k=v` text."""
-    try:
-        values = json.loads(raw) if raw else {}
-    except ValueError:
-        return ""
-    if not isinstance(values, dict):
-        return ""
-    return " ".join(f"{k}={v}" for k, v in values.items())
-
-
 class MissionChooserView(discord.ui.View):
     """Ephemeral chooser for ONE kind — the member already picked **Alliance
     event** or **Large scale mission** (panel button or the two-way menu
     behind a bare ``/mission``). Events only choose a schedule (their options
     live in the modal); large missions also pick the mission data — the
-    presets as one-click options, plus the previously created saved/custom
-    missions from the queue history. Not persistent (created per click)."""
+    presets as one-click options, plus the game's **saved missions** as a
+    pick-from list. Custom Own missions are NOT offered: Discord's UI can't
+    carry the required-unit values, the in-game mission board can (it has
+    the copy-paste template). Not persistent (created per click)."""
 
     def __init__(
-        self, cog: "MissionsCog", kind: str, previous: list | None = None
+        self, cog: "MissionsCog", kind: str, saved_names: list | None = None
     ) -> None:
         super().__init__(timeout=300)
         self._cog = cog
         self.kind = kind                # fixed: "large" | "event"
         self.schedule = "once"
-        self.source = "preset"          # preset | custom | saved
+        self.source = "preset"          # preset | saved
         self.preset: str | None = None  # preset display name, if one was picked
-        self.pick = None                # a previously created mission (row)
-        self._previous = {str(row["id"]): row for row in (previous or [])}
+        self.pick: str | None = None    # a saved-mission name picked from the list
 
         self.schedule_select = discord.ui.Select(
             placeholder="Schedule — one-time or recurring",
@@ -277,10 +250,10 @@ class MissionChooserView(discord.ui.View):
         )
         self.schedule_select.callback = self._pick_schedule
         self.source_select: discord.ui.Select | None = None
-        self.prev_select: discord.ui.Select | None = None
+        self.saved_select: discord.ui.Select | None = None
         if kind == "large":
             self.source_select = discord.ui.Select(
-                placeholder="Mission data — a preset, custom, or a saved mission",
+                placeholder="Mission data — a preset or a saved mission",
                 options=[
                     discord.SelectOption(
                         label="Standard large mission", value="preset", default=True,
@@ -292,42 +265,32 @@ class MissionChooserView(discord.ui.View):
                         for name in sorted(_PRESET_BY_NAME)
                     ],
                     discord.SelectOption(
-                        label="Custom Own mission", value="custom",
-                        description="you supply the required units", emoji="🛠️",
-                    ),
-                    discord.SelectOption(
                         label="Saved mission", value="saved",
-                        description="type one of the game's Saved Missions", emoji="💾",
+                        description="pick from the list below, or type the name",
+                        emoji="💾",
                     ),
                 ],
                 row=1,
             )
             self.source_select.callback = self._pick_source
-            if self._previous:
-                self.prev_select = discord.ui.Select(
-                    placeholder="Optional — re-run a previously created mission",
+            if saved_names:
+                self.saved_select = discord.ui.Select(
+                    placeholder="💾 Saved missions — pick one",
                     options=[
-                        discord.SelectOption(
-                            label=(row["saved_name"] or row["caption"] or "?")[:100],
-                            value=str(row["id"]),
-                            description=(
-                                "Saved mission" if row["mission_source"] == "saved"
-                                else "Custom Own mission"
-                            ),
-                            emoji="💾" if row["mission_source"] == "saved" else "🛠️",
-                        )
-                        for row in self._previous.values()
+                        discord.SelectOption(label=str(name)[:100],
+                                             value=str(name)[:100], emoji="💾")
+                        for name in saved_names
                     ][:25],
                     row=2,
                 )
-                self.prev_select.callback = self._pick_previous
+                self.saved_select.callback = self._pick_saved
         self.go_btn = discord.ui.Button(
             label="Continue", style=discord.ButtonStyle.primary, emoji="➡️", row=4,
         )
         self.go_btn.callback = self._cont
         for item in (self.schedule_select,
                      *((self.source_select,) if self.source_select else ()),
-                     *((self.prev_select,) if self.prev_select else ()),
+                     *((self.saved_select,) if self.saved_select else ()),
                      self.go_btn):
             self.add_item(item)
 
@@ -347,40 +310,30 @@ class MissionChooserView(discord.ui.View):
             self.source, self.preset = "preset", value[len("preset:"):]
         else:
             self.source, self.preset = value, None
-        # An explicit mission-data choice overrides an earlier history pick.
-        self.pick = None
+        # A preset choice overrides an earlier saved-mission pick.
+        if self.source != "saved":
+            self.pick = None
+            if self.saved_select is not None:
+                self._mark(self.saved_select, None)
         self._mark(self.source_select, value)
-        if self.prev_select is not None:
-            self._mark(self.prev_select, None)
         await interaction.response.edit_message(view=self)
 
-    async def _pick_previous(self, interaction: discord.Interaction) -> None:
-        assert self.prev_select is not None
-        value = self.prev_select.values[0]
-        self.pick = self._previous.get(value)
-        self._mark(self.prev_select, value)
-        self._mark(self.source_select, None)
+    async def _pick_saved(self, interaction: discord.Interaction) -> None:
+        assert self.saved_select is not None
+        self.pick = self.saved_select.values[0]
+        self.source, self.preset = "saved", None
+        self._mark(self.saved_select, self.pick)
+        self._mark(self.source_select, "saved")
         await interaction.response.edit_message(view=self)
 
     async def _cont(self, interaction: discord.Interaction) -> None:
         # For an event the mission-data picks are ignored — the modal asks
         # for the event type / area / shape / call volume instead.
-        if self.kind == "event" or self.pick is None:
-            modal = MissionDetailsModal(
-                self._cog, kind=self.kind, schedule=self.schedule,
-                source=self.source, preset=self.preset,
-            )
-        elif self.pick["mission_source"] == "saved":
-            modal = MissionDetailsModal(
-                self._cog, kind="large", schedule=self.schedule,
-                source="saved", saved_default=self.pick["saved_name"],
-            )
-        else:
-            modal = MissionDetailsModal(
-                self._cog, kind="large", schedule=self.schedule,
-                source="custom", name_default=self.pick["caption"],
-                custom_default=_values_text(self.pick["custom_values"]),
-            )
+        modal = MissionDetailsModal(
+            self._cog, kind=self.kind, schedule=self.schedule,
+            source=self.source, preset=self.preset,
+            saved_default=self.pick if self.source == "saved" else None,
+        )
         await interaction.response.send_modal(modal)
 
 
@@ -458,17 +411,23 @@ class MissionsCog(commands.Cog):
     async def open_chooser(self, interaction: discord.Interaction, kind: str) -> None:
         """The guided flow for one kind, behind the panel buttons and the
         two-way menu of a bare ``/mission``. The large chooser is seeded
-        with the previously created missions."""
+        with the game's saved missions (cached from the mission form; DB
+        history of successfully used names as fallback)."""
         if kind == "event":
-            text = ("🎉 **Alliance event** — pick a schedule, then press "
-                    "**Continue** for the location and event options:")
-            previous = []
+            text = ("🎉 **Alliance event**: pick a schedule, then press "
+                    "**Continue** for the location and event options.")
+            saved_names: list[str] = []
         else:
-            text = ("🚨 **Large scale alliance mission** — pick the schedule "
-                    "and mission data, then press **Continue**:")
-            previous = await self.repo.previous_mission_options()
+            text = ("🚨 **Large scale alliance mission**: pick the schedule "
+                    "and mission data, then press **Continue**.\n"
+                    "-# 🛠️ Custom Own missions can't be requested through "
+                    "Discord (its forms can't carry the unit values). Use "
+                    "the in-game mission board, it has a copy-paste template.")
+            saved_names = await self.service.saved_mission_names()
+            if not saved_names:
+                saved_names = await self.repo.previous_saved_names()
         await interaction.response.send_message(
-            text, view=MissionChooserView(self, kind, previous), ephemeral=True,
+            text, view=MissionChooserView(self, kind, saved_names), ephemeral=True,
         )
 
     async def submit_request(
@@ -480,9 +439,7 @@ class MissionsCog(commands.Cog):
         schedule: str,
         source: str,
         preset: str | None = None,
-        name: str | None = None,
         saved: str | None = None,
-        custom: str | None = None,
         event_type: str | None = None,
         area: str | None = None,
         shape: str | None = None,
@@ -491,7 +448,7 @@ class MissionsCog(commands.Cog):
         try:
             spec = build_spec(
                 location=location, kind=kind, schedule=schedule,
-                preset=preset, saved=saved, custom=custom, name=name,
+                preset=preset, saved=saved,
                 event_type=event_type, area=area, shape=shape, call_volume=call_volume,
             )
         except (ValueError, MissionSpecError) as exc:
@@ -508,9 +465,7 @@ class MissionsCog(commands.Cog):
         kind="Alliance event, or a large scale alliance mission (default)",
         schedule="One-time, or recurring (adds it to the rotation list)",
         preset="Large scale: optional preset mission type",
-        saved="Large scale: start a saved mission by its name",
-        custom="Large scale: custom Own mission units, e.g. need_lf=25 need_elw1=6 water_needed=15000",
-        name="Large scale: name for a custom mission",
+        saved="Large scale: start a saved mission by its name (customs: in-game board only)",
         event_type="Event: which event (default Random picks a standard one)",
         area="Event: footprint size",
         shape="Event: footprint shape",
@@ -524,8 +479,6 @@ class MissionsCog(commands.Cog):
         schedule: Literal["once", "recurring"] = "once",
         preset: Literal["Major fire", "Unannounced demonstration", "Pile-up", "Bomb Explosion"] | None = None,
         saved: str | None = None,
-        custom: str | None = None,
-        name: str | None = None,
         event_type: Literal[
             "Random", "Storm", "Civil Unrest", "Storm Surge", "Fall weather",
             "Winter weather", "Spring weather", "Summer weather", "Sports Event",
@@ -545,7 +498,7 @@ class MissionsCog(commands.Cog):
         try:
             spec = build_spec(
                 location=location, kind=kind, schedule=schedule,
-                preset=preset, saved=saved, custom=custom, name=name,
+                preset=preset, saved=saved,
                 event_type=event_type, area=area, shape=shape, call_volume=call_volume,
             )
         except (ValueError, MissionSpecError) as exc:
@@ -619,9 +572,11 @@ class MissionsCog(commands.Cog):
                 "Pick a schedule, then give the location and the event "
                 "options (type, area, shape, call volume).\n\n"
                 "**🚨 Large scale alliance mission**\n"
-                "Pick the schedule and the mission data — a **preset**, a "
-                "**previously created mission**, a saved mission, or your "
-                "own custom Own-mission units — then give the location.\n\n"
+                "Pick the schedule and the mission data: a **preset**, or "
+                "one of the game's **saved missions** (picked from a list). "
+                "Then give the location. *Custom Own missions can only be "
+                "requested on the in-game mission board (Discord's forms "
+                "can't carry the unit values).*\n\n"
                 "The bot queues your request and starts it at the next free "
                 "slot. **/mission** does the same: bare it opens this menu, "
                 "with options it queues directly. You need a verified "

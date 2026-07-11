@@ -570,7 +570,7 @@ class RequestsCog(commands.Cog):
                 "the whole alliance for 1 hour to join. Optional: a reminder "
                 "when the course should be finished.\n\n"
                 "**🏥 Request a building** (or `/building`)\n"
-                "Paste a Google Maps link to a **real hospital or prison** — "
+                "Paste a Google Maps link to a **real hospital or prison** - "
                 "the pin is checked on the spot and you're told immediately "
                 "whether it's accepted. Clinics, police stations and the like "
                 "are refused.\n\n"

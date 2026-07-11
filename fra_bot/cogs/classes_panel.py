@@ -55,11 +55,14 @@ class ClassesPanelCog(commands.Cog):
             at = (self._data or {}).get("at")
             if at:
                 lines.append("")
-                lines.append(f"Last updated <t:{int(at)}:R> — refreshed hourly.")
+                lines.append(
+                    f"Last updated <t:{int(at)}:R>. Next update expected "
+                    f"<t:{int(at) + 3600}:R>."
+                )
         else:
             lines.append(
-                "The first availability check hasn't finished yet — the "
-                "numbers appear here shortly."
+                "No availability numbers yet. The first check is running; "
+                "an update is expected within the hour."
             )
         lines.append(
             "Request a class with **/training** or the request panel."

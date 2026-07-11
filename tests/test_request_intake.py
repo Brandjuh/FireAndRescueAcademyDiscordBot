@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest_asyncio
 
-from fra_bot.cogs.missions import MissionChooserView, MissionsCog, _values_text
+from fra_bot.cogs.missions import MissionChooserView, MissionsCog
 from fra_bot.cogs.requests_panel import RequestsCog
 from fra_bot.db.database import Database
 from fra_bot.db.repos import AutomationRepo, MissionsRepo
@@ -462,7 +462,7 @@ async def test_mission_intake_passes_preset_through(db):
 # Previously created missions: repo + chooser
 # ---------------------------------------------------------------------------
 
-async def test_previous_mission_options_dedupe_and_exclusions(db):
+async def test_previous_saved_names_dedupe_and_exclusions(db):
     repo = MissionsRepo(db)
     await repo.create(source="discord", kind="large", mission_source="saved",
                       saved_name="Big Fire Drill", shape="rectangle")
@@ -470,19 +470,14 @@ async def test_previous_mission_options_dedupe_and_exclusions(db):
                       saved_name="Big Fire Drill", shape="rectangle")  # dupe
     await repo.create(source="discord", kind="large", mission_source="custom",
                       caption="Dock Blaze", custom_values='{"need_lf": 25}',
-                      shape="rectangle")
+                      shape="rectangle")  # customs are board-only, never listed
     await repo.create(source="discord", kind="large", mission_source="saved",
                       saved_name="Bad Name", shape="rectangle",
                       status="failed", status_detail="not in dropdown")
     await repo.create(source="discord", kind="event", mission_source="preset",
                       shape="rectangle")  # events never listed
-    options = await repo.previous_mission_options()
-    names = [(row["mission_source"], row["saved_name"] or row["caption"])
-             for row in options]
-    assert ("saved", "Big Fire Drill") in names
-    assert ("custom", "Dock Blaze") in names
-    assert all(name != "Bad Name" for _, name in names)
-    assert len(names) == 2  # deduped, failed + event rows excluded
+    names = await repo.previous_saved_names()
+    assert names == ["Big Fire Drill"]  # deduped; custom/failed/event excluded
 
 
 async def test_terminal_at_intake_mission_row_is_not_claimable(db):
@@ -495,25 +490,20 @@ async def test_terminal_at_intake_mission_row_is_not_claimable(db):
     assert row["status"] == "cancelled"
 
 
-async def test_chooser_offers_presets_and_previous_missions(db):
+async def test_chooser_offers_presets_and_saved_missions_but_no_custom(db):
     service = FakeMissionService()
     cog = _missions_cog(db, service)
     try:
-        previous = [
-            {"id": 1, "mission_source": "saved", "saved_name": "Big Fire Drill",
-             "caption": None, "custom_values": None},
-            {"id": 2, "mission_source": "custom", "saved_name": None,
-             "caption": "Dock Blaze", "custom_values": '{"need_lf": 25}'},
-        ]
-        view = MissionChooserView(cog, "large", previous)
+        view = MissionChooserView(cog, "large", ["Big Fire Drill", "Dock Blaze"])
         source_values = [o.value for o in view.source_select.options]
         assert "preset:Major fire" in source_values
-        assert "custom" in source_values and "saved" in source_values
-        assert view.prev_select is not None
-        labels = [o.label for o in view.prev_select.options]
-        assert "Big Fire Drill" in labels and "Dock Blaze" in labels
-        # No history -> no second select, the modal input still works.
-        assert MissionChooserView(cog, "large", []).prev_select is None
+        assert "saved" in source_values
+        assert "custom" not in source_values  # customs are board-only
+        assert view.saved_select is not None
+        labels = [o.label for o in view.saved_select.options]
+        assert labels == ["Big Fire Drill", "Dock Blaze"]
+        # No cached list -> no saved select, the modal input still works.
+        assert MissionChooserView(cog, "large", []).saved_select is None
     finally:
         cog.cog_unload()
 
@@ -525,7 +515,7 @@ async def test_event_chooser_has_no_mission_data_selects(db):
     try:
         view = MissionChooserView(cog, "event")
         assert view.kind == "event"
-        assert view.source_select is None and view.prev_select is None
+        assert view.source_select is None and view.saved_select is None
     finally:
         cog.cog_unload()
 
@@ -540,14 +530,6 @@ async def test_kind_pick_menu_offers_event_and_large(db):
         assert "Large scale alliance mission" in labels
     finally:
         cog.cog_unload()
-
-
-def test_values_text_round_trip():
-    assert _values_text('{"need_lf": 25, "water_needed": 15000}') == (
-        "need_lf=25 water_needed=15000"
-    )
-    assert _values_text(None) == ""
-    assert _values_text("not json") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -603,3 +585,57 @@ async def test_closed_dms_fall_back_to_ingame_pm(db):
         assert channel_sends == []      # never a mention in the channel
     finally:
         cog.cog_unload()
+
+# ---------------------------------------------------------------------------
+# The game's saved-missions list: cache + refresh
+# ---------------------------------------------------------------------------
+
+_DROPDOWN_HTML = (
+    "<div>"
+    "<a class='mission_custom_saved_restore' "
+    "params='{\"caption\": \"Big Fire Drill\", \"need_lf\": \"25\"}'>"
+    "Big Fire Drill (Alice)</a>"
+    "<a class='mission_custom_saved_restore' "
+    "params='{\"caption\": \"Dock Blaze\", \"need_rw\": \"5\"}'>"
+    "Dock Blaze (Bob)</a>"
+    "</div>"
+)
+
+
+def _mission_scheduler(db, pages):
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.missions import MissionScheduler
+
+    class _Client:
+        def __init__(self):
+            self.fetches = 0
+
+        async def fetch_page(self, path, *, referer=None):
+            self.fetches += 1
+            return pages.get(path, "<html></html>")
+
+    svc = MissionScheduler.__new__(MissionScheduler)
+    svc.state = StateRepo(db)
+    svc.client = _Client()
+    return svc
+
+
+async def test_refresh_saved_missions_caches_the_dropdown(db):
+    svc = _mission_scheduler(db, {"/missionAllianceNew": _DROPDOWN_HTML})
+    names = await svc.refresh_saved_missions()
+    assert names == ["Big Fire Drill", "Dock Blaze"]
+    assert await svc.saved_mission_names() == ["Big Fire Drill", "Dock Blaze"]
+
+
+async def test_empty_dropdown_never_clobbers_a_known_list(db):
+    svc = _mission_scheduler(db, {"/missionAllianceNew": _DROPDOWN_HTML})
+    await svc.refresh_saved_missions()
+    # A glitchy/empty page later keeps the old names.
+    svc2 = _mission_scheduler(db, {"/missionAllianceNew": "<html></html>"})
+    names = await svc2.refresh_saved_missions()
+    assert names == ["Big Fire Drill", "Dock Blaze"]
+
+
+async def test_saved_mission_names_empty_without_cache(db):
+    svc = _mission_scheduler(db, {})
+    assert await svc.saved_mission_names() == []
