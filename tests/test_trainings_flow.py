@@ -794,3 +794,25 @@ async def test_empty_harvest_keeps_the_previous_course_list(db):
     await svc._collect_availability()
     catalog = await merged_course_catalog(StateRepo(db))
     assert "Hotshot Crew Training" in catalog["fire"]
+
+
+async def test_board_parse_uses_the_live_catalog_and_counts(db):
+    """A board post naming a live-harvested course (absent from the
+    built-in list) parses into a request with its copy count."""
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.trainings import TRAINING_COURSES_STATE_KEY
+
+    await StateRepo(db).set(TRAINING_COURSES_STATE_KEY, json.dumps({
+        "courses": {"fire": {"Technical Rescue Training": 4}}, "at": 1,
+    }))
+    svc, _ = _service(db, dry_run=True)
+    request = await svc.parse_request(BoardPost(
+        post_id=1, author_name="Alice", author_mc_id=42,
+        raw_timestamp="", content="3x Technical Rescue Training",
+    ))
+    assert request is not None
+    payload = json.loads(request["payload"])
+    assert payload["trainings"] == [{
+        "discipline": "fire", "name": "Technical Rescue Training",
+        "duration": 4, "count": 3,
+    }]

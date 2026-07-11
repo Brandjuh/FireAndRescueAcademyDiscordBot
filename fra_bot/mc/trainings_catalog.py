@@ -100,6 +100,9 @@ class TrainingMatch:
     discipline: str
     name: str
     duration_days: int
+    #: Copies of the class requested ("3x HazMat"); the services clamp
+    #: this to their per-request maximum (4).
+    count: int = 1
 
 
 @dataclass(frozen=True)
@@ -124,10 +127,10 @@ def _alias_variants(name: str) -> list[str]:
     return [v for v in variants if v]
 
 
-def ambiguous_names() -> dict[str, tuple[str, ...]]:
+def ambiguous_names(catalog=None) -> dict[str, tuple[str, ...]]:
     """Normalized training name → disciplines it exists in (if > 1)."""
     seen: dict[str, list[str]] = {}
-    for discipline, trainings in DISCIPLINES.items():
+    for discipline, trainings in (catalog or DISCIPLINES).items():
         for name in trainings:
             seen.setdefault(_normalize(name), []).append(discipline)
     return {
@@ -148,9 +151,35 @@ def _detect_prefix(chunk: str) -> tuple[str | None, str]:
     return None, chunk
 
 
-def match_trainings(text: str) -> tuple[list[TrainingMatch], list[AmbiguousMatch]]:
-    """Extract training requests from free-form board text."""
-    ambiguous = ambiguous_names()
+_COUNT_PREFIX_RE = re.compile(r"^\s*(\d+)\s*[x×]\s+", re.IGNORECASE)
+_COUNT_SUFFIX_RE = re.compile(r"\s+[x×]\s*(\d+)\s*$", re.IGNORECASE)
+#: Board copy-count cap — mirrors the services' MAX_CLASSES_PER_REQUEST.
+_MAX_COUNT = 4
+
+
+def _extract_count(chunk: str) -> tuple[str, int]:
+    """Split a copy count off a chunk: "3x HazMat" / "HazMat x3" → 3."""
+    match = _COUNT_PREFIX_RE.match(chunk)
+    if match:
+        return chunk[match.end():], max(1, min(_MAX_COUNT, int(match.group(1))))
+    match = _COUNT_SUFFIX_RE.search(chunk)
+    if match:
+        return chunk[: match.start()], max(1, min(_MAX_COUNT, int(match.group(1))))
+    return chunk, 1
+
+
+def match_trainings(
+    text: str, catalog=None
+) -> tuple[list[TrainingMatch], list[AmbiguousMatch]]:
+    """Extract training requests from free-form board text.
+
+    ``catalog`` (discipline → {name: days}) overrides the built-in list —
+    the trainings service passes the live-harvested academy courses, so a
+    course the game added yesterday matches exactly instead of fuzzing
+    onto the nearest stale name.
+    """
+    catalog = catalog or DISCIPLINES
+    ambiguous = ambiguous_names(catalog)
     matches: dict[tuple[str, str], TrainingMatch] = {}
     ambiguities: dict[str, AmbiguousMatch] = {}
 
@@ -160,12 +189,13 @@ def match_trainings(text: str) -> tuple[list[TrainingMatch], list[AmbiguousMatch
         if not raw_chunk:
             continue
         forced_discipline, remainder = _detect_prefix(raw_chunk)
+        remainder, count = _extract_count(remainder)
         normalized_chunk = _normalize(remainder)
         if not normalized_chunk:
             continue
 
         best: tuple[float, str, str, int] | None = None  # score, disc, name, days
-        for discipline, trainings in DISCIPLINES.items():
+        for discipline, trainings in catalog.items():
             if forced_discipline and discipline != forced_discipline:
                 continue
             for name, days in trainings.items():
@@ -173,8 +203,12 @@ def match_trainings(text: str) -> tuple[list[TrainingMatch], list[AmbiguousMatch
                     forced_discipline is None and _normalize(name) in ambiguous
                 )
                 for variant in _alias_variants(name):
+                    compact = variant.replace(" ", "")
                     score = 0.0
-                    if re.search(rf"\b{re.escape(variant)}\b", normalized_chunk):
+                    if re.search(rf"\b{re.escape(variant)}\b", normalized_chunk) or (
+                        compact != variant
+                        and re.search(rf"\b{re.escape(compact)}\b", normalized_chunk)
+                    ):
                         score = 1.0
                     elif variant in normalized_chunk or normalized_chunk in variant:
                         score = max(
@@ -182,7 +216,21 @@ def match_trainings(text: str) -> tuple[list[TrainingMatch], list[AmbiguousMatch
                             SequenceMatcher(None, variant, normalized_chunk).ratio(),
                         )
                     else:
-                        score = SequenceMatcher(None, variant, normalized_chunk).ratio()
+                        # Pure fuzz is for typos of the WHOLE name. Different
+                        # courses sharing a tail ("… Rescue Training") score
+                        # deceptively high on raw ratio — "technical rescue
+                        # training" hit Search and Rescue Training at 0.784.
+                        # Comparing sorted-token forms as well kills those
+                        # while genuine typos stay well above the threshold.
+                        ratio = SequenceMatcher(
+                            None, variant, normalized_chunk
+                        ).ratio()
+                        token_ratio = SequenceMatcher(
+                            None,
+                            " ".join(sorted(variant.split())),
+                            " ".join(sorted(normalized_chunk.split())),
+                        ).ratio()
+                        score = min(ratio, token_ratio)
                     if score < MATCH_THRESHOLD:
                         continue
                     if is_ambiguous:
@@ -195,8 +243,12 @@ def match_trainings(text: str) -> tuple[list[TrainingMatch], list[AmbiguousMatch
                         best = (score, discipline, name, days)
         if best is not None:
             _, discipline, name, days = best
+            existing = matches.get((discipline, name))
+            if existing is not None:
+                count = min(_MAX_COUNT, existing.count + count)
             matches[(discipline, name)] = TrainingMatch(
-                discipline=discipline, name=name, duration_days=days
+                discipline=discipline, name=name, duration_days=days,
+                count=count,
             )
 
     # Drop ambiguity warnings for names that also matched unambiguously
