@@ -93,6 +93,9 @@ class DiscordConfig:
     # Always pinged on a mission/event start (the reference bot's
     # Notify-Event role); a region role is added when resolvable.
     notify_event_role_id: int = 669496241591418890
+    # Pinged on new/updated-mission announcements in the mission_announce
+    # channel (0 = no ping, just the message).
+    mission_announce_role_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -370,6 +373,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             ),
             notify_event_role_id=int(
                 _get(raw, "discord", "notify_event_role_id", default=669496241591418890)
+            ),
+            mission_announce_role_id=int(
+                _get(raw, "discord", "mission_announce_role_id", default=0)
             ),
         ),
         automation=AutomationConfig(

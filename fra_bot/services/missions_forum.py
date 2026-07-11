@@ -393,6 +393,7 @@ class MissionsForumService:
         capped = stopped = False
         seen_unchanged: list[str] = []
         seen_keys: set[str] = set()
+        data_updates: list[dict] = []
         writes = 0
 
         missions.sort(key=lambda m: _sort_key(catalog.mission_key(m)))
@@ -431,13 +432,15 @@ class MissionsForumService:
                     if announce and thread is not None:
                         announced += await self._announce(mission, thread)
                 else:
-                    outcome = await self._update_post(
+                    outcome, changed_note = await self._update_post(
                         forum, mission, row, digest, updated_stamp, base_url
                     )
                     if outcome == "recreated":
                         created += 1
                     else:
                         updated += 1
+                    if changed_note:
+                        data_updates.append(changed_note)
             except Exception:  # noqa: BLE001 — one bad mission must never
                 # abort the whole run (an aborted run used to stall the
                 # backfill until the next day's sync).
@@ -446,6 +449,12 @@ class MissionsForumService:
                 continue
             writes += 1
             await self._pause(writes)
+
+        # Real game-side changes ping the announcement channel — bundled
+        # into ONE message so a game balance patch that touches dozens of
+        # missions never becomes a ping storm.
+        if announce and data_updates:
+            announced += await self._announce_updates(data_updates)
 
         await self._repo.touch_seen(seen_unchanged)
         if not capped and not failed and not stopped:
@@ -477,7 +486,9 @@ class MissionsForumService:
             reason="Missions database sync",
         )
         thread = getattr(result, "thread", result)
-        await self._repo.record(key, thread.id, digest, name)
+        await self._repo.record(
+            key, thread.id, digest, name, data_hash=catalog.data_hash(mission)
+        )
         await self._archive(thread)
         return thread
 
@@ -503,7 +514,7 @@ class MissionsForumService:
             # The thread was deleted by hand — post it again.
             await self._repo.delete(key)
             await self._create_post(forum, mission, digest, stamp, base_url)
-            return "recreated"
+            return "recreated", None
         if getattr(thread, "archived", False):
             await thread.edit(archived=False)
         embed = build_mission_embed(mission, base_url=base_url, updated=stamp)
@@ -519,7 +530,7 @@ class MissionsForumService:
             )
             await self._repo.delete(key)
             await self._create_post(forum, mission, digest, stamp, base_url)
-            return "recreated"
+            return "recreated", None
         await starter.edit(embed=embed)
         title = thread_title(name, key)
         wanted_tags = self._applied_tags(forum, mission)
@@ -533,9 +544,32 @@ class MissionsForumService:
             edits["applied_tags"] = wanted_tags
         if edits:
             await thread.edit(**edits)
-        await self._repo.record(key, thread.id, digest, name)
+        # A REAL game-side change also gets a message in the thread: the
+        # full current card, so the change history stays readable and the
+        # post bumps in the forum. A bot-side re-render (format bump) or a
+        # legacy row without a stored data hash stays silent — a format
+        # bump must never spam 1200 threads.
+        changed_note = None
+        new_data_hash = catalog.data_hash(mission)
+        old_data_hash = _row_value(row, "data_hash")
+        if old_data_hash is not None and old_data_hash != new_data_hash:
+            try:
+                await thread.send(
+                    content=f"🔄 **Mission updated** — current data below ({stamp}):",
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException as exc:
+                log.warning("Could not post update note for %s: %s", key, exc)
+            changed_note = {
+                "name": name,
+                "jump_url": getattr(thread, "jump_url", ""),
+            }
+        await self._repo.record(
+            key, thread.id, digest, name, data_hash=new_data_hash
+        )
         await self._archive(thread)
-        return "updated"
+        return "updated", changed_note
 
     async def wipe(self) -> dict:
         """Delete EVERY mission post (tracked rows plus any thread carrying
@@ -596,20 +630,64 @@ class MissionsForumService:
             "stopped": stopped, "lines": lines, "changed": bool(deleted or failed),
         }
 
-    async def _announce(self, mission: dict, thread) -> int:
+    def _announce_channel(self):
         channel_id = self._cfg.discord.channels.mission_announce
-        channel = self._bot.get_channel(channel_id) if channel_id else None
+        return self._bot.get_channel(channel_id) if channel_id else None
+
+    def _role_ping(self) -> tuple[str, discord.AllowedMentions]:
+        """(mention prefix, allowed mentions) for announcements — pings the
+        configured role, nothing else."""
+        role_id = getattr(self._cfg.discord, "mission_announce_role_id", 0)
+        if role_id:
+            return f"<@&{role_id}> ", discord.AllowedMentions(
+                everyone=False, users=False, roles=True
+            )
+        return "", discord.AllowedMentions.none()
+
+    async def _announce(self, mission: dict, thread) -> int:
+        channel = self._announce_channel()
         if channel is None:
             return 0
         name = catalog.mission_name(mission)
         jump = getattr(thread, "jump_url", "") or getattr(thread, "mention", "")
+        prefix, mentions = self._role_ping()
         try:
             await channel.send(
-                f"🆕 **New mission in MissionChief:** {name}\n➡️ {jump}"
+                f"{prefix}🆕 **New mission in MissionChief:** {name}\n➡️ {jump}",
+                allowed_mentions=mentions,
             )
             return 1
         except discord.HTTPException as exc:
             log.warning("Could not announce new mission %s: %s", name, exc)
+            return 0
+
+    async def _announce_updates(self, updates: list[dict]) -> int:
+        """One bundled announcement for all missions the GAME changed this
+        run (one ping, however many missions a balance patch touched)."""
+        channel = self._announce_channel()
+        if channel is None:
+            return 0
+        prefix, mentions = self._role_ping()
+        shown = updates[:10]
+        lines = [
+            f"• **{note['name']}** — {note['jump_url']}".rstrip(" —")
+            for note in shown
+        ]
+        if len(updates) > len(shown):
+            lines.append(f"… and {len(updates) - len(shown)} more (see the forum)")
+        header = (
+            "🔄 **Mission updated in MissionChief:**"
+            if len(updates) == 1
+            else f"🔄 **{len(updates)} missions updated in MissionChief:**"
+        )
+        try:
+            await channel.send(
+                f"{prefix}{header}\n" + "\n".join(lines)[:1800],
+                allowed_mentions=mentions,
+            )
+            return 1
+        except discord.HTTPException as exc:
+            log.warning("Could not announce mission updates: %s", exc)
             return 0
 
     async def _pause(self, writes: int) -> None:
@@ -669,7 +747,9 @@ class MissionsForumService:
                 f"re-adopted {counts['adopted']} existing post(s) from the forum"
             )
         if counts.get("announced"):
-            lines.append(f"announced {counts['announced']} new mission(s)")
+            lines.append(
+                f"sent {counts['announced']} announcement(s) (new/updated missions)"
+            )
         if counts.get("stopped"):
             lines.append("⏹️ stopped by admin — the rest follows on the next sync")
         elif counts.get("capped"):
@@ -688,3 +768,12 @@ def _sort_key(key: str) -> tuple:
     """Numeric-aware ordering so mission 2 posts before mission 10."""
     head = re.match(r"(\d+)", key)
     return (int(head.group(1)) if head else 10**9, key)
+
+
+def _row_value(row, column: str):
+    """A column from an sqlite row, None when the column doesn't exist
+    (pre-migration rows in old snapshots)."""
+    try:
+        return row[column]
+    except (KeyError, IndexError):
+        return None

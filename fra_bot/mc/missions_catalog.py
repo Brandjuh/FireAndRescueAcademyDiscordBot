@@ -445,6 +445,14 @@ def content_hash(mission: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def data_hash(mission: dict[str, Any]) -> str:
+    """SHA-256 over the raw mission data only (no format version): tells a
+    REAL game-side change apart from a bot-side re-render, so "mission
+    updated" messages fire only when the game actually changed something."""
+    canonical = json.dumps(mission, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Field helpers (English labels)
 # ---------------------------------------------------------------------------

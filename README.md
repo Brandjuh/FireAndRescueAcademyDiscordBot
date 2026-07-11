@@ -381,9 +381,13 @@ and High Credits, max 5 per post) and turns "require a tag" on.
 Point it at a forum with `!fra set missions_forum <forum channel id>` and
 enable the daily check with `!fra set automation.missions_forum.enabled on`
 (runs at `sync_time`, default 04:00). New missions are posted; a mission
-whose data changed gets its existing post **edited in place** (no bump, no
+whose data changed gets its existing post **edited in place** (no
 duplicate — dedup lives in SQLite, and `!fra missionsforum adopt` can
-rebuild that mapping from the thread titles after a database loss).
+rebuild that mapping from the thread titles after a database loss). When
+the **game** changes a mission, the thread additionally gets a new
+message with the full current card (readable change history, and the post
+bumps in the forum) — a bot-side re-render after an update never does
+this, so a format change can't spam 1,200 threads.
 Missions removed from the game keep their post. The initial backfill
 (~1,200+ missions) is paced (2 s between posts, at most
 `max_posts_per_run` per run, default 100) and continues **hourly** until
@@ -397,8 +401,11 @@ one automatically. `!fra missionsforum sync` runs a pass on demand, and
 
 Optionally (`!fra set announce_new on`, default **off**) each brand-new
 mission is announced in `discord.channels.mission_announce` (default
-`1524842963316773036`) with a link to its forum post. The initial backfill
-never announces.
+`1524842963316773036`) with a link to its forum post, and game-side
+mission changes get **one bundled announcement** per sync (however many
+missions a balance patch touched — never a ping storm). Set
+`!fra set mission_announce_role @role` to ping a role on those
+announcements (default: no ping). The initial backfill never announces.
 
 ### In-game DM mirror
 
