@@ -70,6 +70,9 @@ discord:
     # conversation gets one thread here; replies in the thread go back
     # into the game. 0 = off.
     dm_mirror: 1517694938501087342
+    # Message panel (Send message / Check inbox / Reply buttons), placed
+    # and maintained automatically. 0 = off.
+    dm_panel: 1421242306136113254
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
   # Role that is always pinged by the eventpinger (Notify-Event).

@@ -362,16 +362,21 @@ class DmMirrorService:
         row = await self._repo.by_thread(thread_id)
         if row is None:
             return False, "this thread is not linked to a game conversation"
+        return await self.reply_to_conversation(row["conversation_id"], body)
+
+    async def reply_to_conversation(
+        self, conversation_id: str, body: str
+    ) -> tuple[bool, str]:
+        """Reply inside a game conversation by id (thread route and the
+        panel's Reply button both land here)."""
         if self._cfg.automation.dry_run:
             return False, (
                 "dry-run is on — reply NOT sent to the game "
                 "(`!fra set dry_run off` to go live)"
             )
-        ok, detail = await mailbox.send_reply(
-            self._mc, row["conversation_id"], body
-        )
+        ok, detail = await mailbox.send_reply(self._mc, str(conversation_id), body)
         if ok:
-            self._echoes.setdefault(row["conversation_id"], []).append(
+            self._echoes.setdefault(str(conversation_id), []).append(
                 _norm_body(body)
             )
         return ok, detail
