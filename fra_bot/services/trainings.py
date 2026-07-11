@@ -46,6 +46,10 @@ RETRY_MINUTES = 15              # backoff between busy retries (bounded by MAX_A
 
 GUIDE_MARKER = "[FRA] 📋 How to request a TRAINING"
 
+#: State key holding the last availability walk: {"counts": {...}, "at": epoch}.
+#: Written by the hourly guide refresh; read by the Discord training chooser.
+AVAILABILITY_STATE_KEY = "training_availability"
+
 # Display order + labels for the per-agency guide posts (the reference bot's
 # split: one overview post + one post per academy type, so no single post
 # grows past what the forum accepts).
@@ -320,36 +324,50 @@ class TrainingsService(BoardRequestService):
 
         Returns ``None`` if the building list can't be read (shown as
         "temporarily unavailable"); a per-academy page failure just omits that
-        academy's rooms."""
+        academy's rooms. The walk is many paced page fetches, so it runs as
+        BULK traffic — it yields to member requests (opening a training has
+        first priority, guide upkeep does not). The result is cached in
+        state so the Discord training chooser can show the numbers instantly
+        without walking the academies per click."""
+        from ..core.pacing import bulk_traffic
+
         try:
-            listings: list[AcademyListing] = []
-            path = ALLIANCE_BUILDINGS_PATH
-            for _ in range(MAX_ACADEMY_LIST_PAGES):
-                html = await self.client.fetch_page(path)
-                listings.extend(parse_alliance_buildings_page(html))
-                nxt = find_next_page_path(html)
-                if not nxt:
-                    break
-                path = nxt
+            with bulk_traffic():
+                listings: list[AcademyListing] = []
+                path = ALLIANCE_BUILDINGS_PATH
+                for _ in range(MAX_ACADEMY_LIST_PAGES):
+                    html = await self.client.fetch_page(path)
+                    listings.extend(parse_alliance_buildings_page(html))
+                    nxt = find_next_page_path(html)
+                    if not nxt:
+                        break
+                    path = nxt
+
+                counts = {key: 0 for key in _AGENCY_ORDER}
+                seen: set[int] = set()
+                for listing in listings:
+                    if listing.discipline not in counts or listing.building_id in seen:
+                        continue
+                    seen.add(listing.building_id)
+                    try:
+                        page = parse_academy_page(
+                            await self.client.fetch_page(
+                                f"/buildings/{listing.building_id}"
+                            )
+                        )
+                    except MissionChiefError as exc:
+                        log.debug("training availability: academy %s failed (%s)",
+                                  listing.building_id, exc)
+                        continue
+                    counts[listing.discipline] += max(0, page.available_rooms)
         except MissionChiefError as exc:
             log.warning("training availability: could not read academy list: %s", exc)
             return None
 
-        counts = {key: 0 for key in _AGENCY_ORDER}
-        seen: set[int] = set()
-        for listing in listings:
-            if listing.discipline not in counts or listing.building_id in seen:
-                continue
-            seen.add(listing.building_id)
-            try:
-                page = parse_academy_page(
-                    await self.client.fetch_page(f"/buildings/{listing.building_id}")
-                )
-            except MissionChiefError as exc:
-                log.debug("training availability: academy %s failed (%s)",
-                          listing.building_id, exc)
-                continue
-            counts[listing.discipline] += max(0, page.available_rooms)
+        await self.state.set(AVAILABILITY_STATE_KEY, json.dumps({
+            "counts": counts,
+            "at": int(dt.datetime.now(dt.timezone.utc).timestamp()),
+        }))
         return counts
 
     async def parse_request(self, post: BoardPost) -> dict | None:
