@@ -118,6 +118,11 @@ class FRABot(commands.Bot):
         from .services.missions_forum import MissionsForumService
 
         self.missions_forum = MissionsForumService(cfg, self.mc, self.db, self)
+        # In-game DM mirror: every PM conversation ↔ one forum thread,
+        # with staff replies routed back into the game.
+        from .services.dm_mirror import DmMirrorService
+
+        self.dm_mirror = DmMirrorService(cfg, self.mc, self.db, self)
         # On-command alliance hospital/prison level + extension upgrades.
         self.building_upgrade = BuildingUpgradeService(cfg, self.mc, self.db)
 
@@ -167,6 +172,7 @@ class FRABot(commands.Bot):
         from .cogs.membersync import MemberSyncCog
         from .cogs.missions import MissionPanelView, MissionsCog
         from .cogs.notifications import NotificationsCog
+        from .cogs.dm_mirror import DmMirrorCog
         from .cogs.panels import PanelKeeperCog
         from .cogs.reporting import ReportingCog
         from .cogs.reports import ReportsCog
@@ -183,6 +189,7 @@ class FRABot(commands.Bot):
         await self.add_cog(DossierCog(self))
         await self.add_cog(EventPingerCog(self))
         await self.add_cog(PanelKeeperCog(self))
+        await self.add_cog(DmMirrorCog(self))
 
         # Persistent panels survive restarts; register their views.
         missions_cog = self.get_cog("MissionsCog")
@@ -413,6 +420,16 @@ class FRABot(commands.Bot):
                 timezone=self.cfg.reports.timezone,
                 name="missions-forum",
             )
+        # In-game DM mirror: scan the PM inbox and mirror conversations to
+        # the forum. Read-only on the game side, so it runs in dry-run too
+        # (thread replies into the game DO honour dry_run).
+        if automation.dm_mirror.enabled:
+            sched.add_interval_job(
+                self._guarded(self._dm_mirror_pass, "dm-mirror"),
+                minutes=automation.dm_mirror.interval,
+                name="dm-mirror",
+                initial_delay_seconds=240.0,
+            )
         # Member tax (5% donation) warnings: escalating in-game PMs, reset
         # the moment a member fixes their donation. Every action lands in
         # the admin channel.
@@ -438,6 +455,15 @@ class FRABot(commands.Bot):
         if summary.get("error") or summary.get("changed"):
             await self.notify_admin(
                 "📚 **Missions forum**\n" + "\n".join(summary["lines"])[:1800]
+            )
+
+    async def _dm_mirror_pass(self) -> None:
+        """One DM inbox scan; only errors are surfaced to the admin channel
+        (new mirrored messages are visible in the forum itself)."""
+        summary = await self.dm_mirror.scan()
+        if summary.get("error") or summary.get("failed"):
+            await self.notify_admin(
+                "📬 **DM mirror**\n" + "\n".join(summary["lines"])[:1800]
             )
 
     async def _tax_warning_pass(self) -> None:

@@ -1865,6 +1865,62 @@ class MissionsForumRepo:
         )
 
 
+class DmMirrorRepo:
+    """conversation_id → forum-thread mapping for the in-game DM mirror,
+    plus the per-conversation progress marker (newest mirrored message
+    timestamp) that keeps rescans duplicate-free."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def get(self, conversation_id: str) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM dm_conversations WHERE conversation_id = ?",
+            (str(conversation_id),),
+        ) as cur:
+            return await cur.fetchone()
+
+    async def by_thread(self, thread_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM dm_conversations WHERE thread_id = ?", (thread_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def count(self) -> int:
+        async with self._db.conn.execute(
+            "SELECT COUNT(*) AS n FROM dm_conversations"
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def record(
+        self,
+        conversation_id: str,
+        *,
+        username: str,
+        subject: str,
+        thread_id: int | None,
+        last_activity: str | None,
+        mirrored_count: int,
+    ) -> None:
+        now = utcnow_iso()
+        await self._db.execute(
+            "INSERT INTO dm_conversations (conversation_id, username, subject, "
+            "thread_id, mirrored_count, last_activity, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(conversation_id) DO UPDATE SET "
+            "username = excluded.username, subject = excluded.subject, "
+            "thread_id = excluded.thread_id, "
+            "mirrored_count = excluded.mirrored_count, "
+            "last_activity = excluded.last_activity, "
+            "updated_at = excluded.updated_at",
+            (
+                str(conversation_id), username, subject, thread_id,
+                mirrored_count, last_activity, now, now,
+            ),
+        )
+
+
 def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
     """(daily, monthly) period keys for the current New York game day."""
     from zoneinfo import ZoneInfo
