@@ -240,12 +240,20 @@ class MissionScheduler:
         requester_mc_id: int | None,
         discord_user_id: int | None,
         channel_id: int | None,
+        status: str = "pending",
+        status_detail: str | None = None,
     ) -> int:
         """Create a Discord-sourced request. Returns the queue id.
 
         Recurring requests are queued too (recurring=1); the scheduler
-        promotes them to the rotation list once they first start.
+        promotes them to the rotation list once they first start. A
+        non-default ``status`` records a request that was refused at intake
+        (the log entry) — written with the insert itself, so the scheduler
+        can never claim it in between.
         """
+        extra: dict = {}
+        if status != "pending":
+            extra = {"status": status, "status_detail": status_detail}
         return await self.missions.create(
             source="discord",
             kind=spec.kind,
@@ -265,6 +273,7 @@ class MissionScheduler:
             requester_mc_id=requester_mc_id,
             discord_user_id=discord_user_id,
             channel_id=channel_id,
+            **extra,
         )
 
     async def next_up(self) -> dict | None:

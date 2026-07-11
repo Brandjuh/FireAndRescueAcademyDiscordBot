@@ -790,16 +790,23 @@ class AutomationRepo:
         requester_name: str | None,
         requester_mc_id: int | None,
         payload: str | None = None,
+        status: str = "pending",
+        status_detail: str | None = None,
     ) -> int:
+        """Insert a request. A non-default ``status`` (e.g. ``skipped`` for a
+        request rejected at intake) is written atomically WITH the insert —
+        create-then-set_status would leave a claimable 'pending' row for a
+        moment, which a concurrent poll could execute."""
         now = utcnow_iso()
         return await self._db.execute_returning_id(
             """
             INSERT INTO automation_requests
                 (kind, thread_id, post_id, requester_name, requester_mc_id,
-                 payload, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 payload, status, status_detail, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (kind, thread_id, post_id, requester_name, requester_mc_id, payload, now, now),
+            (kind, thread_id, post_id, requester_name, requester_mc_id,
+             payload, status, status_detail, now, now),
         )
 
     async def record_post_and_request(
@@ -1060,6 +1067,10 @@ class MissionsRepo:
         "location_text", "latitude", "longitude", "address",
         "requester_name", "requester_mc_id", "discord_user_id", "channel_id",
         "board_thread_id", "board_post_id",
+        # Written at insert time only for terminal-at-intake rows (a request
+        # rejected by the intake gate) — a create-then-set_status pair would
+        # briefly leave a claimable 'pending' row for the scheduler.
+        "status", "status_detail",
     )
 
     def __init__(self, db: Database) -> None:
@@ -1265,6 +1276,28 @@ class MissionsRepo:
     async def recent(self, limit: int = 15) -> list[aiosqlite.Row]:
         async with self._db.conn.execute(
             "SELECT * FROM scheduled_missions ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def previous_mission_options(self, limit: int = 24) -> list[aiosqlite.Row]:
+        """Distinct previously requested saved/custom large missions, newest
+        first — the mission panel's "previously created missions" choices.
+        Failed/cancelled ones are excluded so a bad saved-mission name isn't
+        offered forever; dry-run outcomes ('skipped') remain valid options.
+        SQLite's MAX(id) bare-column rule makes every other column come from
+        that newest row, so a re-run picks up the latest custom_values."""
+        async with self._db.conn.execute(
+            """
+            SELECT MAX(id) AS id, kind, mission_source, saved_name, caption,
+                   custom_values
+            FROM scheduled_missions
+            WHERE kind = 'large' AND mission_source IN ('saved', 'custom')
+              AND COALESCE(saved_name, caption) IS NOT NULL
+              AND status NOT IN ('failed', 'cancelled')
+            GROUP BY mission_source, COALESCE(saved_name, caption)
+            ORDER BY MAX(id) DESC LIMIT ?
+            """,
+            (limit,),
         ) as cur:
             return list(await cur.fetchall())
 

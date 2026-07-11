@@ -104,6 +104,9 @@ automation:
     enabled: false            # master switch for hospital/prison builds
     thread_id: 6165
     interval: 5
+    # Minimum alliance contribution % before a Discord building request is
+    # accepted (checked at intake, like trainings/events/missions).
+    min_contribution_rate: 5.0
     # Never build when alliance funds are below this (live check).
     min_alliance_funds: 2000000
     # Alliance tax to set on newly built buildings (0/10/20/30/40/50).

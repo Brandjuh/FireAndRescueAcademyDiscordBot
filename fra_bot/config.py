@@ -112,6 +112,7 @@ class BuildingAutomationConfig:
     enabled: bool
     thread_id: int
     interval: int
+    min_contribution_rate: float
     min_alliance_funds: int
     set_tax_percent: int
     # Daily worldwide auto-build: one hospital + one prison per day at a real
@@ -414,6 +415,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 enabled=bool(_get(raw, "automation", "building", "enabled", default=False)),
                 thread_id=int(_get(raw, "automation", "building", "thread_id", default=6165)),
                 interval=int(_get(raw, "automation", "building", "interval", default=5)),
+                min_contribution_rate=float(
+                    _get(raw, "automation", "building", "min_contribution_rate", default=5.0)
+                ),
                 min_alliance_funds=int(
                     _get(raw, "automation", "building", "min_alliance_funds", default=2_000_000)
                 ),

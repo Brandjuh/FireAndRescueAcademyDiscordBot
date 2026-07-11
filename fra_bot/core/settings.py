@@ -129,6 +129,8 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("automation.building.enabled", "bool", False, "Building auto-build"),
     Setting("automation.building.thread_id", "int", True, "Building board thread"),
     Setting("automation.building.interval", "int", False, "Building poll interval (min)", minimum=2),
+    Setting("automation.building.min_contribution_rate", "float", True,
+            "Minimum contribution %% for building requests", minimum=0, maximum=100),
     Setting("automation.building.min_alliance_funds", "int", True,
             "Never spend below this alliance balance", minimum=0),
     Setting("automation.building.set_tax_percent", "int", True,

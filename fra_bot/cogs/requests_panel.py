@@ -1,13 +1,21 @@
 """Discord front-end for training and building requests.
 
-A persistent panel gives members two buttons:
+A persistent panel gives members two buttons (the ``/training`` and
+``/building`` slash commands open the exact same flows):
 
 * **Request a training** — pick the academy type, pick the course, optionally
   toggle a reminder, submit. The request lands in ``automation_requests``
   exactly like a board post would, and the trainings poller opens the class
   at its next pass.
 * **Request a building** — paste a Google Maps link to a real hospital or
-  prison; the buildings poller detects the type and builds it.
+  prison. The pin is checked IMMEDIATELY (location resolves, type is a
+  hospital/prison); a good request queues for the funds-gated build, a bad
+  one is rejected on the spot with the reason.
+
+Every intake runs the contribution gate (approved ``!verify`` link → roster
+contribution rate vs the feature's minimum) BEFORE queueing, and every
+rejection still writes an ``automation_requests`` row (status ``skipped``)
+so there is always a log entry — the admin-log publisher announces it.
 
 Discord-sourced requests carry ``thread_id = 0`` (no board post), so the
 services skip board replies for them; outcomes are announced by the
@@ -22,11 +30,15 @@ import json
 import logging
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 from ..db.repos import AutomationRepo, RemindersRepo
+from ..geo.geocoder import GeocodeError
 from ..geo.maps_links import find_maps_links
 from ..mc.trainings_catalog import DISCIPLINES
+from ..services.buildings import detect_building_type
+from ..services.intake import INTAKE_REJECTED_FLAG, contribution_gate
 
 log = logging.getLogger(__name__)
 
@@ -246,6 +258,26 @@ class RequestsCog(commands.Cog):
 
     # -- intake -----------------------------------------------------------
 
+    async def _log_rejection(
+        self, interaction: discord.Interaction, kind: str, payload: dict,
+        detail: str, mc_user_id: int | None,
+    ) -> int:
+        """Every rejection still gets its automation_requests row (the log
+        entry) — inserted terminal so the poller can never execute it. The
+        payload flag keeps the publisher from DM-ing the member a second
+        time; the admin-log embed still posts."""
+        payload = dict(payload)
+        payload[INTAKE_REJECTED_FLAG] = True
+        rid = await self.requests.create(
+            kind=kind, thread_id=DISCORD_THREAD, post_id=interaction.id,
+            requester_name=interaction.user.display_name,
+            requester_mc_id=mc_user_id,
+            payload=json.dumps(payload), status="skipped", status_detail=detail,
+        )
+        log.info("%s request #%s from %s: %s",
+                 kind, rid, interaction.user.display_name, detail)
+        return rid
+
     async def submit_training(
         self, interaction: discord.Interaction, discipline: str, training: str,
         *, remind: bool,
@@ -255,9 +287,25 @@ class RequestsCog(commands.Cog):
             user_id=interaction.user.id, channel_id=interaction.channel_id,
             remind=remind,
         )
+        verdict = await contribution_gate(
+            self.bot.db, interaction.user.id,
+            self.bot.cfg.automation.training.min_contribution_rate,
+        )
+        if not verdict.ok:
+            await self._log_rejection(
+                interaction, "training", payload, verdict.log_detail,
+                verdict.mc_user_id,
+            )
+            await _send(
+                interaction,
+                f"❌ Your training request was not submitted — "
+                f"{verdict.rejection_text}",
+            )
+            return
         rid = await self.requests.create(
             kind="training", thread_id=DISCORD_THREAD, post_id=interaction.id,
-            requester_name=interaction.user.display_name, requester_mc_id=None,
+            requester_name=interaction.user.display_name,
+            requester_mc_id=verdict.mc_user_id,
             payload=json.dumps(payload),
         )
         days = payload["trainings"][0]["duration"]
@@ -283,15 +331,102 @@ class RequestsCog(commands.Cog):
             link, user_id=interaction.user.id, channel_id=interaction.channel_id
         )
         if payload is None:
+            await self._log_rejection(
+                interaction, "building",
+                {
+                    "link_raw": link[:400],
+                    "discord_user_id": interaction.user.id,
+                    "channel_id": interaction.channel_id,
+                },
+                "rejected at intake: not a Google Maps link", None,
+            )
             await _send(
                 interaction,
-                "⚠️ That doesn't look like a Google Maps link. Copy the share "
-                "link of a real hospital or prison and try again.",
+                "❌ Rejected — that doesn't look like a Google Maps link. Copy "
+                "the share link of a real hospital or prison and try again.",
             )
             return
+
+        verdict = await contribution_gate(
+            self.bot.db, interaction.user.id,
+            self.bot.cfg.automation.building.min_contribution_rate,
+        )
+        if not verdict.ok:
+            await self._log_rejection(
+                interaction, "building", payload, verdict.log_detail,
+                verdict.mc_user_id,
+            )
+            await _send(
+                interaction,
+                f"❌ Your building request was not submitted — "
+                f"{verdict.rejection_text}",
+            )
+            return
+
+        # Location + type verdict RIGHT NOW, while the member is looking:
+        # resolve the pin and detect hospital/prison before queueing. The
+        # resolved coordinates travel in the payload, so the executor skips
+        # its own geocode pass and goes straight to the funds gate.
+        try:
+            location = await self.bot.geocoder.resolve_maps_link(payload["link"])
+        except GeocodeError as exc:
+            if getattr(exc, "transient", False):
+                # Geocoder hiccup, not the member's fault: queue as-is; the
+                # poller resolves and validates the pin at its next pass.
+                rid = await self.requests.create(
+                    kind="building", thread_id=DISCORD_THREAD,
+                    post_id=interaction.id,
+                    requester_name=interaction.user.display_name,
+                    requester_mc_id=verdict.mc_user_id,
+                    payload=json.dumps(payload),
+                )
+                await _send(
+                    interaction,
+                    f"✅ Request **#{rid}** queued — I couldn't reach the "
+                    "geocoder just now, so the pin check happens at the next "
+                    "pass (~5 min). You'll be notified of the outcome.",
+                )
+                return
+            await self._log_rejection(
+                interaction, "building", payload,
+                f"rejected at intake: geocoding failed: {exc}",
+                verdict.mc_user_id,
+            )
+            await _send(
+                interaction,
+                "❌ Rejected — the location could not be resolved to GPS "
+                "coordinates. Please use a Google Maps place link with a "
+                f"visible marker. ({exc})",
+            )
+            return
+
+        building_type = detect_building_type(
+            location.address, location.place_text, location.place_type
+        )
+        payload.update({
+            "latitude": location.latitude,
+            "longitude": location.longitude,
+            "address": location.address,
+            "building_type": building_type,
+        })
+        if building_type is None:
+            await self._log_rejection(
+                interaction, "building", payload,
+                "rejected at intake: location is not a hospital or prison",
+                verdict.mc_user_id,
+            )
+            await _send(
+                interaction,
+                f"❌ Rejected — **{location.place_text or location.address or 'the pin'}** "
+                "was not detected as a hospital or a prison. Only hospitals "
+                "and prisons are built automatically.",
+            )
+            return
+
         rid = await self.requests.create(
             kind="building", thread_id=DISCORD_THREAD, post_id=interaction.id,
-            requester_name=interaction.user.display_name, requester_mc_id=None,
+            requester_name=interaction.user.display_name,
+            requester_mc_id=verdict.mc_user_id,
             payload=json.dumps(payload),
         )
         notes = []
@@ -302,11 +437,36 @@ class RequestsCog(commands.Cog):
                 "⚠️ building automation is currently OFF — an admin must enable it"
             )
         note = ("\n" + " · ".join(notes)) if notes else ""
+        emoji = "🏥" if building_type == "hospital" else "🔒"
+        name = location.address.split(",")[0] if location.address else building_type
+        await _send(
+            interaction,
+            f"✅ Request **#{rid}** accepted — {emoji} **{building_type}** "
+            f"“{name}” at {location.latitude:.5f}, {location.longitude:.5f}. "
+            f"Alliance funds are checked next; it builds at the next pass "
+            f"(~5 min) or waits until funds allow.{note}",
+        )
+
+    # -- slash commands (same flows as the panel buttons) -----------------
+
+    @app_commands.command(
+        name="training",
+        description="Request a training — same flow as the request panel",
+    )
+    async def slash_training(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            f"✅ Request **#{rid}** queued. I'll check the pin (must be a real "
-            f"hospital or prison) and handle it at the next pass (~5 min).{note}",
+            "Pick the academy type and the course, then press "
+            "**Request training**:",
+            view=TrainingChooserView(self),
             ephemeral=True,
         )
+
+    @app_commands.command(
+        name="building",
+        description="Request a building — Google Maps link to a real hospital or prison",
+    )
+    async def slash_building(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(BuildingRequestModal(self))
 
     # -- panel (posted/maintained by the panel keeper) -----------------------
 
@@ -315,16 +475,18 @@ class RequestsCog(commands.Cog):
             title="🚒 Fire & Rescue Academy — requests",
             colour=discord.Colour.red(),
             description=(
-                "**🎓 Request a training**\n"
+                "**🎓 Request a training** (or `/training`)\n"
                 "Pick the academy type and the course. I open a **free** class "
                 "that's open to the whole alliance for 1 hour to join. Optional: "
                 "a reminder when the course should be finished.\n\n"
-                "**🏥 Request a building**\n"
-                "Paste a Google Maps link to a **real hospital or prison** and "
-                "I'll build it for the alliance. Clinics, police stations and "
-                "the like are refused.\n\n"
-                "_Requests are picked up within ~5 minutes; the result is "
-                "announced in the log channel._"
+                "**🏥 Request a building** (or `/building`)\n"
+                "Paste a Google Maps link to a **real hospital or prison** — "
+                "the pin is checked on the spot and you're told immediately "
+                "whether it's accepted. Clinics, police stations and the like "
+                "are refused.\n\n"
+                "_You need a verified account (`!verify`) with enough alliance "
+                "contribution. Accepted requests run within ~5 minutes; results "
+                "are announced in the log channel._"
             ),
         )
 
