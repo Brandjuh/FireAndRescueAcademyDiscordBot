@@ -33,7 +33,7 @@ import discord
 
 from ..config import Config
 from ..db.database import Database
-from ..db.repos import DmMirrorRepo
+from ..db.repos import DmMirrorRepo, MembersRepo
 from ..mc import mailbox
 from ..mc.client import MissionChiefClient
 
@@ -108,6 +108,7 @@ class DmMirrorService:
         self._mc = mc
         self._bot = bot
         self._repo = DmMirrorRepo(db)
+        self._members = MembersRepo(db)
         # Bodies we just POSTed into the game from a forum thread: the next
         # scan skips mirroring them back (they are already in the thread as
         # the staff member's message). Memory-only — after a restart such a
@@ -276,6 +277,81 @@ class DmMirrorService:
             last_activity=newest.isoformat() if newest else None,
             mirrored_count=len(messages),
         )
+
+    # ------------------------------------------------------------------
+    # New conversation (Discord → game), the old bot's "Send Message"
+    # ------------------------------------------------------------------
+
+    async def resolve_member(self, query: str) -> tuple[str | None, str]:
+        """(exact in-game name, detail) — case/whitespace-insensitive match
+        against the synced roster; only alliance members can be messaged."""
+        wanted = " ".join(str(query or "").split()).casefold()
+        if not wanted:
+            return None, "give me a username"
+        roster = await self._members.active_members()
+        matches = [
+            str(m["name"]) for m in roster.values()
+            if " ".join(str(m["name"]).split()).casefold() == wanted
+        ]
+        if len(matches) == 1:
+            return matches[0], "ok"
+        if matches:
+            return None, f"`{query}` matches several members — be exact"
+        import difflib
+
+        names = [str(m["name"]) for m in roster.values()]
+        suggestions = difflib.get_close_matches(str(query), names, n=3, cutoff=0.6)
+        hint = (
+            " Did you mean: " + ", ".join(f"`{n}`" for n in suggestions) + "?"
+            if suggestions else ""
+        )
+        return None, f"`{query}` is not an alliance member.{hint}"
+
+    async def send_new(self, recipient: str, subject: str, body: str) -> dict:
+        """Start a new in-game conversation from Discord and mirror it
+        into the forum right away. Returns {ok, detail, thread}."""
+        name, detail = await self.resolve_member(recipient)
+        if name is None:
+            return {"ok": False, "detail": detail, "thread": None}
+        if self._cfg.automation.dry_run:
+            return {
+                "ok": False,
+                "detail": (
+                    f"dry-run is on — PM to **{name}** NOT sent "
+                    "(`!fra set dry_run off` to go live)"
+                ),
+                "thread": None,
+            }
+        from ..mc.messages import send_new_message
+
+        ok, detail, conversation_id = await send_new_message(
+            self._mc, name, subject, body
+        )
+        if not ok:
+            return {"ok": False, "detail": detail, "thread": None}
+        thread = None
+        if conversation_id:
+            # Mirror the fresh conversation immediately so the thread (with
+            # our message) exists before the next scheduled scan.
+            forum = self.forum()
+            if forum is not None:
+                row = mailbox.InboxRow(
+                    conversation_id=conversation_id,
+                    sender=name,
+                    subject=subject,
+                    is_new=False,
+                )
+                try:
+                    await self._mirror_conversation(forum, row, None)
+                    linked = await self._repo.get(conversation_id)
+                    if linked and linked["thread_id"]:
+                        thread = await self._get_thread(int(linked["thread_id"]))
+                except discord.HTTPException as exc:
+                    log.warning(
+                        "Could not mirror fresh conversation %s: %s",
+                        conversation_id, exc,
+                    )
+        return {"ok": True, "detail": "sent", "thread": thread}
 
     # ------------------------------------------------------------------
     # Reply (Discord → game)

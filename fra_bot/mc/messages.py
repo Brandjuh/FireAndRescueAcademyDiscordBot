@@ -27,6 +27,7 @@ NEW_MESSAGE_PATH = "/messages/new"
 # alone must never be trusted.
 SUCCESS_MARKER = "message sent."
 _CONVERSATION_URL_RE = re.compile(r"/messages/\d+")
+_CONVERSATION_ID_RE = re.compile(r"/messages/(\d+)(?:\D|$)")
 
 _RECIPIENT_TOKENS = ("recipient", "receiver", "username", "user name", "to]")
 _SUBJECT_TOKENS = ("subject", "title")
@@ -163,12 +164,31 @@ def summarize_response(text: str, *, limit: int = 350) -> str:
     return " ".join(text.split())[:limit]
 
 
-async def send_ingame_message(
+def extract_conversation_id(html: str, final_url: str = "") -> str | None:
+    """The conversation id of a just-sent message, from the redirect URL
+    (preferred), the reply form, or any conversation link on the page."""
+    match = _CONVERSATION_ID_RE.search(final_url or "")
+    if match:
+        return match.group(1)
+    soup = BeautifulSoup(html or "", "lxml")
+    conversation_input = soup.find(attrs={"name": "message[conversation_id]"})
+    if conversation_input:
+        value = str(conversation_input.get("value") or "").strip()
+        if value.isdigit():
+            return value
+    for link in soup.find_all("a", href=True):
+        match = _CONVERSATION_ID_RE.search(str(link.get("href") or ""))
+        if match:
+            return match.group(1)
+    return None
+
+
+async def send_new_message(
     client, recipient: str, subject: str, body: str
-) -> bool:
-    """Send an in-game PM to a MissionChief username. Returns success —
-    which requires the game to CONFIRM delivery, not just an HTTP 2xx
-    (a validation failure re-renders the compose form with 200)."""
+) -> tuple[bool, str, str | None]:
+    """Start a new in-game PM conversation. Returns (ok, detail,
+    conversation_id). Success requires the game to CONFIRM delivery, not
+    just an HTTP 2xx (a validation failure re-renders the form with 200)."""
     try:
         form = parse_message_form(await client.fetch_page(NEW_MESSAGE_PATH))
         status, html, final_url = await client.post_form(
@@ -178,15 +198,32 @@ async def send_ingame_message(
         )
     except MissionChiefError as exc:
         log.warning("in-game PM to %s failed: %s", recipient, exc)
-        return False
+        return False, str(exc), None
     if status >= 400:
         log.warning("in-game PM to %s rejected (HTTP %s)", recipient, status)
-        return False
+        return False, f"HTTP {status}", None
     if not message_was_sent(html, final_url):
+        digest = summarize_response(html)
         log.warning(
             "in-game PM to %s NOT confirmed (HTTP %s, landed on %s): %s",
-            recipient, status, final_url or "?", summarize_response(html),
+            recipient, status, final_url or "?", digest,
         )
-        return False
+        return (
+            False,
+            f"the game did not confirm delivery ({digest[:120] or 'empty'})",
+            None,
+        )
     log.info("in-game PM sent to %s (%s)", recipient, subject)
-    return True
+    return True, "sent", extract_conversation_id(html, final_url)
+
+
+async def send_ingame_message(
+    client, recipient: str, subject: str, body: str
+) -> bool:
+    """Send an in-game PM to a MissionChief username. Returns success —
+    which requires the game to CONFIRM delivery, not just an HTTP 2xx
+    (a validation failure re-renders the compose form with 200)."""
+    ok, _detail, _conversation_id = await send_new_message(
+        client, recipient, subject, body
+    )
+    return ok
