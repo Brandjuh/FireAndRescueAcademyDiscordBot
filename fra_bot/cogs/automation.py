@@ -71,16 +71,23 @@ def _requester_dm_text(kind: str, status: str, detail: str, data: dict) -> str |
             ]
             if not opened:
                 return None
-            lines = []
+            # A multi-class request opens the same course several times;
+            # group those into one line instead of repeating it.
+            grouped: dict[str, list] = {}
             for r in opened:
+                grouped.setdefault(r["training"], []).append(r.get("building_id"))
+            lines = []
+            for training, buildings in grouped.items():
+                n = len(buildings)
+                classes = "1 class" if n == 1 else f"{n} classes"
                 lines.append(
                     "Your training has been started automatically: "
-                    f"**{r['training']}** (1 class, free)."
+                    f"**{training}** ({classes}, free)."
                 )
-                if r.get("building_id"):
+                for building_id in dict.fromkeys(b for b in buildings if b):
                     lines.append(
                         "Academy: https://www.missionchief.com/buildings/"
-                        f"{r['building_id']}"
+                        f"{building_id}"
                     )
             return "\n".join(lines) + _JOIN_INSTRUCTIONS_MD
         if status == "failed":
