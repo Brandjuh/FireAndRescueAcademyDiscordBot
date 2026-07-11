@@ -558,6 +558,127 @@ class AdminCog(commands.Cog):
         name = self._REPORT_ALIASES.get(name.lower(), name)
         await reporting.cmd_report(ctx, name, period)
 
+    @fra.command(name="reports")
+    async def scheduled_reports(
+        self, ctx: commands.Context, action: str = "list", *args: str
+    ) -> None:
+        """Manage the SCHEDULED report posts at runtime (no YAML edit):
+
+        `!fra reports` — list the effective schedule
+        `!fra reports add <report> <period> <cadence> <#channel>` — add one
+        (cadence: daily / weekly / monthly / yearly; weekly posts Monday,
+        monthly on the 1st, yearly on Jan 1, all shortly after the daily
+        reset)
+        `!fra reports remove <nr>` — remove an entry from the list
+        `!fra reports reset` — back to the config.yaml schedule
+        """
+        import re as _re
+
+        from ..core import scheduled_reports as sched
+        from ..config import ScheduledReport
+        from ..db.repos import StateRepo
+
+        state = StateRepo(self.bot.db)
+        entries = list(self.bot.cfg.reports.scheduled)
+        action = (action or "list").lower()
+
+        if action in ("list", ""):
+            if not entries:
+                await ctx.send(
+                    "No scheduled reports. Add one with `!fra reports add "
+                    "<report> <period> <cadence> <#channel>` — see "
+                    "`!fra report list` for the report names."
+                )
+                return
+            override = await state.get(sched.STATE_KEY) is not None
+            lines = [sched.describe(e, i + 1) for i, e in enumerate(entries)]
+            source = ("runtime override (`!fra reports reset` returns to "
+                      "config.yaml)") if override else "config.yaml"
+            await ctx.send(
+                "🗓️ **Scheduled reports** — " + source + "\n"
+                + "\n".join(lines)
+            )
+            return
+
+        if action == "add":
+            if len(args) < 4:
+                await ctx.send(
+                    "Usage: `!fra reports add <report> <period> <cadence> "
+                    "<#channel>` (e.g. `!fra reports add treasury yesterday "
+                    "daily #treasury`)"
+                )
+                return
+            name, period, cadence, channel_raw = args[0], args[1], args[2], args[3]
+            report = self.bot.reports.get(name)
+            if report is None:
+                await ctx.send(
+                    f"❌ Unknown report `{name}` — `!fra report list` shows "
+                    "the available names."
+                )
+                return
+            period = period.lower()
+            if period not in report.periods:
+                await ctx.send(
+                    f"❌ Report `{report.name}` doesn't support period "
+                    f"`{period}` — options: {', '.join(report.periods)}."
+                )
+                return
+            cadence = cadence.lower()
+            if cadence not in sched.VALID_CADENCES:
+                await ctx.send(
+                    "❌ Cadence must be one of: "
+                    + ", ".join(sched.VALID_CADENCES) + "."
+                )
+                return
+            mention = _re.fullmatch(r"<#?(\d+)>|(\d+)", channel_raw.strip())
+            if not mention:
+                await ctx.send("❌ Give the channel as a #mention or its id.")
+                return
+            channel_id = int(mention.group(1) or mention.group(2))
+            if self.bot.get_channel(channel_id) is None:
+                await ctx.send(f"❌ I can't see a channel with id `{channel_id}`.")
+                return
+            entries.append(ScheduledReport(
+                report=report.name, period=period, cadence=cadence,
+                channel_id=channel_id,
+            ))
+            await sched.store_entries(state, tuple(entries))
+            sched.apply(self.bot.cfg, tuple(entries))
+            await ctx.send(
+                f"✅ Added: {sched.describe(entries[-1], len(entries))}\n"
+                "Posts land shortly after the daily reset (~00:10 New York "
+                "time)."
+            )
+            return
+
+        if action == "remove":
+            if not args or not args[0].isdigit():
+                await ctx.send("Usage: `!fra reports remove <nr>` (see the list).")
+                return
+            index = int(args[0])
+            if not 1 <= index <= len(entries):
+                await ctx.send(f"❌ There is no entry {index} — the list has "
+                               f"{len(entries)}.")
+                return
+            removed = entries.pop(index - 1)
+            await sched.store_entries(state, tuple(entries))
+            sched.apply(self.bot.cfg, tuple(entries))
+            await ctx.send(f"🗑️ Removed: {sched.describe(removed, index)}")
+            return
+
+        if action == "reset":
+            existed = await sched.clear_override(state)
+            yaml_entries = getattr(self.bot, "yaml_scheduled_reports", ())
+            sched.apply(self.bot.cfg, tuple(yaml_entries))
+            await ctx.send(
+                "↩️ Back to the config.yaml schedule "
+                f"({len(yaml_entries)} entries)."
+                if existed else "There was no runtime override to reset."
+            )
+            return
+
+        await ctx.send("Unknown action — use `list`, `add`, `remove` or `reset`.")
+
     # -- custom "Own mission" scheduling --------------------------------
 
     @fra.command(name="dmpanel", aliases=["messagepanel"])

@@ -170,7 +170,8 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
     ))
     registry.register(Report(
         "treasury", "Alliance funds and expenses", treasury_report,
-        periods=("today", "week", "month", "prev-month", "all"),
+        periods=("today", "yesterday", "week", "month", "prev-month",
+                 "year", "prev-year", "all"),
     ))
     registry.register(Report(
         "logs", "Alliance-log activity by action", logs_report,
