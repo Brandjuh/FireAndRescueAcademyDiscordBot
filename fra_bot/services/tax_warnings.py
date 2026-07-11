@@ -203,23 +203,27 @@ class TaxWarningService:
                 import asyncio
 
                 await asyncio.sleep(self.send_spacing)
-            from ..mc.messages import send_ingame_message
+            from ..mc.messages import send_new_message
 
-            ok = await send_ingame_message(
+            ok, detail, conversation_id = await send_new_message(
                 self.client, str(member["name"]), subject,
                 body.format(username=member["name"]),
             )
             if not ok:
                 lines.append(
-                    f"⚠️ {member['name']}: warning {level} could NOT be sent"
+                    f"⚠️ {member['name']}: warning {level} could NOT be "
+                    f"sent — {detail}"
                 )
                 continue
             await self.warnings.record_warning(
                 member["mc_user_id"], str(member["name"]), count=level,
             )
+            # The conversation id makes every "sent" claim verifiable:
+            # /messages/<id> in the game must show this exact message.
+            proof = f"conv #{conversation_id}" if conversation_id else "no conv id!"
             lines.append(
                 f"📨 warning {level}/{MAX_WARNINGS} sent to {member['name']} "
-                f"({rate:g}%)"
+                f"({rate:g}%, {proof})"
             )
             sent += 1
         return lines

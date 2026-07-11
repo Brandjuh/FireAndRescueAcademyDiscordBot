@@ -38,8 +38,9 @@ async def test_lookup_by_name_is_case_insensitive_and_active_only(db):
     row = await svc.lookup("dutchfirefighter", None)
     assert row is not None and row["mc_user_id"] == 42
     assert await svc.lookup("GoneMember", None) is None       # left = no match
-    assert await svc.lookup(None, 43) is None                 # by id: also active-only
-    assert (await svc.lookup(None, 42))["name"] == "DutchFireFighter"
+    # A self-supplied MC id is NOT proof of ownership — anyone could claim
+    # any account with it. The id path is dead; admins use !link instead.
+    assert await svc.lookup(None, 42) is None
 
 
 async def test_verify_approves_on_match_and_queues_on_miss(db):

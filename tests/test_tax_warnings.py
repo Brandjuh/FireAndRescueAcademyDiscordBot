@@ -20,6 +20,14 @@ def _no_send_spacing():
     TaxWarningService.send_spacing = original
 
 
+def _as_new_message(fake_send):
+    """Adapt a bool-returning fake to send_new_message's (ok, detail, conv)."""
+    async def wrapper(client, recipient, subject, body):
+        ok = await fake_send(client, recipient, subject, body)
+        return ok, "sent" if ok else "refused", "9001" if ok else None
+    return wrapper
+
+
 class FakeClient:
     def url(self, path):
         return path
@@ -74,7 +82,9 @@ async def test_low_rate_member_gets_reminder_then_official_warnings(db, monkeypa
         sent.append((recipient, subject, body))
         return True
 
-    monkeypatch.setattr("fra_bot.mc.messages.send_ingame_message", fake_send)
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
     await _add_member(db, 1, "Slacker", 1.0)
     svc = TaxWarningService(_cfg(), FakeClient(), db)
 
@@ -102,7 +112,9 @@ async def test_fixed_donation_resets_warnings_immediately(db, monkeypatch):
     async def fake_send(client, recipient, subject, body):
         return True
 
-    monkeypatch.setattr("fra_bot.mc.messages.send_ingame_message", fake_send)
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
     await _add_member(db, 1, "Reformed", 1.0)
     svc = TaxWarningService(_cfg(), FakeClient(), db)
     await svc.scan()                                   # warning 1 sent
@@ -130,7 +142,9 @@ async def test_new_member_grace_period(db, monkeypatch):
     async def fake_send(client, recipient, subject, body):
         raise AssertionError("must not message a brand-new member")
 
-    monkeypatch.setattr("fra_bot.mc.messages.send_ingame_message", fake_send)
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
     await _add_member(db, 1, "Newbie", 0.0, days_member=0.5)   # 12h old
     svc = TaxWarningService(_cfg(), FakeClient(), db)
     assert await svc.scan() == []
@@ -143,7 +157,9 @@ async def test_max_per_run_cap(db, monkeypatch):
         sent.append(recipient)
         return True
 
-    monkeypatch.setattr("fra_bot.mc.messages.send_ingame_message", fake_send)
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
     for i in range(4):
         await _add_member(db, i + 1, f"Member{i}", 1.0)
     svc = TaxWarningService(_cfg(max_per_run=2), FakeClient(), db)
@@ -156,7 +172,9 @@ async def test_dry_run_reports_without_sending(db, monkeypatch):
     async def fake_send(client, recipient, subject, body):
         raise AssertionError("dry-run must not send")
 
-    monkeypatch.setattr("fra_bot.mc.messages.send_ingame_message", fake_send)
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
     await _add_member(db, 1, "Slacker", 1.0)
     svc = TaxWarningService(_cfg(dry_run=True), FakeClient(), db)
     lines = await svc.scan()
@@ -197,7 +215,9 @@ async def test_member_who_left_is_cleared(db, monkeypatch):
     async def fake_send(client, recipient, subject, body):
         return True
 
-    monkeypatch.setattr("fra_bot.mc.messages.send_ingame_message", fake_send)
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
     await _add_member(db, 1, "Gone", 1.0)
     svc = TaxWarningService(_cfg(), FakeClient(), db)
     await svc.scan()
@@ -211,7 +231,9 @@ async def test_disabled_scan_is_noop_but_force_runs(db, monkeypatch):
     async def fake_send(client, recipient, subject, body):
         return True
 
-    monkeypatch.setattr("fra_bot.mc.messages.send_ingame_message", fake_send)
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
     await _add_member(db, 1, "Slacker", 1.0)
     svc = TaxWarningService(_cfg(enabled=False), FakeClient(), db)
     assert await svc.scan() == []                    # switch off -> nothing

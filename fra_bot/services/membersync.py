@@ -76,18 +76,16 @@ class MemberSyncService:
     # -- roster lookup ---------------------------------------------------
 
     async def lookup(
-        self, display_name: str | None, mc_user_id: int | None
+        self, display_name: str | None, mc_user_id: int | None = None
     ) -> aiosqlite.Row | None:
-        """An ACTIVE roster member by MC id, else by exact (case-insensitive)
-        name match against the Discord nickname — the reference bot's rule."""
-        if mc_user_id:
-            async with self._db.conn.execute(
-                "SELECT * FROM members WHERE mc_user_id = ? AND is_active = 1",
-                (int(mc_user_id),),
-            ) as cur:
-                row = await cur.fetchone()
-            if row is not None:
-                return row
+        """An ACTIVE roster member by exact (case-insensitive) name match
+        against the Discord nickname.
+
+        The name is the ONLY self-service proof: a user-supplied MC id
+        would let anyone claim any account (id + a mismatching nickname
+        proves nothing). Exceptions go through the admin `!link` command.
+        ``mc_user_id`` is accepted for backward compatibility but ignored.
+        """
         if display_name:
             async with self._db.conn.execute(
                 "SELECT * FROM members WHERE lower(name) = lower(?) AND is_active = 1",
@@ -181,7 +179,7 @@ class MemberSyncService:
                 "already_queued", queued["mc_user_id"], attempts=queued["attempts"]
             )
 
-        member = await self.lookup(display_name, mc_user_id)
+        member = await self.lookup(display_name)
         if member is not None:
             await self.links.upsert(
                 discord_id, member["mc_user_id"], status="approved", reviewer_id=0
@@ -212,17 +210,16 @@ class MemberSyncService:
             return VerifyOutcome(
                 "approved_from_logs", match["mc_user_id"], match["name"]
             )
-        if checked and mc_user_id is None:
+        if checked:
             # The logs are readable and show no join by this name: the
             # nickname almost certainly doesn't match — say so instead of
             # parking them in a queue that cannot succeed.
             return VerifyOutcome("name_mismatch")
 
-        # Logs unreachable (or an MC id was supplied that isn't in the
-        # roster yet): fall back to the retry queue, with an honest ETA
-        # based on the actual sweep schedule.
+        # Logs unreachable: fall back to the retry queue, with an honest
+        # ETA based on the actual sweep schedule.
         await self.links.queue_add(
-            discord_id, mc_user_id=mc_user_id,
+            discord_id, mc_user_id=None,
             display_name=display_name, guild_id=guild_id,
         )
         last_run = await self.runs.last_success("members")
@@ -278,7 +275,7 @@ class MemberSyncService:
                 await self.links.queue_remove(discord_id)
                 results.append((discord_id, "gone", None))
                 continue
-            member = await self.lookup(name, row["mc_user_id"])
+            member = await self.lookup(name)
             if member is not None:
                 await self.links.upsert(
                     discord_id, member["mc_user_id"], status="approved", reviewer_id=0
