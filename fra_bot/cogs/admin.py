@@ -548,6 +548,21 @@ class AdminCog(commands.Cog):
 
     # -- custom "Own mission" scheduling --------------------------------
 
+    @fra.command(name="dmpanel", aliases=["messagepanel"])
+    async def dm_panel(self, ctx: commands.Context) -> None:
+        """(Re)post the message panel (configured channel, else this one).
+        The keeper maintains it automatically afterwards."""
+        keeper = self.bot.get_cog("PanelKeeperCog")
+        if keeper is None:
+            await ctx.send("Panel keeper not loaded.")
+            return
+        channel_id = getattr(self.bot.cfg.discord.channels, "dm_panel", 0)
+        channel = self.bot.get_channel(channel_id) if channel_id else ctx.channel
+        if channel is None:
+            channel = ctx.channel
+        outcome = await keeper.ensure("dms", channel=channel, force=True)
+        await ctx.send(f"✅ Message panel {outcome} in <#{channel.id}>.")
+
     @fra.command(name="requestpanel", aliases=["requestspanel"])
     async def request_panel(self, ctx: commands.Context) -> None:
         """(Re)post the training/building request panel (configured channel,
