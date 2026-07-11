@@ -331,27 +331,38 @@ class DmMirrorService:
             return {"ok": False, "detail": detail, "thread": None}
         thread = None
         if conversation_id:
-            # Mirror the fresh conversation immediately so the thread (with
-            # our message) exists before the next scheduled scan.
-            forum = self.forum()
-            if forum is not None:
-                row = mailbox.InboxRow(
-                    conversation_id=conversation_id,
-                    sender=name,
-                    subject=subject,
-                    is_new=False,
-                )
-                try:
-                    await self._mirror_conversation(forum, row, None)
-                    linked = await self._repo.get(conversation_id)
-                    if linked and linked["thread_id"]:
-                        thread = await self._get_thread(int(linked["thread_id"]))
-                except discord.HTTPException as exc:
-                    log.warning(
-                        "Could not mirror fresh conversation %s: %s",
-                        conversation_id, exc,
-                    )
+            thread = await self.mirror_now(conversation_id, name, subject)
         return {"ok": True, "detail": "sent", "thread": thread}
+
+    async def mirror_now(
+        self, conversation_id: str, username: str, subject: str
+    ):
+        """Mirror one conversation into the forum immediately — called at
+        SEND time for every outgoing PM (the reference bot linked each
+        sent message to its thread on the spot). Essential for outgoing:
+        a conversation nobody replied to lives in the game's SENT box and
+        may never show on the inbox page the scheduled scan reads."""
+        forum = self.forum()
+        if forum is None:
+            return None
+        row = mailbox.InboxRow(
+            conversation_id=str(conversation_id),
+            sender=username,
+            subject=subject,
+            is_new=False,
+        )
+        try:
+            known = await self._repo.get(str(conversation_id))
+            await self._mirror_conversation(forum, row, known)
+            linked = await self._repo.get(str(conversation_id))
+            if linked and linked["thread_id"]:
+                return await self._get_thread(int(linked["thread_id"]))
+        except Exception as exc:  # noqa: BLE001 — mirroring must never
+            # break the send that triggered it.
+            log.warning(
+                "Could not mirror fresh conversation %s: %s", conversation_id, exc
+            )
+        return None
 
     # ------------------------------------------------------------------
     # Reply (Discord → game)
