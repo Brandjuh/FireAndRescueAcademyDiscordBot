@@ -180,6 +180,7 @@ class FRABot(commands.Bot):
         from .cogs.membersync import MemberSyncCog
         from .cogs.missions import MissionPanelView, MissionsCog
         from .cogs.notifications import NotificationsCog
+        from .cogs.classes_panel import ClassesPanelCog
         from .cogs.dm_mirror import DmMirrorCog
         from .cogs.panels import PanelKeeperCog
         from .cogs.reporting import ReportingCog
@@ -198,6 +199,7 @@ class FRABot(commands.Bot):
         await self.add_cog(EventPingerCog(self))
         await self.add_cog(PanelKeeperCog(self))
         await self.add_cog(DmMirrorCog(self))
+        await self.add_cog(ClassesPanelCog(self))
 
         # Persistent panels survive restarts; register their views.
         missions_cog = self.get_cog("MissionsCog")
@@ -472,6 +474,16 @@ class FRABot(commands.Bot):
                 name="tax-warnings",
                 initial_delay_seconds=900.0,
             )
+        # Class-availability panel: hourly free-classroom counts. The walk
+        # reuses the trainings guide's cache when that already ran this
+        # hour, so the two consumers never double the game traffic.
+        if int(getattr(self.cfg.discord.channels, "class_panel", 0) or 0):
+            sched.add_interval_job(
+                self._guarded(self._class_availability_pass, "class-availability"),
+                minutes=60,
+                name="class-availability",
+                initial_delay_seconds=180.0,
+            )
         log.info(
             "Background jobs scheduled (automation: dry_run=%s, training=%s, "
             "building=%s, events=%s, mission=%s)",
@@ -518,6 +530,17 @@ class FRABot(commands.Bot):
             await self.notify_admin(
                 "🎖️ **Rank roles**\n" + "\n".join(summary["lines"])[:1800]
             )
+
+    async def _class_availability_pass(self) -> None:
+        """Hourly: refresh the free-classroom cache (reusing a fresh guide
+        walk when there is one) and re-render the class-availability panel."""
+        await self.trainings.refresh_availability()
+        cog = self.get_cog("ClassesPanelCog")
+        if cog is not None:
+            await cog.reload_snapshot()
+        keeper = self.get_cog("PanelKeeperCog")
+        if keeper is not None:
+            await keeper.ensure("classes")
 
     async def _dm_mirror_pass(self) -> None:
         """One DM inbox scan; only errors are surfaced to the admin channel

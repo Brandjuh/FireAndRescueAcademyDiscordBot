@@ -78,6 +78,9 @@ class DiscordChannels:
     # The message panel (Send Message / Check Inbox / Reply buttons) —
     # the old bot kept it in the event-pings channel; 0 = off.
     dm_panel: int = 1421242306136113254
+    # The class-availability panel: free training classes per agency,
+    # refreshed hourly by the keeper; 0 = off.
+    class_panel: int = 1421627971831070730
 
 
 @dataclass(frozen=True)
@@ -378,6 +381,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 dm_mirror=int(channels.get("dm_mirror", 1517694938501087342)),
                 dm_panel=int(channels.get("dm_panel", 1421242306136113254)),
+                class_panel=int(
+                    channels.get("class_panel", 1421627971831070730)
+                ),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])

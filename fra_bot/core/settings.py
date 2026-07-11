@@ -105,6 +105,8 @@ SETTINGS: tuple[Setting, ...] = (
             "In-game DM mirror forum channel (0 = off)"),
     Setting("discord.channels.dm_panel", "int", True,
             "Message panel channel (Send/Check inbox/Reply buttons)"),
+    Setting("discord.channels.class_panel", "int", True,
+            "Class-availability panel channel (hourly counts; 0 = off)"),
     Setting("discord.notify_event_role_id", "int", True,
             "Role always pinged on a mission/event start",
             aliases=("notify_event_role",)),

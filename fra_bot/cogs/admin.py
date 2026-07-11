@@ -590,6 +590,26 @@ class AdminCog(commands.Cog):
         outcome = await keeper.ensure("requests", channel=channel, force=True)
         await ctx.send(f"✅ Request panel {outcome} in <#{channel.id}>.")
 
+    @fra.command(name="classpanel", aliases=["classespanel"])
+    async def class_panel(self, ctx: commands.Context) -> None:
+        """(Re)post the class-availability panel (configured channel, else
+        this one) with fresh numbers. The keeper and the hourly job maintain
+        it automatically afterwards."""
+        keeper = self.bot.get_cog("PanelKeeperCog")
+        cog = self.bot.get_cog("ClassesPanelCog")
+        if keeper is None or cog is None:
+            await ctx.send("Panel keeper / classes panel not loaded.")
+            return
+        async with ctx.typing():
+            await self.bot.trainings.refresh_availability()
+            await cog.reload_snapshot()
+            channel_id = getattr(self.bot.cfg.discord.channels, "class_panel", 0)
+            channel = self.bot.get_channel(channel_id) if channel_id else ctx.channel
+            if channel is None:
+                channel = ctx.channel
+            outcome = await keeper.ensure("classes", channel=channel, force=True)
+        await ctx.send(f"✅ Class-availability panel {outcome} in <#{channel.id}>.")
+
     @fra.command(name="missionpanel")
     async def mission_panel(self, ctx: commands.Context) -> None:
         """(Re)post the mission-request panel to the configured channel. The
