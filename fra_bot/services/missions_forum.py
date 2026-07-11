@@ -13,7 +13,7 @@ re-adopted from the thread titles (``… · #<key>``) instead of reposted.
 
 Rate limits: discord.py already retries HTTP 429s; on top of that every
 create/edit is followed by a small pause (plus a longer one per batch) and
-each run posts at most ``max_posts_per_run`` — the initial ~450-mission
+each run posts at most ``max_posts_per_run`` — the initial ~1,200-mission
 backfill spreads over a few runs.
 """
 
@@ -362,7 +362,7 @@ class MissionsForumService:
         tags_created, forum = await self.ensure_tags(forum)
 
         # Empty mapping + existing posts = the DB was lost; re-adopt instead
-        # of reposting 450 duplicates.
+        # of reposting the whole catalog as duplicates.
         adopted = 0
         if await self._repo.count() == 0:
             adopted = await self.adopt(forum)
@@ -374,10 +374,13 @@ class MissionsForumService:
             self._cfg.automation.missions_forum.announce_new and backfill_done
         )
 
-        # Untracked threads with our title marker (a crash between post and
-        # bookkeeping, or a partial adopt) — reclaim instead of duplicating.
+        # Untracked ACTIVE threads with our title marker (a crash between
+        # post and bookkeeping happens before the archive step, so such a
+        # thread is always still active) — reclaim instead of duplicating.
         orphans: dict[str, object] = {}
         for thread in getattr(forum, "threads", []) or []:
+            if getattr(thread, "archived", False):
+                continue
             orphan_key = thread_key(getattr(thread, "name", ""))
             if orphan_key:
                 orphans[orphan_key] = thread
@@ -475,7 +478,19 @@ class MissionsForumService:
         )
         thread = getattr(result, "thread", result)
         await self._repo.record(key, thread.id, digest, name)
+        await self._archive(thread)
         return thread
+
+    async def _archive(self, thread) -> None:
+        """Archive a mission post right away (the reference bot did the
+        same): Discord caps a guild at 1000 ACTIVE threads, and the game
+        has ~1,200+ missions — without this the backfill would start
+        failing partway. Archived forum posts stay visible, searchable
+        and filterable; a member's reply re-opens one automatically."""
+        try:
+            await thread.edit(archived=True)
+        except discord.HTTPException as exc:
+            log.debug("Could not archive mission thread %s: %s", thread.id, exc)
 
     async def _update_post(
         self, forum, mission: dict, row, digest: str, stamp: str, base_url: str
@@ -519,6 +534,7 @@ class MissionsForumService:
         if edits:
             await thread.edit(**edits)
         await self._repo.record(key, thread.id, digest, name)
+        await self._archive(thread)
         return "updated"
 
     async def wipe(self) -> dict:

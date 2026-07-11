@@ -383,12 +383,16 @@ enable the daily check with `!fra set automation.missions_forum.enabled on`
 whose data changed gets its existing post **edited in place** (no bump, no
 duplicate — dedup lives in SQLite, and `!fra missionsforum adopt` can
 rebuild that mapping from the thread titles after a database loss).
-Missions removed from the game keep their post. The initial ~450-mission
-backfill is paced (2 s between posts, at most `max_posts_per_run` per run,
-default 100) and continues **hourly** until it is complete — an
-interrupted run (restart, crash) is caught up within the hour instead of
-waiting for the next day's sync. `!fra missionsforum sync` runs a pass on
-demand, and `!fra missionsforum` shows the backfill progress.
+Missions removed from the game keep their post. The initial backfill
+(~1,200+ missions) is paced (2 s between posts, at most
+`max_posts_per_run` per run, default 100) and continues **hourly** until
+it is complete — an interrupted run (restart, crash) is caught up within
+the hour instead of waiting for the next day's sync. Every post is
+archived right after writing: Discord caps a guild at 1000 *active*
+threads, which the catalog alone would exceed — archived forum posts stay
+visible, searchable and tag-filterable, and a member's reply re-opens
+one automatically. `!fra missionsforum sync` runs a pass on demand, and
+`!fra missionsforum` shows the backfill progress.
 
 Optionally (`!fra set announce_new on`, default **off**) each brand-new
 mission is announced in `discord.channels.mission_announce` (default

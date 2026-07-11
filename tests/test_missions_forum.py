@@ -769,18 +769,36 @@ async def test_backfill_continuation_runs_never_announce(db):
 
 async def test_orphan_thread_is_reclaimed_not_duplicated(db):
     """Crash between create_thread and the DB write: the next run reclaims
-    the marker-titled thread instead of posting a duplicate."""
+    the marker-titled thread instead of posting a duplicate. The crash
+    happens before the archive step, so the orphan is still active."""
     service, forum, _, _ = _service(db, _missions())
     await service.sync()
-    # Simulate the lost bookkeeping for one mission.
+    # Simulate the lost bookkeeping for one mission (crash window: the
+    # thread exists, is not yet archived, and has no row).
     await db.execute(
         "DELETE FROM missions_forum_posts WHERE mission_key = '297'"
     )
+    next(t for t in forum.threads if "#297" in t.name).archived = False
     summary = await service.sync()
     assert summary["created"] == 0
     assert summary["updated"] == 1  # reclaimed + content refreshed
     assert len(forum.threads) == 3
     assert await MissionsForumRepo(db).count() == 3
+
+
+async def test_posts_are_archived_to_respect_the_active_thread_cap(db):
+    """Discord caps a guild at 1000 ACTIVE threads and the game has well
+    over that many missions — every post is archived right after writing
+    (like the reference bot), and an update re-archives afterwards."""
+    payload = _missions()
+    service, forum, _, _ = _service(db, payload)
+    await service.sync()
+    assert all(t.archived for t in forum.threads)
+    payload[0]["average_credits"] = 42  # trigger an in-place update
+    await service.sync()
+    edited = next(t for t in forum.threads if "#297" in t.name)
+    assert edited.starter.edits == 1
+    assert edited.archived is True  # re-archived after the edit
 
 
 async def test_deleted_starter_message_heals_by_reposting(db):
