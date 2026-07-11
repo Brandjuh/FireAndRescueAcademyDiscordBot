@@ -420,6 +420,15 @@ class FRABot(commands.Bot):
                 timezone=self.cfg.reports.timezone,
                 name="missions-forum",
             )
+            # Hourly catch-up while the initial backfill is incomplete: an
+            # interrupted run (restart, crash) otherwise stalls the forum
+            # until the next day's sync. A DB-only no-op once complete.
+            sched.add_interval_job(
+                self._guarded(self._missions_forum_catchup, "missions-forum"),
+                minutes=60,
+                name="missions-forum-catchup",
+                initial_delay_seconds=480.0,
+            )
         # In-game DM mirror: scan the PM inbox and mirror conversations to
         # the forum. Read-only on the game side, so it runs in dry-run too
         # (thread replies into the game DO honour dry_run).
@@ -450,12 +459,34 @@ class FRABot(commands.Bot):
 
     async def _missions_forum_pass(self) -> None:
         """One missions-forum sync, with anything noteworthy (new posts,
-        edits, new tags, failures) mirrored to the admin channel."""
-        summary = await self.missions_forum.sync()
+        edits, new tags, failures) mirrored to the admin channel. The
+        watchdog timeout guarantees a hung run can never hold the job
+        lock forever (which would silently stop all future syncs)."""
+        try:
+            summary = await asyncio.wait_for(
+                self.missions_forum.sync(), timeout=45 * 60
+            )
+        except asyncio.TimeoutError:
+            log.error("Missions-forum sync timed out after 45 min")
+            await self.notify_admin(
+                "📚 **Missions forum**\n⏱️ sync timed out after 45 min — "
+                "aborted; the next run continues where it left off"
+            )
+            return
         if summary.get("error") or summary.get("changed"):
             await self.notify_admin(
                 "📚 **Missions forum**\n" + "\n".join(summary["lines"])[:1800]
             )
+
+    async def _missions_forum_catchup(self) -> None:
+        """Continue the missions-forum backfill between daily syncs. Free
+        (one DB read, no MissionChief traffic) once the backfill is done."""
+        from .db.repos import StateRepo
+        from .services.missions_forum import STATE_BACKFILL_DONE
+
+        if await StateRepo(self.db).get(STATE_BACKFILL_DONE) is not None:
+            return
+        await self._missions_forum_pass()
 
     async def _dm_mirror_pass(self) -> None:
         """One DM inbox scan; only errors are surfaced to the admin channel

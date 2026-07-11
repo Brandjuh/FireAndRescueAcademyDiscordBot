@@ -961,9 +961,16 @@ class AdminCog(commands.Cog):
         message = await ctx.send("⏳ Syncing the missions forum…")
         async with lock:
             try:
-                summary = await self.bot.missions_forum.sync(
-                    limit=limit, force=force
+                summary = await asyncio.wait_for(
+                    self.bot.missions_forum.sync(limit=limit, force=force),
+                    timeout=45 * 60,
                 )
+            except asyncio.TimeoutError:
+                await message.edit(
+                    content="⏱️ Sync timed out after 45 min — aborted; run it "
+                            "again to continue where it left off."
+                )
+                return
             except Exception as exc:  # surfaced to the operator, not a crash
                 log.exception("Manual missions-forum sync failed")
                 await message.edit(content=f"❌ Sync failed: {exc}")

@@ -678,6 +678,39 @@ async def test_second_sync_is_a_no_op(db):
     assert forum.threads[0].starter.edits == 0
 
 
+async def test_non_http_error_on_one_mission_does_not_abort_the_run(db):
+    """A crashed mission used to abort the whole run — stalling the
+    backfill until the next day's sync. It must count as failed and the
+    run must carry on."""
+    service, forum, _, _ = _service(db, _missions())
+    original = forum.create_thread
+    calls = {"n": 0}
+
+    async def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ValueError("embed exploded")  # NOT a discord.HTTPException
+        return await original(**kwargs)
+
+    forum.create_thread = flaky
+    summary = await service.sync()
+    assert summary["failed"] == 1
+    assert summary["created"] == 2  # the rest still posted
+    # The failed mission is retried (and succeeds) on the next run.
+    summary = await service.sync()
+    assert summary["created"] == 1 and summary["failed"] == 0
+    assert len(forum.threads) == 3
+
+
+async def test_status_reports_backfill_progress(db):
+    service, _, _, _ = _service(db, _missions())
+    lines = await service.status_lines()
+    assert any("backfill: ⏳" in line for line in lines)
+    await service.sync()  # completes uncapped → backfill done
+    lines = await service.status_lines()
+    assert any("backfill: ✅" in line for line in lines)
+
+
 async def test_changed_mission_is_edited_in_place(db):
     payload = _missions()
     service, forum, _, _ = _service(db, payload)

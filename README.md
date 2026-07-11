@@ -385,8 +385,10 @@ duplicate — dedup lives in SQLite, and `!fra missionsforum adopt` can
 rebuild that mapping from the thread titles after a database loss).
 Missions removed from the game keep their post. The initial ~450-mission
 backfill is paced (2 s between posts, at most `max_posts_per_run` per run,
-default 100), so it spreads over a few runs; `!fra missionsforum sync`
-runs a pass on demand.
+default 100) and continues **hourly** until it is complete — an
+interrupted run (restart, crash) is caught up within the hour instead of
+waiting for the next day's sync. `!fra missionsforum sync` runs a pass on
+demand, and `!fra missionsforum` shows the backfill progress.
 
 Optionally (`!fra set announce_new on`, default **off**) each brand-new
 mission is announced in `discord.channels.mission_announce` (default

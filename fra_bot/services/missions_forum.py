@@ -435,9 +435,11 @@ class MissionsForumService:
                         created += 1
                     else:
                         updated += 1
-            except discord.HTTPException as exc:
+            except Exception:  # noqa: BLE001 — one bad mission must never
+                # abort the whole run (an aborted run used to stall the
+                # backfill until the next day's sync).
                 failed += 1
-                log.error("Mission forum post %s failed: %s", key, exc)
+                log.exception("Mission forum post %s failed", key)
                 continue
             writes += 1
             await self._pause(writes)
@@ -624,6 +626,11 @@ class MissionsForumService:
                 if auto.announce_new else "off"
             ),
         ]
+        backfill = await self._state.get(STATE_BACKFILL_DONE)
+        lines.append(
+            f"backfill: ✅ complete ({backfill})" if backfill
+            else "backfill: ⏳ in progress — the hourly catch-up keeps posting"
+        )
         last = await self._state.get(STATE_LAST_SYNC)
         lines.append(f"last sync: {last or 'never'}")
         return lines
