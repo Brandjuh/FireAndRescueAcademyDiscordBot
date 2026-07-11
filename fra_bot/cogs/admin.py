@@ -127,6 +127,18 @@ class AdminCog(commands.Cog):
                 name="Expenses backfill",
                 value=f"⏳ at page {next_page} ({staged:,} rows staged)",
             )
+        from ..services.logs_sync import (
+            STATE_BACKFILL_DONE as LOGS_DONE,
+            STATE_BACKFILL_NEXT_PAGE as LOGS_NEXT_PAGE,
+        )
+
+        if await self._state.get(LOGS_DONE) == "1":
+            embed.add_field(name="Logs backfill", value="✅ complete")
+        else:
+            logs_page = await self._state.get(LOGS_NEXT_PAGE, "1")
+            embed.add_field(
+                name="Logs backfill", value=f"⏳ at page {logs_page}"
+            )
         if self.bot.pacer.circuit_open:
             embed.add_field(
                 name="⚠️ Circuit breaker",
