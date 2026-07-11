@@ -275,6 +275,24 @@ async def test_prune_flags_leavers_with_safety_gate(db):
     assert await svc.prune_candidates() == []
 
 
+async def test_restore_candidates_cover_active_links_only(db):
+    """The old bot's hourly auto-restore, ported: every approved link
+    still in the alliance should carry the role (self-heal + rejoin)."""
+    svc = MemberSyncService(db)
+    for i in range(MIN_SAFE_ROSTER_COUNT + 5):
+        await _seed_member(db, 1000 + i, f"Member{i}")
+    await _seed_member(db, 42, "Alice")
+    await _seed_member(db, 43, "Bob", active=0)          # left the alliance
+    await svc.request_verification(100, "Alice", None, 1)
+    await svc.approve_manual(200, 43, reviewer_id=1)     # linked but gone
+    restore = await svc.restore_candidates()
+    assert (100, 42) in restore                          # active → restore
+    assert (200, 43) not in restore                      # left → never
+    # Collapsed roster: restore is gated exactly like the prune.
+    await db.execute("UPDATE members SET is_active = 0")
+    assert await svc.restore_candidates() == []
+
+
 def test_setup_hook_imports_every_cog_it_registers():
     """Regression for the NameError crash: every Cog class used in
     setup_hook's add_cog calls must be imported there too."""
