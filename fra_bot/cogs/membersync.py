@@ -24,8 +24,8 @@ PRUNE_INTERVAL_HOURS = 1
 
 _EXPIRED_DM = (
     "❌ **Verification Failed**\n\n"
-    "We couldn't find your account in the alliance roster after 1 hour of "
-    "attempts.\n\n"
+    "We couldn't find your account in the alliance roster after 1.5 hours "
+    "of attempts.\n\n"
     "**To fix this:**\n"
     "1. Make sure your **Discord server nickname** matches your "
     "**MissionChief name exactly** (including capitalization)\n"
@@ -39,13 +39,13 @@ _EXPIRED_DM = (
 
 
 def _queued_reply(name: str) -> str:
-    expected = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1, minutes=15)
+    expected = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1, minutes=45)
     return (
         "⏳ **Not found in the roster yet.**\n\n"
         "You've been added to the verification queue.\n"
         "The system will automatically check every 2 minutes.\n\n"
         f"**Expected completion:** <t:{int(expected.timestamp())}:R> "
-        "(in ~1 hour 15 minutes)\n\n"
+        "(in ~1 hour 45 minutes at most)\n\n"
         "**JUST WAIT** - you don't need to do anything else.\n"
         "Once found, you'll be automatically verified.\n\n"
         "**Tips:**\n"
@@ -169,6 +169,57 @@ class MemberSyncCog(commands.Cog):
             "linked to your Discord account!",
         )
         await ctx.send(f"✅ Linked {member.mention} to MC `{mc_id}` and granted the role.")
+
+    @commands.command(name="verifyall")
+    @is_fra_admin()
+    async def verify_all(self, ctx: commands.Context) -> None:
+        """Backfill verification for the whole server: every Discord member
+        whose nickname matches an active roster name is linked and gets the
+        Verified role — nobody has to run `!verify` themselves. No DMs are
+        sent (a server-wide sweep must not spam hundreds of inboxes)."""
+        import asyncio
+
+        if ctx.guild is None:
+            await ctx.send("❌ This can only be used in a server.")
+            return
+        role = self._role(ctx.guild)
+        if role is None:
+            await ctx.send(
+                "⚠️ No verified role configured — "
+                "`!fra set verified_role @role` first."
+            )
+            return
+        names = {
+            m.id: m.display_name for m in ctx.guild.members if not m.bot
+        }
+        message = await ctx.send(
+            f"⏳ Matching {len(names)} server members against the roster…"
+        )
+        matches = await self.service.backfill_matches(names)
+        linked = 0
+        for discord_id, roster_row in matches:
+            member = ctx.guild.get_member(discord_id)
+            if member is None:
+                continue
+            await self.service.approve_manual(
+                discord_id, roster_row["mc_user_id"], reviewer_id=ctx.author.id
+            )
+            await self._grant_role(member, reason="MemberSync backfill (!verifyall)")
+            linked += 1
+            if linked % 25 == 0:
+                await message.edit(
+                    content=f"⏳ Backfill running… {linked}/{len(matches)} linked"
+                )
+            await asyncio.sleep(1.0)  # be gentle with the role-add rate limit
+        unmatched = len(names) - len(matches)
+        await message.edit(
+            content=(
+                f"✅ Backfill done: **{linked}** member(s) linked and verified, "
+                f"{unmatched} had no roster match or were already linked. "
+                "The rest can still use `!verify` (e.g. after fixing their "
+                "nickname)."
+            )
+        )
 
     @commands.command(name="unlink")
     @is_fra_admin()
