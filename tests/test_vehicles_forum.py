@@ -392,3 +392,97 @@ async def test_status_lines_report_state(db):
     assert "tracked posts: 3" in lines
     assert "backfill: ✅" in lines
     assert "daily sync: on" in lines
+
+
+# ---------------------------------------------------------------------------
+# Building-name cache: a transient buildings.ts failure must NOT rewrite every
+# label to "Building N" (which would flip every hash and fake a mass "updated")
+# ---------------------------------------------------------------------------
+
+async def test_building_names_are_cached_and_reused_on_failure(db, monkeypatch):
+    service, *_ = _service(db)
+
+    async def ok(session):
+        return {0: "Fire station", 3: "Ambulance station"}
+
+    monkeypatch.setattr(catalog, "fetch_building_names", ok)
+    assert await service._building_names(object()) == {0: "Fire station", 3: "Ambulance station"}
+
+    async def boom(session):
+        raise ValueError("buildings.ts returned HTTP 500")
+
+    monkeypatch.setattr(catalog, "fetch_building_names", boom)
+    # Failure reuses the cached map, not {} — so labels stay real.
+    assert await service._building_names(object()) == {0: "Fire station", 3: "Ambulance station"}
+
+
+async def test_building_names_empty_fetch_falls_back_to_cache(db, monkeypatch):
+    service, *_ = _service(db)
+
+    async def ok(session):
+        return {5: "Prison Cells"}
+
+    monkeypatch.setattr(catalog, "fetch_building_names", ok)
+    await service._building_names(object())
+
+    async def empty(session):  # an empty parse is indistinguishable from a bad one
+        return {}
+
+    monkeypatch.setattr(catalog, "fetch_building_names", empty)
+    assert await service._building_names(object()) == {5: "Prison Cells"}
+
+
+async def test_building_names_failure_with_no_cache_degrades(db, monkeypatch):
+    service, *_ = _service(db)
+
+    async def boom(session):
+        raise ValueError("down")
+
+    monkeypatch.setattr(catalog, "fetch_building_names", boom)
+    assert await service._building_names(object()) == {}  # cold start: honest degrade
+
+
+async def test_buildings_failure_does_not_fake_a_vehicle_update(db, monkeypatch):
+    """The core regression: once the real names are cached, a later buildings.ts
+    failure must leave every hash unchanged — no "updated" notes, no announce."""
+    real_names = {0: "Fire station", 13: "Fire station (Small station)",
+                  3: "Ambulance station"}
+
+    # A service whose sync uses the REAL _building_names + a stubbed vehicle fetch.
+    cfg = _cfg(announce_new=True)
+    bot = FakeBot()
+    forum = FakeForum(900, bot)
+    announce = FakeAnnounce(901, bot)
+    service = VehiclesForumService(cfg, db, bot)
+    service.post_delay = 0
+    service.batch_delay = 0
+
+    async def fetch_names_ok(session):
+        return dict(real_names)
+
+    async def fetch_vehicles(session, *, building_names=None):
+        names = building_names or {}
+        return [
+            {**v, "buildings": [names.get(b, f"Building {b}")
+                                for b in ({0: [0, 13], 9: [0], 27: [3]}[v["id"]])]}
+            for v in _vehicles()
+        ]
+
+    monkeypatch.setattr(catalog, "fetch_building_names", fetch_names_ok)
+    monkeypatch.setattr(catalog, "fetch_catalog", fetch_vehicles)
+
+    await service.sync()  # backfill completes with REAL names cached
+    for t in forum.threads:
+        t.messages.clear()
+    announce.sent.clear()
+
+    # buildings.ts now fails; the cache must keep the real names, so nothing churns.
+    async def fetch_names_fail(session):
+        raise ValueError("buildings.ts 500")
+
+    monkeypatch.setattr(catalog, "fetch_building_names", fetch_names_fail)
+    summary = await service.sync()
+    assert summary["updated"] == 0 and summary["created"] == 0
+    assert summary["skipped"] == 3
+    assert all(not t.messages for t in forum.threads)  # no "Vehicle updated" notes
+    assert announce.sent == []                          # no false announcement

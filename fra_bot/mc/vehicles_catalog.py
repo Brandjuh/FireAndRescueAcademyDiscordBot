@@ -92,7 +92,14 @@ def _tokenize(text: str) -> list[_Tok]:
         i = j
         cleaned = word.replace("_", "")
         if _looks_numeric(cleaned):
-            toks.append(_Tok("num", float(cleaned) if "." in cleaned else int(cleaned)))
+            # Prefer int, but never crash on a value float() accepts yet int()
+            # rejects (e.g. scientific notation "1e5") — a single odd number
+            # must not abort the whole catalog parse.
+            try:
+                value: Any = int(cleaned)
+            except ValueError:
+                value = float(cleaned)
+            toks.append(_Tok("num", value))
         elif word == "true":
             toks.append(_Tok("lit", True))
         elif word == "false":
@@ -314,34 +321,52 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
-async def fetch_catalog(session: "aiohttp.ClientSession") -> list[dict]:
-    """The full vehicle catalog as normalized records, sorted by id. Raises
-    ``ValueError`` when the data can't be fetched or parsed."""
+# A total ClientTimeout raises asyncio.TimeoutError (≡ builtins.TimeoutError),
+# which is neither ClientError nor ValueError — catch it (and any raw OSError)
+# explicitly so a slow GitHub never escapes the intended handling (a bogus
+# 45-minute-timeout admin alert) but surfaces as a clean, catchable ValueError.
+def _fetch_errors():
     import aiohttp
 
-    # A total ClientTimeout raises asyncio.TimeoutError (≡ builtins.TimeoutError),
-    # which is neither ClientError nor ValueError — catch it (and any raw OSError)
-    # explicitly so a slow GitHub never escapes the intended handling: the
-    # vehicles fetch degrades to a clean "unusable" summary, the buildings fetch
-    # to "Building N" labels — not a bogus 45-minute-timeout admin alert.
-    fetch_errors = (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError)
+    return (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError)
+
+
+async def fetch_building_names(session: "aiohttp.ClientSession") -> dict[int, str]:
+    """The building id → display-name map from ``buildings.ts``. Raises
+    ``ValueError`` when it can't be fetched or parsed — the caller decides
+    whether to fall back to a cached map (see the forum service) rather than
+    degrading every label to ``"Building N"`` and flipping every vehicle hash."""
+    try:
+        return parse_building_names(await _fetch(session, BUILDINGS_URL))
+    except _fetch_errors() as exc:
+        raise ValueError(f"could not load LSSM building names: {exc}") from exc
+
+
+async def fetch_catalog(
+    session: "aiohttp.ClientSession",
+    *,
+    building_names: dict[int, str] | None = None,
+) -> list[dict]:
+    """The full vehicle catalog as normalized records, sorted by id.
+
+    ``building_names`` (id → name) turns ``possibleBuildings`` into readable
+    names; an id it doesn't cover degrades to ``"Building N"``. It is passed in
+    (not fetched here) so the caller can supply a state-cached map when
+    ``buildings.ts`` is momentarily unreachable — otherwise a transient
+    buildings failure would rewrite every label and fake a mass "updated".
+    Raises ``ValueError`` when ``vehicles.ts`` itself can't be fetched/parsed."""
     try:
         vehicles_raw = parse_ts_module(await _fetch(session, VEHICLES_URL))
-    except fetch_errors as exc:
+    except _fetch_errors() as exc:
         raise ValueError(f"could not load the LSSM vehicle catalog: {exc}") from exc
-    building_names: dict[int, str] = {}
-    try:
-        building_names = parse_building_names(await _fetch(session, BUILDINGS_URL))
-    except fetch_errors as exc:
-        # Building names are a nicety; degrade to "Building N" rather than fail.
-        log.warning("vehicle catalog: could not read building names (%s)", exc)
 
+    names = building_names or {}
     catalog: list[dict] = []
     for vid, raw in vehicles_raw.items():
         if not isinstance(raw, dict):
             continue
         try:
-            catalog.append(normalize_vehicle(int(vid), raw, building_names))
+            catalog.append(normalize_vehicle(int(vid), raw, names))
         except (TypeError, ValueError):
             log.warning("vehicle catalog: skipped unparseable entry %r", vid)
     catalog.sort(key=lambda v: v["id"])

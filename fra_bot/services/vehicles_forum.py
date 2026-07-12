@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import logging
 import re
 
@@ -33,6 +34,13 @@ STATE_LAST_SYNC = "vehicles_forum:last_sync"
 # Announcements only fire after that: the multi-run initial backfill must
 # never ping the announcement channel, not even its later runs.
 STATE_BACKFILL_DONE = "vehicles_forum:backfill_done"
+# Last-known building id → name map. buildings.ts is a slowly-changing
+# secondary lookup fetched separately from vehicles.ts; caching it means a
+# transient buildings.ts failure reuses the real names instead of degrading
+# every label to "Building N" — which, because names are part of the hashed
+# record, would otherwise flip all ~114 hashes and fake a mass "vehicle
+# updated" storm (notes + a false announcement), then flip back on recovery.
+STATE_BUILDING_NAMES = "vehicles_forum:building_names"
 
 # Thread titles end in " · #<key>" (key = "veh-<id>") — the recovery marker
 # that lets the bot re-adopt its own posts after a database loss.
@@ -319,7 +327,48 @@ class VehiclesForumService:
         import aiohttp
 
         async with aiohttp.ClientSession() as session:
-            return await catalog.fetch_catalog(session)
+            names = await self._building_names(session)
+            return await catalog.fetch_catalog(session, building_names=names)
+
+    async def _building_names(self, session) -> dict[int, str]:
+        """The building id → name map, fetched fresh and cached in state. On a
+        transient buildings.ts failure we reuse the last-known map rather than
+        degrading every label to "Building N" (which would flip every vehicle
+        hash and fake a mass "updated"). An empty fetch is treated as a failure
+        — it's indistinguishable from a bad response — so the cache wins."""
+        try:
+            names = await catalog.fetch_building_names(session)
+        except ValueError as exc:
+            cached = await self._cached_building_names()
+            log.warning(
+                "vehicles forum: building names unavailable (%s); reusing %d cached",
+                exc, len(cached),
+            )
+            return cached
+        if not names:
+            return await self._cached_building_names()
+        await self._state.set(
+            STATE_BUILDING_NAMES,
+            json.dumps({str(k): v for k, v in names.items()}),
+        )
+        return names
+
+    async def _cached_building_names(self) -> dict[int, str]:
+        raw = await self._state.get(STATE_BUILDING_NAMES)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return {}
+        out: dict[int, str] = {}
+        if isinstance(data, dict):
+            for key, value in data.items():
+                try:
+                    out[int(key)] = str(value)
+                except (TypeError, ValueError):
+                    continue
+        return out
 
     async def sync(self, *, limit: int | None = None, force: bool = False) -> dict:
         """One full pass: fetch the catalog, ensure tags, post new vehicles,

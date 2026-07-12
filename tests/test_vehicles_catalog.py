@@ -114,6 +114,14 @@ def test_parse_ts_module_rejects_garbage():
         vc.parse_ts_module("const x = 1;")  # no object literal
 
 
+def test_parse_ts_module_survives_scientific_notation():
+    # A single odd number (float() accepts it, int() doesn't) must not abort
+    # the whole parse — it parses as a float, not a crash.
+    data = vc.parse_ts_module("export default { 0: { credits: 1e5, x: 2.5 } }")
+    assert data["0"]["credits"] == 100000.0
+    assert data["0"]["x"] == 2.5
+
+
 # ---------------------------------------------------------------------------
 # parse_building_names (the targeted extractor)
 # ---------------------------------------------------------------------------
@@ -263,17 +271,35 @@ class _FakeSession:
         return _OkResp(VEHICLES_TS if "vehicles" in url else BUILDINGS_TS)
 
 
-async def test_buildings_timeout_degrades_to_building_labels():
-    # buildings.ts times out -> names can't be read -> "Building N" fallback,
-    # NOT a crash (and NOT a bogus 45-min-timeout alert upstream).
-    cat = await vc.fetch_catalog(_FakeSession(timeout_on="buildings"))
+async def test_fetch_building_names_raises_on_timeout():
+    # A ClientTimeout raises asyncio.TimeoutError — fetch_building_names must
+    # convert it to a catchable ValueError, not let it escape.
+    with pytest.raises(ValueError):
+        await vc.fetch_building_names(_FakeSession(timeout_on="buildings"))
+
+
+async def test_fetch_building_names_parses_the_map():
+    names = await vc.fetch_building_names(_FakeSession(timeout_on="none"))
+    assert names[0] == "Fire station"
+    assert names[13] == "Fire station (Small station)"
+
+
+async def test_fetch_catalog_resolves_supplied_names():
+    names = {0: "Fire station", 13: "Fire station (Small station)"}
+    cat = await vc.fetch_catalog(_FakeSession(timeout_on="none"), building_names=names)
     by_id = {v["id"]: v for v in cat}
-    assert len(cat) == 3
+    assert by_id[0]["buildings"] == ["Fire station", "Fire station (Small station)"]
+
+
+async def test_fetch_catalog_degrades_to_building_labels_without_names():
+    # No names (the caller's cache was empty) -> "Building N", not a crash.
+    cat = await vc.fetch_catalog(_FakeSession(timeout_on="none"), building_names={})
+    by_id = {v["id"]: v for v in cat}
     assert by_id[0]["buildings"] == ["Building 0", "Building 13"]
 
 
-async def test_vehicles_timeout_becomes_value_error():
+async def test_fetch_catalog_vehicles_timeout_becomes_value_error():
     # vehicles.ts times out -> a clean ValueError the sync turns into an
     # "unusable" summary, not an escaping TimeoutError.
     with pytest.raises(ValueError):
-        await vc.fetch_catalog(_FakeSession(timeout_on="vehicles"))
+        await vc.fetch_catalog(_FakeSession(timeout_on="vehicles"), building_names={})
