@@ -73,6 +73,11 @@ class DiscordChannels:
     missions_forum: int = 0
     # Announcements for newly added missions (link to the forum post).
     mission_announce: int = 1524842963316773036
+    # The vehicles-database forum (one post per LSSM vehicle); 0 = off.
+    vehicles_forum: int = 1525985400521490607
+    # Announcements for newly added/changed vehicles (link to the post);
+    # 0 = no channel (announce stays off).
+    vehicle_announce: int = 0
     # In-game DM mirror forum: every PM conversation ↔ one thread.
     dm_mirror: int = 1517694938501087342
     # The message panel (Send Message / Check Inbox / Reply buttons) —
@@ -164,6 +169,20 @@ class MissionsForumConfig:
 
 
 @dataclass(frozen=True)
+class VehiclesForumConfig:
+    """The vehicles-database forum: every vehicle from the LSSM catalog as a
+    tagged forum post, checked daily for new/changed vehicles. The forum
+    channel is ``discord.channels.vehicles_forum``; ``announce_new``
+    additionally pings ``discord.channels.vehicle_announce`` with a link
+    whenever a brand-new vehicle appears (off by default — the catalog rarely
+    changes)."""
+    enabled: bool
+    sync_time: str  # "HH:MM" in reports.timezone
+    announce_new: bool
+    max_posts_per_run: int
+
+
+@dataclass(frozen=True)
 class RankRolesConfig:
     """Credit rank roles (the old bot's RoleBasedCredits): every linked
     member carries one Discord rank role based on MissionChief earned
@@ -211,6 +230,7 @@ class AutomationConfig:
     mission: MissionAutomationConfig
     tax_warnings: TaxWarningsConfig
     missions_forum: MissionsForumConfig
+    vehicles_forum: VehiclesForumConfig
     dm_mirror: DmMirrorConfig
     rank_roles: RankRolesConfig
 
@@ -376,6 +396,10 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                     channels.get("event_pings", 1421242306136113254)
                 ),
                 missions_forum=int(channels.get("missions_forum", 0)),
+                vehicles_forum=int(
+                    channels.get("vehicles_forum", 1525985400521490607)
+                ),
+                vehicle_announce=int(channels.get("vehicle_announce", 0)),
                 mission_announce=int(
                     channels.get("mission_announce", 1524842963316773036)
                 ),
@@ -472,6 +496,23 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 max_posts_per_run=int(
                     _get(
                         raw, "automation", "missions_forum", "max_posts_per_run",
+                        default=100,
+                    )
+                ),
+            ),
+            vehicles_forum=VehiclesForumConfig(
+                enabled=bool(
+                    _get(raw, "automation", "vehicles_forum", "enabled", default=False)
+                ),
+                sync_time=str(
+                    _get(raw, "automation", "vehicles_forum", "sync_time", default="04:30")
+                ),
+                announce_new=bool(
+                    _get(raw, "automation", "vehicles_forum", "announce_new", default=False)
+                ),
+                max_posts_per_run=int(
+                    _get(
+                        raw, "automation", "vehicles_forum", "max_posts_per_run",
                         default=100,
                     )
                 ),
