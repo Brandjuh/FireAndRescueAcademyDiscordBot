@@ -1931,6 +1931,77 @@ class MissionsForumRepo:
         )
 
 
+class VehiclesForumRepo:
+    """vehicle_key → forum-thread mapping for the vehicles-database forum.
+
+    Same shape as :class:`MissionsForumRepo`: the primary key guarantees no
+    vehicle is posted twice; ``content_hash`` (LSSM data + format version)
+    decides whether an existing post needs an in-place edit, ``data_hash``
+    (raw data only) whether that edit is a real game-side change worth a note."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def get(self, vehicle_key: str) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM vehicles_forum_posts WHERE vehicle_key = ?",
+            (vehicle_key,),
+        ) as cur:
+            return await cur.fetchone()
+
+    async def count(self) -> int:
+        async with self._db.conn.execute(
+            "SELECT COUNT(*) AS n FROM vehicles_forum_posts"
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def all(self) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM vehicles_forum_posts"
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def record(
+        self,
+        vehicle_key: str,
+        thread_id: int,
+        content_hash: str,
+        name: str,
+        data_hash: str | None = None,
+    ) -> None:
+        now = utcnow_iso()
+        await self._db.execute(
+            "INSERT INTO vehicles_forum_posts (vehicle_key, thread_id, name, "
+            "content_hash, data_hash, posted_at, updated_at, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(vehicle_key) DO UPDATE SET "
+            "thread_id = excluded.thread_id, name = excluded.name, "
+            "content_hash = excluded.content_hash, "
+            "data_hash = excluded.data_hash, "
+            "updated_at = excluded.updated_at, last_seen_at = excluded.last_seen_at",
+            (vehicle_key, thread_id, name, content_hash, data_hash, now, now, now),
+        )
+
+    async def touch_seen(self, vehicle_keys: list[str]) -> None:
+        """Mark keys as still present in the catalog (bulk, no content change)."""
+        if not vehicle_keys:
+            return
+        now = utcnow_iso()
+        await self._db.conn.executemany(
+            "UPDATE vehicles_forum_posts SET last_seen_at = ? WHERE vehicle_key = ?",
+            [(now, key) for key in vehicle_keys],
+        )
+        await self._db.conn.commit()
+
+    async def delete(self, vehicle_key: str) -> None:
+        """Forget a mapping (e.g. its thread was deleted by hand)."""
+        await self._db.execute(
+            "DELETE FROM vehicles_forum_posts WHERE vehicle_key = ?",
+            (vehicle_key,),
+        )
+
+
 class DmMirrorRepo:
     """conversation_id → forum-thread mapping for the in-game DM mirror,
     plus the per-conversation progress marker (newest mirrored message

@@ -245,6 +245,11 @@ Requires Discord administrator permission or a role listed in
 | `!fra missionsforum adopt` | Rebuild the mission→post mapping from the forum's thread titles (DB-loss recovery, prevents duplicates) |
 | `!fra missionsforum stop` | Stop the running missions-forum sync/wipe after the current post |
 | `!fra missionsforum wipe CONFIRM` | Delete every mission post from the forum and forget the mapping (paced; a later sync reposts fresh) |
+| `!fra vehiclesforum` | Vehicles-database forum status (tracked posts, schedule, announcements) |
+| `!fra vehiclesforum sync [limit\|force]` | Sync the LSSM vehicle catalog into the forum now; a number caps this run's posts, `force` re-renders everything |
+| `!fra vehiclesforum adopt` | Rebuild the vehicle→post mapping from the forum's thread titles (DB-loss recovery, prevents duplicates) |
+| `!fra vehiclesforum stop` | Stop the running vehicles-forum sync/wipe after the current post |
+| `!fra vehiclesforum wipe CONFIRM` | Delete every vehicle post from the forum and forget the mapping (paced; a later sync reposts fresh) |
 | `!fra dmmirror` | In-game DM mirror status (forum, tracked conversations, scan schedule) |
 | `!fra dmmirror scan` | Scan the in-game PM inbox now and mirror conversations to the forum |
 | `!fra dm <username> \| <subject> \| <body>` | Start a new in-game PM (roster-matched username); the conversation is mirrored to the DM forum immediately |
@@ -501,6 +506,32 @@ mission changes get **one bundled announcement** per sync (however many
 missions a balance patch touched — never a ping storm). Set
 `!fra set mission_announce_role @role` to ping a role on those
 announcements (default: no ping). The initial backfill never announces.
+
+### Vehicles-database forum
+
+The same treatment for **vehicles**: every vehicle in the game gets its own
+forum post — price (credits/coins), crew, the buildings that can buy it,
+water/foam tanks and pump, required trainings, trailer flag and any special
+notes. The catalog comes from the community **LSS-Manager** project (the
+authoritative machine-readable list; MissionChief exposes no clean vehicle
+endpoint), fetched from GitHub, so this sync never touches the game and runs
+regardless of `dry_run`. The bot creates the tag set itself (8 tags:
+Fire/EMS/Police/Water Rescue plus Water/Pump, Training required, Trailer and
+Other, max 5 per post) and turns "require a tag" on.
+
+It points at `1525985400521490607` by default; change it with
+`!fra set vehicles_forum <forum channel id>` and enable the daily check with
+`!fra set automation.vehicles_forum.enabled on` (runs at `sync_time`,
+default 04:30). Everything else mirrors the missions forum: new vehicles are
+posted, a changed vehicle's post is **edited in place** (dedup in SQLite,
+`!fra vehiclesforum adopt` rebuilds the mapping after a database loss), a
+real data change also drops an "updated" card in the thread while a bot-side
+re-render stays silent, posting is paced and archived-after-write, and the
+backfill continues **hourly** until complete. `!fra vehiclesforum sync` runs
+a pass on demand and `!fra vehiclesforum` shows progress. New/changed
+vehicles can optionally be announced in `discord.channels.vehicle_announce`
+(`!fra set automation.vehicles_forum.announce_new on`, default **off**; the
+initial backfill never announces).
 
 ### In-game DM mirror
 

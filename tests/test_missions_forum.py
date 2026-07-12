@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 
 import discord
+import pytest
 import pytest_asyncio
 
 from fra_bot.db.database import Database
@@ -950,12 +951,23 @@ async def test_unconfigured_forum_reports_instead_of_crashing(db):
 
 def test_settings_expose_the_new_keys():
     from fra_bot.core import settings as rt
+    from fra_bot.core.settings import SettingError
 
     assert rt.resolve("missions_forum").path == "discord.channels.missions_forum"
     assert rt.resolve("mission_announce").path == "discord.channels.mission_announce"
-    assert rt.resolve("announce_new").path == "automation.missions_forum.announce_new"
+    # These suffixes are shared with the vehicles forum, so the bare name is
+    # ambiguous and must be qualified (like `enabled` always has been).
     assert (
-        rt.resolve("max_posts_per_run").path
+        rt.resolve("missions_forum.announce_new").path
+        == "automation.missions_forum.announce_new"
+    )
+    assert (
+        rt.resolve("missions_forum.max_posts_per_run").path
         == "automation.missions_forum.max_posts_per_run"
     )
-    assert rt.resolve("sync_time").path == "automation.missions_forum.sync_time"
+    assert (
+        rt.resolve("missions_forum.sync_time").path
+        == "automation.missions_forum.sync_time"
+    )
+    with pytest.raises(SettingError):
+        rt.resolve("announce_new")  # ambiguous across the two forums

@@ -118,6 +118,11 @@ class FRABot(commands.Bot):
         from .services.missions_forum import MissionsForumService
 
         self.missions_forum = MissionsForumService(cfg, self.mc, self.db, self)
+        # The vehicles-database forum: every LSSM vehicle as a tagged forum
+        # post, synced daily (fetched from GitHub, so no MissionChief traffic).
+        from .services.vehicles_forum import VehiclesForumService
+
+        self.vehicles_forum = VehiclesForumService(cfg, self.db, self)
         # In-game DM mirror: every PM conversation ↔ one forum thread,
         # with staff replies routed back into the game.
         from .services.dm_mirror import DmMirrorService
@@ -455,6 +460,24 @@ class FRABot(commands.Bot):
                 name="missions-forum-catchup",
                 initial_delay_seconds=480.0,
             )
+        # The vehicles-database forum: same shape as the missions forum, but
+        # the catalog is fetched from GitHub, so it never touches the game.
+        if automation.vehicles_forum.enabled:
+            hour, minute = _parse_hhmm(
+                automation.vehicles_forum.sync_time, default=(4, 30)
+            )
+            sched.add_daily_job(
+                self._guarded(self._vehicles_forum_pass, "vehicles-forum"),
+                at=dt.time(hour, minute),
+                timezone=self.cfg.reports.timezone,
+                name="vehicles-forum",
+            )
+            sched.add_interval_job(
+                self._guarded(self._vehicles_forum_catchup, "vehicles-forum"),
+                minutes=60,
+                name="vehicles-forum-catchup",
+                initial_delay_seconds=540.0,
+            )
         # Credit rank roles: hourly sync of Discord rank roles against
         # MissionChief earned credits (Discord-only writes; role changes
         # mirror the roster, like the verified role).
@@ -543,6 +566,36 @@ class FRABot(commands.Bot):
         if await StateRepo(self.db).get(STATE_BACKFILL_DONE) is not None:
             return
         await self._missions_forum_pass()
+
+    async def _vehicles_forum_pass(self) -> None:
+        """One vehicles-forum sync, with anything noteworthy mirrored to the
+        admin channel. The watchdog guarantees a hung run can never hold the
+        job lock forever."""
+        try:
+            summary = await asyncio.wait_for(
+                self.vehicles_forum.sync(), timeout=45 * 60
+            )
+        except asyncio.TimeoutError:
+            log.error("Vehicles-forum sync timed out after 45 min")
+            await self.notify_admin(
+                "🚒 **Vehicles forum**\n⏱️ sync timed out after 45 min — "
+                "aborted; the next run continues where it left off"
+            )
+            return
+        if summary.get("error") or summary.get("changed"):
+            await self.notify_admin(
+                "🚒 **Vehicles forum**\n" + "\n".join(summary["lines"])[:1800]
+            )
+
+    async def _vehicles_forum_catchup(self) -> None:
+        """Continue the vehicles-forum backfill between daily syncs. Free (one
+        DB read, no traffic) once the backfill is done."""
+        from .db.repos import StateRepo
+        from .services.vehicles_forum import STATE_BACKFILL_DONE
+
+        if await StateRepo(self.db).get(STATE_BACKFILL_DONE) is not None:
+            return
+        await self._vehicles_forum_pass()
 
     async def _rank_roles_pass(self) -> None:
         """One rank-role sync; noteworthy outcomes go to the admin channel."""

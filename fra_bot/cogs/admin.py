@@ -1357,6 +1357,120 @@ class AdminCog(commands.Cog):
             content=f"✅ Adopted {adopted} post(s). Content refreshes on the next sync."
         )
 
+    @fra.group(
+        name="vehiclesforum",
+        aliases=["vehicleforum", "vforum"],
+        invoke_without_command=True,
+    )
+    async def vehicles_forum_group(self, ctx: commands.Context) -> None:
+        """Vehicles-database forum status. Subcommands: `sync [limit|force]`
+        runs a sync now; `adopt` rebuilds the mapping from existing posts."""
+        lines = await self.bot.vehicles_forum.status_lines()
+        await ctx.send("🚒 **Vehicles forum**\n" + "\n".join(lines)[:1900])
+
+    @vehicles_forum_group.command(name="sync")
+    async def vehicles_forum_sync(
+        self, ctx: commands.Context, arg: str = ""
+    ) -> None:
+        """Run a vehicles-forum sync now. `!fra vehiclesforum sync 25` caps
+        this run at 25 posts; `!fra vehiclesforum sync force` re-renders every
+        post even when nothing changed."""
+        lock = self.bot.job_lock("vehicles-forum")
+        if lock.locked():
+            await ctx.send("⏳ A vehicles-forum sync is already running.")
+            return
+        force = arg.strip().lower() == "force"
+        limit = None
+        if not force and arg.strip():
+            try:
+                limit = max(1, int(arg))
+            except ValueError:
+                await ctx.send("⚠️ Use a number (post cap) or `force`.")
+                return
+        message = await ctx.send("⏳ Syncing the vehicles forum…")
+        async with lock:
+            try:
+                summary = await asyncio.wait_for(
+                    self.bot.vehicles_forum.sync(limit=limit, force=force),
+                    timeout=45 * 60,
+                )
+            except asyncio.TimeoutError:
+                await message.edit(
+                    content="⏱️ Sync timed out after 45 min — aborted; run it "
+                            "again to continue where it left off."
+                )
+                return
+            except Exception as exc:  # surfaced to the operator, not a crash
+                log.exception("Manual vehicles-forum sync failed")
+                await message.edit(content=f"❌ Sync failed: {exc}")
+                return
+        icon = "❌" if summary.get("error") else "✅"
+        await message.edit(
+            content=f"{icon} Vehicles forum:\n" + "\n".join(summary["lines"])[:1800]
+        )
+
+    @vehicles_forum_group.command(name="stop")
+    async def vehicles_forum_stop(self, ctx: commands.Context) -> None:
+        """Stop the running vehicles-forum sync (or wipe) after the post it
+        is currently working on."""
+        if not self.bot.job_lock("vehicles-forum").locked():
+            await ctx.send("There is no vehicles-forum sync running.")
+            return
+        self.bot.vehicles_forum.request_stop()
+        await ctx.send("🛑 Stopping the vehicles-forum run after the current post…")
+
+    @vehicles_forum_group.command(name="wipe")
+    async def vehicles_forum_wipe(
+        self, ctx: commands.Context, confirm: str = ""
+    ) -> None:
+        """Delete ALL vehicle posts from the forum and forget the mapping.
+        Destructive — requires the literal word CONFIRM:
+        `!fra vehiclesforum wipe CONFIRM`."""
+        if confirm != "CONFIRM":
+            count = 0
+            try:
+                from ..db.repos import VehiclesForumRepo
+
+                count = await VehiclesForumRepo(self.bot.db).count()
+            except Exception:  # count is cosmetic only
+                pass
+            await ctx.send(
+                f"⚠️ This deletes **every** vehicle post ({count} tracked) "
+                "from the forum. If you are sure: `!fra vehiclesforum wipe CONFIRM`"
+            )
+            return
+        lock = self.bot.job_lock("vehicles-forum")
+        if lock.locked():
+            await ctx.send(
+                "⏳ A vehicles-forum run is busy — `!fra vehiclesforum stop` "
+                "it first."
+            )
+            return
+        message = await ctx.send("🧹 Wiping the vehicles forum… (this is paced)")
+        async with lock:
+            summary = await self.bot.vehicles_forum.wipe()
+        icon = "❌" if summary.get("error") else "✅"
+        await message.edit(
+            content=f"{icon} Vehicles forum wipe:\n"
+                    + "\n".join(summary["lines"])[:1800]
+        )
+
+    @vehicles_forum_group.command(name="adopt")
+    async def vehicles_forum_adopt(self, ctx: commands.Context) -> None:
+        """Rebuild the vehicle→post mapping from the forum's thread titles
+        (recovery after a database loss — prevents duplicate posts)."""
+        forum = self.bot.vehicles_forum.forum()
+        if forum is None:
+            await ctx.send(
+                "⚠️ No vehicles forum configured — `!fra set vehicles_forum <id>`."
+            )
+            return
+        message = await ctx.send("⏳ Scanning forum threads…")
+        adopted = await self.bot.vehicles_forum.adopt(forum)
+        await message.edit(
+            content=f"✅ Adopted {adopted} post(s). Content refreshes on the next sync."
+        )
+
     @fra.group(name="dmmirror", aliases=["dms", "dmirror"], invoke_without_command=True)
     async def dm_mirror_group(self, ctx: commands.Context) -> None:
         """In-game DM mirror status. `!fra dmmirror scan` runs an inbox
