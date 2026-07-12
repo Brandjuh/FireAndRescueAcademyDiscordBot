@@ -26,6 +26,7 @@ ignores everything else.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -318,14 +319,20 @@ async def fetch_catalog(session: "aiohttp.ClientSession") -> list[dict]:
     ``ValueError`` when the data can't be fetched or parsed."""
     import aiohttp
 
+    # A total ClientTimeout raises asyncio.TimeoutError (≡ builtins.TimeoutError),
+    # which is neither ClientError nor ValueError — catch it (and any raw OSError)
+    # explicitly so a slow GitHub never escapes the intended handling: the
+    # vehicles fetch degrades to a clean "unusable" summary, the buildings fetch
+    # to "Building N" labels — not a bogus 45-minute-timeout admin alert.
+    fetch_errors = (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError)
     try:
         vehicles_raw = parse_ts_module(await _fetch(session, VEHICLES_URL))
-    except (aiohttp.ClientError, ValueError) as exc:
+    except fetch_errors as exc:
         raise ValueError(f"could not load the LSSM vehicle catalog: {exc}") from exc
     building_names: dict[int, str] = {}
     try:
         building_names = parse_building_names(await _fetch(session, BUILDINGS_URL))
-    except (aiohttp.ClientError, ValueError) as exc:
+    except fetch_errors as exc:
         # Building names are a nicety; degrade to "Building N" rather than fail.
         log.warning("vehicle catalog: could not read building names (%s)", exc)
 

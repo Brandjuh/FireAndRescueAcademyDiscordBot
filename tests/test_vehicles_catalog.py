@@ -5,6 +5,8 @@ AND double quoted strings, ``19_200`` numeric separators, trailing commas,
 nested training, and — for buildings — arrow functions and spreads in value
 positions that the name extractor must skip)."""
 
+import asyncio
+
 import pytest
 
 from fra_bot.mc import vehicles_catalog as vc
@@ -219,3 +221,59 @@ def test_data_hash_tracks_real_changes():
     before = vc.data_hash(veh)
     veh = dict(veh, credits=9999)
     assert vc.data_hash(veh) != before
+
+
+# ---------------------------------------------------------------------------
+# fetch_catalog error handling (a ClientTimeout raises asyncio.TimeoutError,
+# which is neither ClientError nor ValueError — both fetches must handle it)
+# ---------------------------------------------------------------------------
+
+class _TimeoutResp:
+    async def __aenter__(self):
+        raise asyncio.TimeoutError()
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _OkResp:
+    def __init__(self, text):
+        self._text = text
+        self.status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def text(self):
+        return self._text
+
+
+class _FakeSession:
+    """Serves the inline fixtures, or times out on whichever URL matches."""
+
+    def __init__(self, *, timeout_on):
+        self._timeout_on = timeout_on
+
+    def get(self, url, timeout=None):
+        if self._timeout_on in url:
+            return _TimeoutResp()
+        return _OkResp(VEHICLES_TS if "vehicles" in url else BUILDINGS_TS)
+
+
+async def test_buildings_timeout_degrades_to_building_labels():
+    # buildings.ts times out -> names can't be read -> "Building N" fallback,
+    # NOT a crash (and NOT a bogus 45-min-timeout alert upstream).
+    cat = await vc.fetch_catalog(_FakeSession(timeout_on="buildings"))
+    by_id = {v["id"]: v for v in cat}
+    assert len(cat) == 3
+    assert by_id[0]["buildings"] == ["Building 0", "Building 13"]
+
+
+async def test_vehicles_timeout_becomes_value_error():
+    # vehicles.ts times out -> a clean ValueError the sync turns into an
+    # "unusable" summary, not an escaping TimeoutError.
+    with pytest.raises(ValueError):
+        await vc.fetch_catalog(_FakeSession(timeout_on="vehicles"))
