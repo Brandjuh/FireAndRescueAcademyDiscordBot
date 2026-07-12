@@ -431,8 +431,8 @@ class LogsRepo:
                         (signature, occurrence_index, raw_timestamp, event_at,
                          action_key, description, executed_name, executed_mc_id,
                          affected_name, affected_type, affected_mc_id,
-                         contribution_amount, scraped_at, posted_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         contribution_amount, scraped_at, posted_at, routed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         sig,
@@ -448,6 +448,10 @@ class LogsRepo:
                         row.get("affected_mc_id"),
                         row.get("contribution_amount"),
                         now,
+                        posted_at,
+                        # History backfill suppresses BOTH feeds — a mark_posted
+                        # row must also be marked routed, else configuring a
+                        # route would replay thousands of old logs into it.
                         posted_at,
                     ),
                 )
@@ -484,10 +488,34 @@ class LogsRepo:
         )
 
     async def mark_all_posted(self) -> int:
-        """Used on first sync so history isn't spammed into Discord."""
+        """Used on first sync so history isn't spammed into Discord. Stamps
+        BOTH feeds: an unposted row is also marked routed, else a route
+        configured later would replay all of first-sync history into it."""
+        now = utcnow_iso()
         return await self._db.execute(
-            "UPDATE alliance_logs SET posted_at = ? WHERE posted_at IS NULL",
-            (utcnow_iso(),),
+            "UPDATE alliance_logs SET posted_at = ?, "
+            "routed_at = COALESCE(routed_at, ?) WHERE posted_at IS NULL",
+            (now, now),
+        )
+
+    async def pending_routes(self, limit: int = 30) -> list[aiosqlite.Row]:
+        """Rows to mirror to routed channels: already announced to the main
+        feed (posted_at set) but not yet routed. Gating on posted_at keeps a
+        route copy from ever preceding the canonical post."""
+        async with self._db.conn.execute(
+            """
+            SELECT * FROM alliance_logs
+            WHERE routed_at IS NULL AND posted_at IS NOT NULL
+            ORDER BY COALESCE(event_at, scraped_at) ASC, id ASC LIMIT ?
+            """,
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def mark_routed(self, log_id: int) -> None:
+        await self._db.execute(
+            "UPDATE alliance_logs SET routed_at = ? WHERE id = ?",
+            (utcnow_iso(), log_id),
         )
 
     async def count(self) -> int:

@@ -218,6 +218,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra report list` | List every registered report and its periods |
 | `!fra report <name> [period]` | Render any report (`period`: today/yesterday/week/month/prev-month/year/prev-year/all; `daily`/`monthly` alias the income top-10) |
 | `!fra reports [add <report> <period> <cadence> <#channel> \| remove <nr> \| reset]` | Manage the scheduled report posts at runtime (stored override on top of `reports.scheduled`) |
+| `!fra logroutes [keys \| add <#channel> <type…> \| remove <#channel> [type] \| reset]` | Duplicate alliance-log types into extra channels (see below) |
 | `!fra automation` | Board automation switches, dry-run state, recent requests |
 | `!fra sync <trainings\|buildings\|events>` | Poll a board thread now |
 | `!fra sync missions` | Advance the mission/event queue + rotation now |
@@ -430,6 +431,36 @@ hourly job refreshes the counts and the panel is edited in place, so the
 channel always shows current numbers) — all settable live with
 `!fra set`; 0 disables a panel. The manual commands still exist for a
 forced repost.
+
+### Routing alliance logs to extra channels
+
+Every alliance-log line is classified into a *type* (`building_constructed`,
+`building_destroyed`, `extension_started`, `expansion_finished`,
+`added_to_alliance`, `contributed_to_alliance`, … 33 in all). Besides the
+single `alliance_logs` feed, you can **duplicate** chosen types into other
+channels — e.g. all building logs into `#construction`, all admin changes
+into a staff channel:
+
+```
+!fra logroutes keys                        # list the types + group aliases
+!fra logroutes add #construction building  # a whole group…
+!fra logroutes add #staff admin moderation # …or several at once
+!fra logroutes add #audit all              # everything (incl. future types)
+!fra logroutes                             # show the current routes
+!fra logroutes remove #construction building_destroyed   # drop one type
+!fra logroutes remove #construction        # or the whole channel
+```
+
+A *type* is an exact key, a **group alias** (`building`, `member`, `admin`,
+`moderation`, `course`, `mission`), `all`, or `unknown` (unclassified
+lines). The log still posts to the main `alliance_logs` channel; the route
+is an extra **copy** — routing at the main channel itself is suppressed so
+nothing double-posts there. Routes are stored in the database and applied
+live (no restart). Enabling routing never replays history: existing logs are
+marked already-routed, so only logs arriving *after* you add a route are
+mirrored. Routing is best-effort — the main feed is the source of truth, so
+a copy lost to a transient Discord error is not retried (it's still in the
+main channel).
 
 ### Missions-database forum
 
