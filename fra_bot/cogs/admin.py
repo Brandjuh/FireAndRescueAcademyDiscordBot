@@ -558,6 +558,135 @@ class AdminCog(commands.Cog):
         name = self._REPORT_ALIASES.get(name.lower(), name)
         await reporting.cmd_report(ctx, name, period)
 
+    @fra.command(name="logroutes", aliases=["logroute"])
+    async def log_routes_cmd(
+        self, ctx: commands.Context, action: str = "list", *args: str
+    ) -> None:
+        """Duplicate alliance-log types into extra channels (the log still
+        posts to the main log channel; a COPY also goes to each route):
+
+        `!fra logroutes` — show the current routes
+        `!fra logroutes keys` — list the log types and group aliases
+        `!fra logroutes add <#channel> <type…>` — route these types to a
+        channel (types: a group like `building`, an exact key like
+        `building_constructed`, or `all`)
+        `!fra logroutes remove <#channel> [type]` — drop one type, or the
+        whole channel when no type is given
+        `!fra logroutes reset` — clear every route
+        """
+        import re as _re
+
+        from ..core import log_routes as lr
+        from .display import ACTION_DISPLAY
+
+        state = StateRepo(self.bot.db)
+        action = (action or "list").lower()
+
+        def _channel_id(token: str) -> int | None:
+            m = _re.fullmatch(r"<#?(\d+)>|(\d+)", (token or "").strip())
+            return int(m.group(1) or m.group(2)) if m else None
+
+        if action in ("list", ""):
+            routes = await lr.load(state)
+            if not routes:
+                await ctx.send(
+                    "No log routes set. Add one with `!fra logroutes add "
+                    "<#channel> <type>` — `!fra logroutes keys` lists the types."
+                )
+                return
+            main = self.bot.channel_for("alliance_logs")
+            lines = []
+            for channel_id, targets in routes.items():
+                lines.append(f"<#{channel_id}> ← {', '.join(f'`{t}`' for t in targets)}")
+            note = ""
+            if main is not None and main.id in routes:
+                note = ("\n⚠️ A route points at the main log channel "
+                        f"(<#{main.id}>); those copies are suppressed to avoid "
+                        "double-posting.")
+            await ctx.send(("🔀 **Log routes** (duplicated in addition to the "
+                            "main log channel):\n" + "\n".join(lines) + note)[:1990])
+            return
+
+        if action == "keys":
+            group_lines = [
+                f"`{name}` → {len(members)} types"
+                for name, members in lr.GROUPS.items()
+            ]
+            key_lines = []
+            for key in sorted(ACTION_DISPLAY):
+                title, _, emoji = ACTION_DISPLAY[key]
+                key_lines.append(f"`{key}` — {emoji} {title}")
+            body = (
+                "**Group aliases**\n" + "\n".join(group_lines)
+                + "\n\n**Special:** `all` (every type, incl. future/unknown), "
+                "`unknown` (unclassified lines)\n\n"
+                "**Exact keys**\n" + "\n".join(key_lines)
+            )
+            await ctx.send(body[:1990])
+            return
+
+        if action == "add":
+            if len(args) < 2:
+                await ctx.send(
+                    "Usage: `!fra logroutes add <#channel> <type…>` "
+                    "(e.g. `!fra logroutes add #construction building`)"
+                )
+                return
+            channel_id = _channel_id(args[0])
+            if channel_id is None:
+                await ctx.send("❌ Give the channel as a #mention or its id first.")
+                return
+            if self.bot.get_channel(channel_id) is None:
+                await ctx.send(f"❌ I can't see a channel with id `{channel_id}`.")
+                return
+            bad = [t for t in args[1:] if lr.normalize_target(t) is None]
+            if bad:
+                await ctx.send(
+                    "❌ Unknown type(s): " + ", ".join(f"`{t}`" for t in bad)
+                    + ". See `!fra logroutes keys`."
+                )
+                return
+            targets = await lr.add(state, channel_id, list(args[1:]))
+            main = self.bot.channel_for("alliance_logs")
+            warn = ""
+            if main is not None and channel_id == main.id:
+                warn = ("\n⚠️ That IS the main log channel — routed copies there "
+                        "are suppressed (it already gets every log).")
+            await ctx.send(
+                f"✅ <#{channel_id}> now receives: "
+                + ", ".join(f"`{t}`" for t in targets) + warn
+            )
+            return
+
+        if action == "remove":
+            if not args:
+                await ctx.send("Usage: `!fra logroutes remove <#channel> [type]`")
+                return
+            channel_id = _channel_id(args[0])
+            if channel_id is None:
+                await ctx.send("❌ Give the channel as a #mention or its id.")
+                return
+            target = args[1] if len(args) > 1 else None
+            if await lr.remove(state, channel_id, target):
+                what = f"`{target}` from " if target else "all routes from "
+                await ctx.send(f"🗑️ Removed {what}<#{channel_id}>.")
+            else:
+                await ctx.send(
+                    f"Nothing to remove for <#{channel_id}>"
+                    + (f" / `{target}`" if target else "") + "."
+                )
+            return
+
+        if action == "reset":
+            existed = await lr.clear(state)
+            await ctx.send(
+                "↩️ All log routes cleared." if existed
+                else "There were no log routes to clear."
+            )
+            return
+
+        await ctx.send("Unknown action — use `list`, `keys`, `add`, `remove` or `reset`.")
+
     @fra.command(name="reports")
     async def scheduled_reports(
         self, ctx: commands.Context, action: str = "list", *args: str
