@@ -411,6 +411,25 @@ def infer_tags(vehicle: dict) -> list[str]:
     return out[:MAX_TAGS_PER_POST] or [FALLBACK_TAG]
 
 
+# The full tag vocabulary with a display emoji each, in forum-display order.
+# This is the single source of truth: infer_tags only ever returns names from
+# here, and the forum's ensure_tags creates exactly these. 8 tags — well under
+# Discord's 20-per-forum limit.
+FORUM_TAG_EMOJI = {
+    "Fire": "🚒",
+    "EMS": "🚑",
+    "Police": "🚓",
+    "Water Rescue": "🌊",
+    "Water/Pump": "🚰",
+    "Training required": "🎓",
+    "Trailer": "🚚",
+    FALLBACK_TAG: "📦",
+}
+
+# No tag renames have happened yet; the forum's ensure_tags accepts the map.
+RENAMED_TAGS: dict[str, str] = {}
+
+
 def all_tag_names() -> list[str]:
     """Every tag the forum needs (for ensure_tags)."""
-    return list(_CATEGORY_TAGS) + ["Water/Pump", "Training required", "Trailer", FALLBACK_TAG]
+    return list(FORUM_TAG_EMOJI)
