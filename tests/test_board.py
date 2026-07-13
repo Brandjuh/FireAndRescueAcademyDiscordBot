@@ -297,11 +297,11 @@ async def test_post_reply_sets_last_error_reasons():
 # -- matcher hardening (the "technical rescue training" incident) ------------
 
 def test_unknown_course_no_longer_fuzzes_onto_the_nearest_name():
-    # "technical rescue training" used to hit Search and Rescue Training at
-    # ratio 0.784 (threshold 0.78) and flag Coastal Rescue as ambiguous —
-    # the bot opened the WRONG class. Different courses sharing a tail must
-    # not match; the member gets "could not be processed" instead.
-    matches, ambiguous = match_trainings("technical rescue training")
+    # A course that does NOT exist must not fuzz onto a real one that merely
+    # shares a tail (this used to open the WRONG class). "Technical Rescue
+    # Training" is a real Fire course now, so use another unknown "… rescue
+    # training" the catalog does not contain.
+    matches, ambiguous = match_trainings("rope rescue training")
     assert matches == [] and ambiguous == []
 
 
@@ -331,7 +331,7 @@ def test_typo_tolerance_survives_the_stricter_fuzz():
         ("HazMta", "HazMat"),
         ("k9", "K-9"),
         ("police avation", "Police Aviation"),
-        ("swift water rescue trainng", "Swift Water Rescue Training"),
+        ("technical rescue trainng", "Technical Rescue Training"),
     ):
         matches, ambiguous = match_trainings(text)
         names = [m.name for m in matches] + [a.name for a in ambiguous]

@@ -751,7 +751,7 @@ RICH_ACADEMY_PAGE = ACADEMY_PAGE.replace(
     "<select name='education_select'><option value='12'>HazMat</option></select>",
     "<select name='education_select'>"
     "<option value='12'>HazMat</option>"
-    "<option value='31'>Hotshot Crew Training</option>"
+    "<option value='31'>Brand New Course</option>"
     "<option value='32'>Foam Firefighting Training (2 days)</option>"
     "</select>",
 )
@@ -773,11 +773,11 @@ async def test_availability_walk_harvests_the_live_course_list(db):
     catalog = await merged_course_catalog(StateRepo(db))
     fire = catalog["fire"]
     # The live dropdown replaces the built-in fire list entirely.
-    assert set(fire) == {"HazMat", "Hotshot Crew Training",
+    assert set(fire) == {"HazMat", "Brand New Course",
                          "Foam Firefighting Training"}
     assert fire["HazMat"] == 3                     # days from the built-in catalog
     assert fire["Foam Firefighting Training"] == 2  # days from the "(2 days)" label
-    assert fire["Hotshot Crew Training"] == 0       # brand new: unknown duration
+    assert fire["Brand New Course"] == 0            # brand new: unknown duration
     # Agencies without an academy in the walk keep the built-in catalog.
     assert catalog["police"]  # non-empty static fallback
 
@@ -793,7 +793,7 @@ async def test_empty_harvest_keeps_the_previous_course_list(db):
     client.pages["/buildings/4951748"] = "<html>maintenance</html>"
     await svc._collect_availability()
     catalog = await merged_course_catalog(StateRepo(db))
-    assert "Hotshot Crew Training" in catalog["fire"]
+    assert "Brand New Course" in catalog["fire"]
 
 
 async def test_board_parse_uses_the_live_catalog_and_counts(db):
