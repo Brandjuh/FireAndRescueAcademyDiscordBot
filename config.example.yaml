@@ -138,7 +138,7 @@ automation:
     # honour the global dry_run switch above and never spend coins.
     enabled: false            # master switch: runs the queue + rotation scheduler
     board_enabled: false      # also parse structured mission posts from the board
-    thread_id: 15293          # board thread scanned when board_enabled
+    thread_id: 15310          # board thread scanned when board_enabled
     interval: 5               # poll interval in minutes
     # Channel where `!fra missionpanel` posts the request panel.
     panel_channel_id: 1425234755842080890
