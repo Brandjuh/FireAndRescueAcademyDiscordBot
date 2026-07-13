@@ -330,6 +330,39 @@ async def test_cap_limits_writes_and_defers_backfill(db):
     assert await service._state.get(STATE_BACKFILL_DONE) is not None
 
 
+async def test_active_thread_cap_stops_run_without_hammering(db):
+    """Discord's 1000-active-thread guild wall must stop the run cleanly, not
+    be counted as N per-vehicle failures that hammer the API every catch-up."""
+    service, forum, _, _ = _service(db)
+    original = forum.create_thread
+    calls = {"n": 0}
+
+    async def walled(**kwargs):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise _http_400("Maximum number of active threads reached")
+        return await original(**kwargs)
+
+    forum.create_thread = walled
+    summary = await service.sync()
+    assert summary["created"] == 1
+    assert summary["failed"] == 0
+    assert summary["hit_active_cap"] is True
+    assert calls["n"] == 2  # stopped at the wall, did not try the rest
+    assert await service._state.get(STATE_BACKFILL_DONE) is None
+
+
+async def test_self_heal_rearchives_stray_active_posts(db):
+    service, forum, _, _ = _service(db)
+    await service.sync()
+    assert all(t.archived for t in forum.threads)
+    for thread in forum.threads:  # simulate a past archive failure
+        thread.archived = False
+    summary = await service.sync()  # data unchanged → no writes
+    assert summary["created"] == 0 and summary["updated"] == 0
+    assert all(t.archived for t in forum.threads)  # self-healed
+
+
 async def test_deleted_thread_is_recreated(db):
     service, forum, _, _ = _service(db)
     await service.sync()

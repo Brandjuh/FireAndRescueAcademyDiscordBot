@@ -58,6 +58,20 @@ _DISCIPLINE_COLOURS = {
 _DEFAULT_COLOUR = 0x5865F2  # blurple, for missions without a mapped discipline
 
 
+def _is_active_thread_cap(exc: Exception) -> bool:
+    """True when Discord refused a new thread because the guild is already at
+    its 1000 ACTIVE-thread limit. That's a guild-wide wall — every further
+    create this run fails the same way — so the sync stops instead of
+    hammering the API, and archived posts (which don't count) can free room."""
+    if not isinstance(exc, discord.HTTPException):
+        return False
+    if getattr(exc, "code", None) == 160006:  # "Maximum active threads reached"
+        return True
+    text = f"{getattr(exc, 'text', '') or ''} {exc}".lower()
+    return "active thread" in text
+
+
+
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -390,11 +404,25 @@ class MissionsForumService:
         updated_stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
 
         created = updated = skipped = failed = announced = 0
-        capped = stopped = False
+        capped = stopped = hit_active_cap = False
         seen_unchanged: list[str] = []
         seen_keys: set[str] = set()
         data_updates: list[dict] = []
         writes = 0
+
+        # Self-heal: a post whose archive step failed on an earlier run stays
+        # ACTIVE and keeps counting toward the 1000 active-thread guild cap,
+        # which is what stalls the backfill. Re-archive stray active posts we
+        # already own (bounded, best-effort) so those slots come back. In
+        # steady state every post is archived, so this is a no-op.
+        healed = 0
+        for stray_key, stray_thread in orphans.items():
+            if healed >= cap:
+                break
+            if await self._repo.get(stray_key) is not None:
+                await self._archive(stray_thread)
+                healed += 1
+                await self._pause(healed)
 
         missions.sort(key=lambda m: _sort_key(catalog.mission_key(m)))
         for mission in missions:
@@ -441,6 +469,23 @@ class MissionsForumService:
                         updated += 1
                     if changed_note:
                         data_updates.append(changed_note)
+            except discord.HTTPException as exc:
+                if _is_active_thread_cap(exc):
+                    # A guild-wide wall: every further create fails the same
+                    # way. Stop now (don't hammer the API through the rest of
+                    # the catalog) and surface it — freeing active threads
+                    # lets the next run continue.
+                    hit_active_cap = True
+                    log.warning(
+                        "Missions forum: Discord's 1000 active-thread guild cap "
+                        "is reached; stopping this run at %d created. Free "
+                        "active threads (archived posts don't count) to resume.",
+                        created,
+                    )
+                    break
+                failed += 1
+                log.exception("Mission forum post %s failed", key)
+                continue
             except Exception:  # noqa: BLE001 — one bad mission must never
                 # abort the whole run (an aborted run used to stall the
                 # backfill until the next day's sync).
@@ -457,7 +502,7 @@ class MissionsForumService:
             announced += await self._announce_updates(data_updates)
 
         await self._repo.touch_seen(seen_unchanged)
-        if not capped and not failed and not stopped:
+        if not capped and not failed and not stopped and not hit_active_cap:
             # Whole catalog covered in one run: the backfill is done and
             # future creations are genuinely new missions.
             await self._state.set(STATE_BACKFILL_DONE, updated_stamp)
@@ -465,6 +510,7 @@ class MissionsForumService:
             created=created, updated=updated, skipped=skipped, failed=failed,
             announced=announced, adopted=adopted, tags_created=tags_created,
             capped=capped, cap=cap, total=len(missions), stopped=stopped,
+            hit_active_cap=hit_active_cap,
         )
         await self._state.set(
             STATE_LAST_SYNC,
@@ -501,7 +547,13 @@ class MissionsForumService:
         try:
             await thread.edit(archived=True)
         except discord.HTTPException as exc:
-            log.debug("Could not archive mission thread %s: %s", thread.id, exc)
+            # Loud, not debug: an unarchived post keeps counting toward the
+            # 1000 active-thread guild cap and eventually stalls the backfill.
+            log.warning(
+                "Could not archive mission thread %s (%s); it stays ACTIVE. If "
+                "this persists, grant the bot 'Manage Threads' in the forum.",
+                thread.id, exc,
+            )
 
     async def _update_post(
         self, forum, mission: dict, row, digest: str, stamp: str, base_url: str
@@ -757,9 +809,17 @@ class MissionsForumService:
                 f"post cap reached ({counts.get('cap')}/run) — "
                 "the rest follows on the next sync"
             )
+        if counts.get("hit_active_cap"):
+            lines.append(
+                "⛔ Discord's 1000 active-thread guild limit was hit — no new "
+                "post can be created until active threads are freed. Archived "
+                "posts don't count; grant the bot 'Manage Threads' so it can "
+                "archive, then the backfill resumes."
+            )
         changed = bool(
             created or updated or counts.get("failed", 0)
             or counts.get("tags_created") or counts.get("adopted")
+            or counts.get("hit_active_cap")
         )
         return {**counts, "error": None, "lines": lines, "changed": changed}
 

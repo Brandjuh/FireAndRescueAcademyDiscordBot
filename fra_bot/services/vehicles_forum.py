@@ -26,6 +26,7 @@ from ..config import Config
 from ..db.database import Database
 from ..db.repos import StateRepo, VehiclesForumRepo
 from ..mc import vehicles_catalog as catalog
+from .missions_forum import _is_active_thread_cap
 
 log = logging.getLogger(__name__)
 
@@ -419,11 +420,24 @@ class VehiclesForumService:
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
 
         created = updated = skipped = failed = announced = 0
-        capped = stopped = False
+        capped = stopped = hit_active_cap = False
         seen_unchanged: list[str] = []
         seen_keys: set[str] = set()
         data_updates: list[dict] = []
         writes = 0
+
+        # Self-heal: re-archive stray active posts we own (a prior archive
+        # failure leaves a post ACTIVE, counting toward Discord's 1000
+        # active-thread guild cap and stalling the backfill). No-op once every
+        # post is archived.
+        healed = 0
+        for stray_key, stray_thread in orphans.items():
+            if healed >= cap:
+                break
+            if await self._repo.get(stray_key) is not None:
+                await self._archive(stray_thread)
+                healed += 1
+                await self._pause(healed)
 
         vehicles.sort(key=lambda v: v["id"])
         for vehicle in vehicles:
@@ -464,6 +478,21 @@ class VehiclesForumService:
                         updated += 1
                     if changed_note:
                         data_updates.append(changed_note)
+            except discord.HTTPException as exc:
+                if _is_active_thread_cap(exc):
+                    # Guild-wide wall: every further create fails alike. Stop
+                    # rather than hammer the API through the rest of the run.
+                    hit_active_cap = True
+                    log.warning(
+                        "Vehicles forum: Discord's 1000 active-thread guild cap "
+                        "is reached; stopping this run at %d created. Free "
+                        "active threads (archived posts don't count) to resume.",
+                        created,
+                    )
+                    break
+                failed += 1
+                log.exception("Vehicle forum post %s failed", key)
+                continue
             except Exception:  # noqa: BLE001 — one bad vehicle must never abort
                 failed += 1
                 log.exception("Vehicle forum post %s failed", key)
@@ -475,12 +504,13 @@ class VehiclesForumService:
             announced += await self._announce_updates(data_updates)
 
         await self._repo.touch_seen(seen_unchanged)
-        if not capped and not failed and not stopped:
+        if not capped and not failed and not stopped and not hit_active_cap:
             await self._state.set(STATE_BACKFILL_DONE, stamp)
         summary = self._summary(
             created=created, updated=updated, skipped=skipped, failed=failed,
             announced=announced, adopted=adopted, tags_created=tags_created,
             capped=capped, cap=cap, total=len(vehicles), stopped=stopped,
+            hit_active_cap=hit_active_cap,
         )
         await self._state.set(
             STATE_LAST_SYNC,
@@ -513,7 +543,13 @@ class VehiclesForumService:
         try:
             await thread.edit(archived=True)
         except discord.HTTPException as exc:
-            log.debug("Could not archive vehicle thread %s: %s", thread.id, exc)
+            # Loud, not debug: an unarchived post keeps counting toward the
+            # 1000 active-thread guild cap and eventually stalls the backfill.
+            log.warning(
+                "Could not archive vehicle thread %s (%s); it stays ACTIVE. If "
+                "this persists, grant the bot 'Manage Threads' in the forum.",
+                thread.id, exc,
+            )
 
     async def _update_post(
         self, forum, vehicle: dict, row, digest: str, stamp: str
@@ -752,9 +788,17 @@ class VehiclesForumService:
                 f"post cap reached ({counts.get('cap')}/run) — "
                 "the rest follows on the next sync"
             )
+        if counts.get("hit_active_cap"):
+            lines.append(
+                "⛔ Discord's 1000 active-thread guild limit was hit — no new "
+                "post can be created until active threads are freed. Archived "
+                "posts don't count; grant the bot 'Manage Threads' so it can "
+                "archive, then the backfill resumes."
+            )
         changed = bool(
             created or updated or counts.get("failed", 0)
             or counts.get("tags_created") or counts.get("adopted")
+            or counts.get("hit_active_cap")
         )
         return {**counts, "error": None, "lines": lines, "changed": changed}
 

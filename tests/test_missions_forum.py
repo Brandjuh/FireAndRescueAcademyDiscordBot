@@ -743,6 +743,55 @@ async def test_post_cap_is_respected(db):
     assert len(forum.threads) == 3
 
 
+def test_is_active_thread_cap_detects_the_wall():
+    from fra_bot.services.missions_forum import _is_active_thread_cap
+
+    assert _is_active_thread_cap(
+        _http_400("Maximum number of active threads reached (error code: 160006)")
+    ) is True
+    assert _is_active_thread_cap(_http_400("some unrelated 400")) is False
+    assert _is_active_thread_cap(ValueError("not even http")) is False
+
+
+async def test_active_thread_cap_stops_run_without_hammering(db):
+    """The guild's 1000-active-thread wall must stop the run cleanly — not be
+    counted as ~N per-mission failures that hammer the API every catch-up."""
+    service, forum, _, _ = _service(db, _missions())
+    original = forum.create_thread
+    calls = {"n": 0}
+
+    async def walled(**kwargs):
+        calls["n"] += 1
+        if calls["n"] >= 2:  # first post lands, the guild is then "full"
+            raise _http_400("Maximum number of active threads reached")
+        return await original(**kwargs)
+
+    forum.create_thread = walled
+    summary = await service.sync()
+    assert summary["created"] == 1
+    assert summary["failed"] == 0            # the wall is not a per-mission failure
+    assert summary["hit_active_cap"] is True
+    assert calls["n"] == 2                   # stopped at the wall, did not try the rest
+    assert any("active-thread" in line for line in summary["lines"])
+    # Backfill must NOT be marked done while the wall stands.
+    assert any("backfill: ⏳" in line for line in await service.status_lines())
+
+
+async def test_self_heal_rearchives_stray_active_posts(db):
+    """A post left ACTIVE by a past archive failure keeps counting toward the
+    1000-thread cap; the next sync re-archives the posts we own so room frees
+    up even without any data change."""
+    service, forum, _, _ = _service(db, _missions())
+    await service.sync()
+    assert all(t.archived for t in forum.threads)
+    # Simulate three posts whose archive step failed before (left active).
+    for thread in forum.threads:
+        thread.archived = False
+    summary = await service.sync()                 # data unchanged → no writes
+    assert summary["created"] == 0 and summary["updated"] == 0
+    assert all(t.archived for t in forum.threads)  # self-healed back to archived
+
+
 async def test_new_mission_announced_when_enabled(db):
     payload = _missions()[:2]
     cfg = _cfg(announce_new=True)
