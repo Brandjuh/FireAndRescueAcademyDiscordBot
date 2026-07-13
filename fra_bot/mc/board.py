@@ -183,6 +183,39 @@ class BoardClient:
             walked += 1
         return found
 
+    async def find_bot_posts(
+        self, thread_id: int, markers: list[str], *, max_pages: int | None = None
+    ) -> dict[str, int | None]:
+        """The newest post id we authored for EACH marker, in ONE walk back
+        from the latest page — so an ordering check doesn't cost a separate
+        walk per marker. Missing markers map to ``None``."""
+        base_path = f"/alliance_threads/{thread_id}"
+        newest = await self.fetch_latest_page(thread_id)
+        uid = newest.current_user_id
+        found: dict[str, int | None] = {m: None for m in markers}
+
+        def _scan(page: BoardThreadPage) -> None:
+            for post in page.posts:
+                if uid is not None and post.author_mc_id != uid:
+                    continue
+                for marker in markers:
+                    current = found[marker]
+                    if _marker_in(post.content, marker) and (
+                        current is None or post.post_id > current
+                    ):
+                        found[marker] = post.post_id
+
+        _scan(newest)
+        limit = max_pages or self.MAX_PAGES_PER_POLL
+        page_number = newest.last_page - 1
+        walked = 1
+        while any(v is None for v in found.values()) and page_number >= 1 and walked < limit:
+            html = await self._client.fetch_page(f"{base_path}?page={page_number}")
+            _scan(parse_board_thread_page(html))
+            page_number -= 1
+            walked += 1
+        return found
+
     async def create_post_get_id(self, thread_id: int, content: str) -> int | None:
         """Post a reply and return its new post id (found by matching the
         first line back on the thread), or None (see ``last_error``)."""

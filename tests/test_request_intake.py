@@ -658,19 +658,22 @@ async def test_courses_for_prefers_the_live_harvest(db):
     from fra_bot.services.trainings import TRAINING_COURSES_STATE_KEY
 
     await StateRepo(db).set(TRAINING_COURSES_STATE_KEY, json.dumps({
-        "courses": {"fire": {"Hotshot Crew Training": 0, "HazMat": 3}},
+        "courses": {"fire": {"Brand-New Course": 0, "HazMat": 3}},
         "at": 1,
     }))
     cog = _requests_cog(db)
     try:
         fire = dict(await cog.courses_for("fire"))
-        assert "Hotshot Crew Training" in fire
-        assert "Airport Firefighter" not in fire  # live list is authoritative
+        assert "Brand-New Course" in fire
+        # The live list is authoritative: a built-in course absent from the
+        # harvest is NOT shown.
+        assert "Technical Rescue Training" not in fire
         police = await cog.courses_for("police")
         assert police  # no harvest yet -> built-in catalog fallback
-        # Reminder duration: live 0 falls back to the built-in catalog.
         assert await cog.course_days("fire", "HazMat") == 3
-        assert await cog.course_days("fire", "Hotshot Crew Training") == 0
+        # A live course with unknown (0) duration, absent from the built-in
+        # catalog, stays 0 (no duration to fall back to).
+        assert await cog.course_days("fire", "Brand-New Course") == 0
     finally:
         cog.cog_unload()
 

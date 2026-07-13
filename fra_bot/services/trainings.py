@@ -285,6 +285,64 @@ class TrainingsService(BoardRequestService):
     def _section_refreshed_key(self, key: str) -> str:
         return f"board_guide_refreshed:training:{self.thread_id}:{key}"
 
+    def _guide_order_key(self) -> str:
+        return f"board_guide_order_checked:training:{self.thread_id}"
+
+    def _guide_markers_in_order(self) -> list[str]:
+        """The five guide markers in the order they must appear on the board."""
+        return [GUIDE_MARKER] + [_section_marker(key) for key in _AGENCY_ORDER]
+
+    async def _maybe_repair_guide_order(self, now_epoch: float) -> None:
+        """Ensure the guide posts sit in the canonical order and none is
+        missing; rebuild them if not. A deleted post reappears at the BOTTOM
+        (out of order), so both faults are handled the same way: delete every
+        surviving guide post and clear its bookkeeping, and the create-or-edit
+        pass recreates them all top-to-bottom in order. The board walk this
+        needs is throttled to at most hourly, so it never burdens the poll."""
+        raw = await self.state.get(self._guide_order_key())
+        try:
+            last = float(raw) if raw else 0.0
+        except (TypeError, ValueError):
+            last = 0.0
+        if (now_epoch - last) < 3600:
+            return
+
+        markers = self._guide_markers_in_order()
+        try:
+            found = await self.board.find_bot_posts(self.thread_id, markers)
+        except MissionChiefError as exc:
+            log.warning("training: could not check guide order on %s: %s",
+                        self.thread_id, exc)
+            return
+        await self.state.set(self._guide_order_key(), repr(now_epoch))
+
+        ids = [found.get(marker) for marker in markers]
+        present = [pid for pid in ids if pid is not None]
+        in_order = None not in ids and all(a < b for a, b in zip(present, present[1:]))
+        if in_order:
+            return  # all five present and in canonical order — nothing to do
+
+        log.info(
+            "training: guide posts out of order or missing on thread %s — "
+            "rebuilding in canonical order", self.thread_id,
+        )
+        for pid in present:
+            try:
+                await self.board.delete_post(self.thread_id, pid)
+            except MissionChiefError as exc:
+                log.warning("training: could not delete guide post %s: %s", pid, exc)
+        for id_key, hash_key, refreshed_key in (
+            (self._guide_id_key(), self._guide_hash_key(), self._guide_refreshed_key()),
+            *(
+                (self._section_id_key(key), self._section_hash_key(key),
+                 self._section_refreshed_key(key))
+                for key in _AGENCY_ORDER
+            ),
+        ):
+            await self.state.delete(id_key)
+            await self.state.delete(hash_key)
+            await self.state.delete(refreshed_key)
+
     async def _ensure_guide(self, *, quick: bool = False) -> None:
         """Maintain the guide as SEVERAL posts, like the old bot: one
         overview (with live availability, refreshed hourly) plus one post
@@ -299,6 +357,11 @@ class TrainingsService(BoardRequestService):
         from ..mc.board import ensure_guide_post, guide_now
 
         now = guide_now()
+        # Keep the five posts in the canonical order (overview → Fire → Police
+        # → EMS → Coastal) and rebuild them if one was deleted or the order
+        # drifted — BEFORE the create-or-edit pass, which then recreates any
+        # that were cleared, in order.
+        await self._maybe_repair_guide_order(now)
         body = self.guide_body()
         try:
             await ensure_guide_post(

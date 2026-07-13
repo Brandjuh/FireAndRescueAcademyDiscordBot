@@ -474,7 +474,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 board_enabled=bool(
                     _get(raw, "automation", "mission", "board_enabled", default=False)
                 ),
-                thread_id=int(_get(raw, "automation", "mission", "thread_id", default=15293)),
+                thread_id=int(_get(raw, "automation", "mission", "thread_id", default=15310)),
                 interval=int(_get(raw, "automation", "mission", "interval", default=5)),
                 panel_channel_id=int(
                     _get(raw, "automation", "mission", "panel_channel_id", default=0)
