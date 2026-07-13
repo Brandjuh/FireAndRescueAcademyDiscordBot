@@ -27,12 +27,17 @@ import logging
 
 from ..config import Config
 from ..db.database import Database, utcnow_iso
-from ..db.repos import MembersRepo, RunsRepo, TaxWarningsRepo
+from ..db.repos import MembersRepo, RunsRepo, StateRepo, TaxWarningsRepo
 from ..mc.client import MissionChiefClient
 
 log = logging.getLogger(__name__)
 
 MAX_WARNINGS = 3
+# In-game PM delivery isn't reliably confirmed by the game (it only errors on
+# a hard block), and some accounts are simply undeliverable (blocked / ghost).
+# Retry a warning that can't be confirmed a few times, then give up so the bot
+# doesn't retry it every pass forever and re-spam the admin channel.
+MAX_SEND_ATTEMPTS = 3
 
 # The reference bot's in-game PM presets, verbatim.
 WARNING_PRESETS: dict[int, tuple[str, str]] = {
@@ -118,7 +123,12 @@ class TaxWarningService:
         self.members = MembersRepo(db)
         self.warnings = TaxWarningsRepo(db)
         self.runs = RunsRepo(db)
+        self.state = StateRepo(db)
         self._auto = cfg.automation.tax_warnings
+
+    @staticmethod
+    def _attempts_key(mc_user_id: int) -> str:
+        return f"taxwarn_send_attempts:{mc_user_id}"
 
     @property
     def dry_run(self) -> bool:
@@ -178,7 +188,13 @@ class TaxWarningService:
             if sent >= self._auto.max_per_run:
                 break
             rate = member["contribution_rate"]
-            if rate is None or rate >= self._auto.min_rate:
+            attempts_key = self._attempts_key(member["mc_user_id"])
+            if rate is not None and rate >= self._auto.min_rate:
+                # Donation is OK now — clear any earlier give-up so a later dip
+                # gets a fresh set of delivery attempts.
+                await self.state.delete(attempts_key)
+                continue
+            if rate is None:
                 continue
             hours_member = _hours_since(member["first_seen_at"], now)
             if hours_member is not None and hours_member < self._auto.grace_hours:
@@ -193,6 +209,11 @@ class TaxWarningService:
             gap = _hours_since(state["last_warning_at"] if state else None, now)
             if gap is not None and gap < self._auto.min_days_between * 24:
                 continue  # don't rush the member
+            attempts = int(await self.state.get(attempts_key) or 0)
+            if attempts >= MAX_SEND_ATTEMPTS:
+                # Gave up delivering to this member (reported when the cap was
+                # hit). Stay silent until they fix their rate (clears above).
+                continue
             level = count + 1
             subject, body = WARNING_PRESETS[level]
             if self.dry_run:
@@ -216,11 +237,26 @@ class TaxWarningService:
                 body.format(username=member["name"]),
             )
             if not ok:
-                lines.append(
-                    f"⚠️ {member['name']}: warning {level} could NOT be "
-                    f"sent — {detail}"
-                )
+                # The game rarely confirms delivery (it only errors on a hard
+                # block), and some accounts are undeliverable. Count the try;
+                # after MAX_SEND_ATTEMPTS, give up instead of retrying forever.
+                attempts += 1
+                await self.state.set(attempts_key, str(attempts))
+                if attempts >= MAX_SEND_ATTEMPTS:
+                    lines.append(
+                        f"🚫 {member['name']}: warning {level} could not be "
+                        f"delivered after {MAX_SEND_ATTEMPTS} attempts — giving "
+                        "up (the recipient likely blocked the bot or is a ghost "
+                        f"account). Last reason: {detail}"
+                    )
+                else:
+                    lines.append(
+                        f"⚠️ {member['name']}: warning {level} not confirmed "
+                        f"(attempt {attempts}/{MAX_SEND_ATTEMPTS}, will retry) — "
+                        f"{detail}"
+                    )
                 continue
+            await self.state.delete(attempts_key)  # delivered — reset the counter
             await self.warnings.record_warning(
                 member["mc_user_id"], str(member["name"]), count=level,
             )
