@@ -108,6 +108,65 @@ async def test_low_rate_member_gets_reminder_then_official_warnings(db, monkeypa
     assert "Warning" in sent[1][1]
 
 
+async def test_undeliverable_warning_gives_up_after_max_attempts(db, monkeypatch):
+    """An unconfirmed/undeliverable PM (ghost or blocked account) is retried a
+    few times, then abandoned — never retried every pass forever."""
+    from fra_bot.services.tax_warnings import MAX_SEND_ATTEMPTS
+
+    calls = {"n": 0}
+
+    async def fake_send(client, recipient, subject, body):
+        calls["n"] += 1
+        return False  # the game never confirms delivery
+
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
+    await _add_member(db, 1, "Ghost", 1.0)
+    svc = TaxWarningService(_cfg(), FakeClient(), db)
+
+    for i in range(1, MAX_SEND_ATTEMPTS + 1):
+        lines = await svc.scan()
+        assert calls["n"] == i
+        if i < MAX_SEND_ATTEMPTS:
+            assert any(f"attempt {i}/{MAX_SEND_ATTEMPTS}" in ln for ln in lines)
+        else:
+            assert any("giving up" in ln for ln in lines)
+
+    # Given up: later scans neither send nor spam the admin.
+    assert await svc.scan() == []
+    assert calls["n"] == MAX_SEND_ATTEMPTS
+
+
+async def test_giveup_clears_when_member_fixes_rate(db, monkeypatch):
+    """After giving up, a member who fixes their donation and later dips again
+    gets a fresh set of attempts (the give-up is not permanent)."""
+    from fra_bot.services.tax_warnings import MAX_SEND_ATTEMPTS
+
+    result = {"ok": False}
+
+    async def fake_send(client, recipient, subject, body):
+        return result["ok"]
+
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
+    await _add_member(db, 1, "Ghost", 1.0)
+    svc = TaxWarningService(_cfg(), FakeClient(), db)
+
+    for _ in range(MAX_SEND_ATTEMPTS):
+        await svc.scan()          # burn through the attempts -> give up
+    assert await svc.scan() == []  # silent now
+
+    # Donation fixed -> give-up cleared; a later dip warns again (now sending works).
+    await db.execute("UPDATE members SET contribution_rate = 10 WHERE mc_user_id = 1")
+    await svc.scan()
+    await db.execute("UPDATE members SET contribution_rate = 1 WHERE mc_user_id = 1")
+    result["ok"] = True
+    lines = await svc.scan()
+    assert any("warning 1/3 sent to Ghost" in ln for ln in lines)
+
+
 async def test_sent_warning_mirrors_to_the_dm_forum_at_send_time(db, monkeypatch):
     """Outgoing-only conversations may never appear on the inbox page the
     mirror scan reads — every sent warning mirrors immediately via the
