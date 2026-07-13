@@ -108,14 +108,22 @@ def _service(db, dry_run):
 class _GuideBoard:
     """Records guide find/create/edit/delete calls to test find-or-edit."""
 
-    def __init__(self, *, existing=None):
+    def __init__(self, *, existing=None, order_ids=None):
         self.existing = existing
+        # {marker: id|None} the order check sees; None -> return the five posts
+        # already in canonical order (so the repair is a no-op for plain tests).
+        self.order_ids = order_ids
         self.created: list[tuple[int, str]] = []
         self.edited: list[tuple[int, str]] = []
         self.deleted: list[tuple[int, int]] = []
 
     async def find_bot_post(self, thread_id, marker, *, max_pages=None):
         return self.existing
+
+    async def find_bot_posts(self, thread_id, markers, *, max_pages=None):
+        if self.order_ids is not None:
+            return {m: self.order_ids.get(m) for m in markers}
+        return {m: 100 + i for i, m in enumerate(markers)}  # already in order
 
     async def create_post_get_id(self, thread_id, content):
         self.created.append((int(thread_id), content))
@@ -508,6 +516,9 @@ async def test_force_guide_reports_failure_reason(db):
         async def find_bot_post(self, thread_id, marker, *, max_pages=None):
             return None
 
+        async def find_bot_posts(self, thread_id, markers, *, max_pages=None):
+            return {m: None for m in markers}
+
         async def create_post_get_id(self, thread_id, content):
             self.last_error = (
                 "no reply form/token on the thread — can the bot's "
@@ -579,6 +590,73 @@ async def test_training_guide_skips_availability_fetch_when_throttled(db):
     assert board.edited == [(77, await svc._overview_content(0.0))] or (
         len(board.edited) == 1 and board.edited[0][0] == 77
     )
+
+
+def _guide_markers():
+    from fra_bot.services.trainings import (
+        GUIDE_MARKER, _AGENCY_ORDER, _section_marker,
+    )
+    return [GUIDE_MARKER] + [_section_marker(k) for k in _AGENCY_ORDER]
+
+
+async def test_guide_order_leaves_ordered_posts_untouched(db):
+    from fra_bot.mc.board import guide_now
+
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    order = {m: 10 + i for i, m in enumerate(_guide_markers())}  # strictly increasing
+    board = _GuideBoard(order_ids=order)
+    svc.board = board
+    await svc._maybe_repair_guide_order(guide_now())
+    assert board.deleted == []  # already in order -> no rebuild
+
+
+async def test_guide_order_rebuilds_when_out_of_order(db):
+    from fra_bot.mc.board import guide_now
+
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    markers = _guide_markers()
+    # Police (12) sits BEFORE Fire (20): a post was deleted and reposted at the
+    # bottom, breaking the canonical order.
+    order = {markers[0]: 10, markers[1]: 20, markers[2]: 12,
+             markers[3]: 13, markers[4]: 14}
+    # Prime stored ids so the rebuild must clear them.
+    await svc.state.set(svc._guide_id_key(), "10")
+    board = _GuideBoard(order_ids=order)
+    svc.board = board
+    await svc._maybe_repair_guide_order(guide_now())
+    # Every surviving guide post is deleted so the ensure pass recreates them
+    # top-to-bottom in order; bookkeeping is cleared.
+    assert sorted(pid for _, pid in board.deleted) == [10, 12, 13, 14, 20]
+    assert await svc.state.get(svc._guide_id_key()) is None
+
+
+async def test_guide_order_rebuilds_when_a_post_is_missing(db):
+    from fra_bot.mc.board import guide_now
+
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    markers = _guide_markers()
+    order = {markers[0]: 10, markers[1]: 11, markers[2]: None,  # EMS deleted
+             markers[3]: 13, markers[4]: 14}
+    board = _GuideBoard(order_ids=order)
+    svc.board = board
+    await svc._maybe_repair_guide_order(guide_now())
+    assert sorted(pid for _, pid in board.deleted) == [10, 11, 13, 14]
+
+
+async def test_guide_order_check_is_throttled(db):
+    from fra_bot.mc.board import guide_now
+
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    board = _GuideBoard(order_ids={})  # every marker missing -> would rebuild
+    svc.board = board
+    now = guide_now()
+    await svc.state.set(svc._guide_order_key(), repr(now))  # just checked
+    await svc._maybe_repair_guide_order(now + 60)            # 1 min later
+    assert board.deleted == []  # throttled: no board walk, no rebuild
 
 
 async def test_live_success_reply_uses_reference_format_and_sends_pm(db):
