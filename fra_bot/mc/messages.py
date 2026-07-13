@@ -9,6 +9,7 @@ form-layout tweak degrades to a clear error instead of a wrong POST.
 
 from __future__ import annotations
 
+import html as html_lib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -147,6 +148,45 @@ def message_was_sent(html: str, final_url: str = "") -> bool:
     return SUCCESS_MARKER in text.lower()
 
 
+# A re-rendered compose form usually carries MissionChief's own reason in an
+# alert/flash box or a Rails error list; surface it so a failed send reports
+# "the recipient could not be found" instead of the page's boilerplate header.
+_ERROR_HINT_RE = re.compile(
+    r"could ?n[o']?t|not (be )?found|does ?n[o']?t exist|no such|unknown|"
+    r"invalid|required|empty|blocked|not allowed|no user|recipient",
+    re.IGNORECASE,
+)
+
+
+def extract_form_error(html: str) -> str | None:
+    """MissionChief's own error/flash text from a re-rendered form, or None —
+    preferring a message that reads like an error over a generic banner."""
+    soup = BeautifulSoup(html or "", "lxml")
+    texts: list[str] = []
+    seen: set[str] = set()
+    for element in soup.select(
+        ".alert, .flash, .error, .error_explanation, "
+        "[class*=alert], [class*=flash], [class*=error], [id*=flash], [id*=alert]"
+    ):
+        text = element.get_text(" ", strip=True)
+        if text and 3 <= len(text) <= 300 and text not in seen:
+            seen.add(text)
+            texts.append(text)
+    for text in texts:
+        if _ERROR_HINT_RE.search(text):
+            return text
+    return texts[0] if texts else None
+
+
+def normalize_recipient(recipient: str) -> str:
+    """Clean a scraped roster name into what the compose form expects: HTML
+    entities decoded (``&amp;`` → ``&``) and surrounding whitespace trimmed.
+    A stray trailing space or an entity is invisible in Discord but makes
+    MissionChief's exact-name recipient lookup fail (the send then silently
+    re-renders the form)."""
+    return html_lib.unescape(str(recipient or "")).strip()
+
+
 def summarize_response(text: str, *, limit: int = 350) -> str:
     """A short, token-redacted plain-text digest of a response for logs."""
     text = re.sub(
@@ -189,6 +229,7 @@ async def send_new_message(
     """Start a new in-game PM conversation. Returns (ok, detail,
     conversation_id). Success requires the game to CONFIRM delivery, not
     just an HTTP 2xx (a validation failure re-renders the form with 200)."""
+    recipient = normalize_recipient(recipient)
     try:
         form = parse_message_form(await client.fetch_page(NEW_MESSAGE_PATH))
         status, html, final_url = await client.post_form(
@@ -203,14 +244,16 @@ async def send_new_message(
         log.warning("in-game PM to %s rejected (HTTP %s)", recipient, status)
         return False, f"HTTP {status}", None
     if not message_was_sent(html, final_url):
-        digest = summarize_response(html)
+        # Prefer the game's own error text (e.g. recipient not found) over the
+        # page header, so a failure is actionable instead of opaque.
+        reason = extract_form_error(html) or summarize_response(html)
         log.warning(
             "in-game PM to %s NOT confirmed (HTTP %s, landed on %s): %s",
-            recipient, status, final_url or "?", digest,
+            recipient, status, final_url or "?", reason,
         )
         return (
             False,
-            f"the game did not confirm delivery ({digest[:120] or 'empty'})",
+            f"the game did not confirm delivery ({reason[:160] or 'empty'})",
             None,
         )
     log.info("in-game PM sent to %s (%s)", recipient, subject)
