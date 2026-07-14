@@ -53,6 +53,7 @@ from ..mc.board import (
 )
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
+from ..mc.parsers.logs import parse_logs_page
 from ..mc.parsers.events import (
     EVENT_KINDS,
     EVENT_TYPES,
@@ -133,11 +134,31 @@ REFUSED_GIVE_UP_HOURS = 48
 # State key for the alliance-busy backoff window.
 STATE_START_BACKOFF = "alliance_start_backoff_until"
 
+# Verifying a free start: MissionChief can reflect the advanced free-mission
+# cooldown a MOMENT after the start, so a first "unchanged" reading may be a
+# false negative — which would make the rotation re-fire the same mission the
+# next window. Re-check a few times with a short pause before concluding, and
+# if the cooldown stays unreadable fall back to the alliance log's "mission
+# started" line (an independent record). A refused start arms a 60-min backoff,
+# so this extra work happens at most about once an hour.
+VERIFY_RETRY_ATTEMPTS = 3
+VERIFY_RETRY_DELAY_SECONDS = 3.0
+# A "mission started" log line this fresh confirms our just-submitted start.
+VERIFY_LOG_WINDOW_MINUTES = 15
+ALLIANCE_LOG_PATH = "/alliance_logfiles"
+
 
 def start_backoff_iso(minutes: int = START_BACKOFF_MINUTES) -> str:
     return (
         datetime.datetime.now(datetime.timezone.utc)
         + datetime.timedelta(minutes=minutes)
+    ).isoformat(timespec="seconds")
+
+
+def _iso_minutes_ago(minutes: int) -> str:
+    return (
+        datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(minutes=minutes)
     ).isoformat(timespec="seconds")
 
 
@@ -1253,7 +1274,7 @@ class MissionScheduler:
             # is re-fired on the next window (the "same mission two days in a
             # row" a lost response would otherwise cause). If we cannot prove
             # it started, retry as before.
-            verified = await self._verify_started(new_path, latitude, longitude, free_before)
+            verified = await self._verify_started(new_path, latitude, longitude, free_before, kind=kind)
             if verified:
                 await self.set_start_backoff()
                 return StartOutcome(
@@ -1282,7 +1303,7 @@ class MissionScheduler:
                 f"(coins spent — verify in game)",
             )
 
-        verified = await self._verify_started(new_path, latitude, longitude, free_before)
+        verified = await self._verify_started(new_path, latitude, longitude, free_before, kind=kind)
         await self.set_start_backoff()
         if verified is False:
             return StartOutcome(
@@ -1389,22 +1410,63 @@ class MissionScheduler:
         )
 
     async def _verify_started(
-        self, new_path: str, lat: float, lng: float, free_before: str | None
+        self, new_path: str, lat: float, lng: float, free_before: str | None,
+        *, kind: str = "large",
     ) -> bool | None:
         """Confirm a start via an advanced free-mission cooldown. True =
-        confirmed, False = cooldown unchanged (not started), None = unknown."""
+        confirmed, False = cooldown unchanged (not started), None = unknown.
+
+        MissionChief sometimes reflects the advanced cooldown a moment AFTER
+        the start, so a first "unchanged" reading can be a false negative that
+        would make the rotation re-fire the same mission next window. Re-check
+        a few times with a short pause before concluding; if the cooldown
+        stays unreadable, ask the alliance log whether a mission just started
+        (an independent "…started" line)."""
+        result: bool | None = None
+        for attempt in range(VERIFY_RETRY_ATTEMPTS):
+            try:
+                check = parse_event_form(
+                    await self.client.fetch_page(f"{new_path}?tlat={lat}&tlng={lng}")
+                )
+            except MissionChiefError:
+                result = None
+            else:
+                free_after = check.last_free_at
+                if free_after is None:
+                    result = None
+                elif free_before is None:
+                    result = True
+                else:
+                    result = free_after > free_before
+            if result:                       # confirmed — no need to wait more
+                return True
+            if attempt < VERIFY_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(VERIFY_RETRY_DELAY_SECONDS)
+        # Cooldown never readable → last-resort independent check: did a
+        # matching "…started" line just land in the alliance log?
+        if result is None and await self._started_in_log(kind):
+            return True
+        return result
+
+    async def _started_in_log(self, kind: str) -> bool:
+        """Independent confirmation that a start landed: a fresh
+        ``large scale mission started`` / ``alliance event started`` line at
+        the top of the alliance log. Used only when the cooldown signal is
+        unreadable, so it never overrides a definitive 'not started'."""
+        want = "alliance_event_started" if kind == "event" else "large_mission_started"
+        cutoff = _iso_minutes_ago(VERIFY_LOG_WINDOW_MINUTES)
         try:
-            check = parse_event_form(
-                await self.client.fetch_page(f"{new_path}?tlat={lat}&tlng={lng}")
+            page = parse_logs_page(
+                await self.client.fetch_page(f"{ALLIANCE_LOG_PATH}?page=1")
             )
         except MissionChiefError:
-            return None
-        free_after = check.last_free_at
-        if free_after is None:
-            return None
-        if free_before is None:
-            return True
-        return free_after > free_before
+            return False
+        for row in page.rows:                # newest first
+            if row.get("action_key") != want:
+                continue
+            event_at = row.get("event_at")
+            return event_at is None or event_at >= cutoff  # freshest match
+        return False
 
     # -- helpers ---------------------------------------------------------
 

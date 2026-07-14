@@ -20,6 +20,15 @@ from fra_bot.mc.parsers.mission_spec import (
 from fra_bot.services.missions import MissionScheduler
 
 
+@pytest.fixture(autouse=True)
+def _no_verify_sleep(monkeypatch):
+    # The start-verification re-checks the cooldown with a real pause between
+    # attempts; zero it so the suite never actually sleeps.
+    monkeypatch.setattr(
+        "fra_bot.services.missions.VERIFY_RETRY_DELAY_SECONDS", 0
+    )
+
+
 # --------------------------------------------------------------------------
 # Dedicated-board intake: a bare location is the request (no trigger word)
 # --------------------------------------------------------------------------
@@ -600,6 +609,106 @@ async def test_rotation_lost_post_after_start_is_confirmed_not_refired(db):
     row = await sched.rotation.get(rid)
     assert row["last_started_at"] is not None             # advanced -> won't re-fire
     assert row["start_count"] == 1
+
+
+async def test_rotation_verify_retries_when_cooldown_lags(db):
+    # The free cooldown reflects the start only on the SECOND verification
+    # fetch. A single early check would read "not started" and re-fire the same
+    # mission next window; the re-check must catch the delayed advance.
+    class LaggyVerifyClient(FakeClient):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.verify_fetches = 0
+
+        async def fetch_page(self, path, *, referer=None):
+            self.fetched.append(path)
+            if self.posted:                       # a verification fetch
+                self.verify_fetches += 1
+                if self.verify_fetches == 1:
+                    return self.large_html        # still stale (== free_before)
+                return _STARTED                   # cooldown advanced now
+            return self.large_html
+
+    client = LaggyVerifyClient(_ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    rid = await sched.rotation.add(location_text="CityX", kind="large",
+                                   mission_source="preset", latitude=1.0, longitude=2.0,
+                                   address="CityX", created_by="admin")
+    handled = await sched._process_rotation()
+    assert handled == 1                                   # confirmed on re-check
+    row = await sched.rotation.get(rid)
+    assert row["last_started_at"] is not None             # advanced -> won't re-fire
+    assert client.verify_fetches >= 2                     # it did look again
+
+
+def _log_html(action_desc, when):
+    from fra_bot.mc.parsers.common import MC_TIMEZONE
+    ts = when.astimezone(MC_TIMEZONE).strftime("%B %d, %Y %H:%M")
+    return (
+        '<table class="table"><tbody>'
+        f'<tr><td>{ts}</td><td><a href="/profile/1">Admin</a></td>'
+        f'<td>{action_desc}</td></tr>'
+        '</tbody></table>'
+    )
+
+
+class _LogClient(FakeClient):
+    def __init__(self, log_html, *a, **k):
+        super().__init__(*a, **k)
+        self._log = log_html
+
+    async def fetch_page(self, path, *, referer=None):
+        self.fetched.append(path)
+        if "alliance_logfiles" in path:
+            return self._log
+        return self.large_html
+
+
+async def test_started_in_log_confirms_only_a_fresh_matching_line(db):
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    fresh = _LogClient(_log_html("large scale mission started", now))
+    assert await _scheduler(_cfg(dry_run=False), fresh, db)._started_in_log("large") is True
+
+    stale = _LogClient(_log_html("large scale mission started",
+                                 now - _dt.timedelta(hours=2)))
+    assert await _scheduler(_cfg(dry_run=False), stale, db)._started_in_log("large") is False
+
+    other = _LogClient(_log_html("removed a building", now))
+    assert await _scheduler(_cfg(dry_run=False), other, db)._started_in_log("large") is False
+
+
+async def test_verify_falls_back_to_log_when_cooldown_unreadable(db):
+    # Verify page has no readable cooldown (result stays None); the fresh
+    # "large scale mission started" log line still confirms the start.
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    no_cooldown_form = (
+        "<html><body><form action='/x' id='new_mission_position'>"
+        "<input name='authenticity_token' value='t'/></form></body></html>"
+    )
+
+    class NoCooldownVerifyClient(FakeClient):
+        def __init__(self, log_html, *a, **k):
+            super().__init__(*a, **k)
+            self._log = log_html
+
+        async def fetch_page(self, path, *, referer=None):
+            self.fetched.append(path)
+            if "alliance_logfiles" in path:
+                return self._log
+            if self.posted:
+                return no_cooldown_form           # verify: cooldown unreadable
+            return self.large_html                # initial: free_before set
+
+    client = NoCooldownVerifyClient(_log_html("large scale mission started", now), _ELIGIBLE)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    client.posted = True                          # pretend the POST already landed
+    verified = await sched._verify_started(
+        "/missionAllianceNew", 1.0, 2.0, "2019-07-01T12:00:00+00:00", kind="large"
+    )
+    assert verified is True
 
 
 # -- recurring promotion + next-up ------------------------------------------
