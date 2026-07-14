@@ -74,13 +74,15 @@ class _FakeBuildings:
         return self.funds, None
 
 
-def _cfg(*, dry_run=False, min_funds=2_000_000, address="Fixed Address"):
+def _cfg(*, dry_run=False, min_funds=2_000_000, address="Fixed Address",
+         autoscale=False):
     return SimpleNamespace(
         automation=SimpleNamespace(
             dry_run=dry_run,
             academy=SimpleNamespace(
                 enabled=True, role_id=0, interval=10,
                 address=address, min_alliance_funds=min_funds,
+                autoscale=autoscale,
             ),
         ),
     )
@@ -298,6 +300,144 @@ async def test_sweep_extensions_is_noop_in_dry_run(db):
     svc._upgrader = up
     assert await svc.sweep_extensions() == 0
     assert up.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Auto-scale: build a new academy when a discipline hits 0 free classrooms
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+
+
+async def _set_availability(svc, counts, *, age_s=0, complete=None):
+    at = int(_dt.datetime.now(_dt.timezone.utc).timestamp()) - age_s
+    if complete is None:
+        complete = {k: True for k in counts}       # every academy read OK
+    await svc.state.set(acad.AVAILABILITY_STATE_KEY,
+                        json.dumps({"counts": counts, "complete": complete, "at": at}))
+
+
+async def _open_academy_disciplines(db):
+    rows = await AutomationRepo(db).recent(50)
+    return [
+        json.loads(r["payload"])["academy"]
+        for r in rows
+        if r["kind"] == "academy" and r["status"] in ("pending", "waiting", "processing")
+    ]
+
+
+async def test_autoscale_off_is_noop(db):
+    svc, _ = _make(db, autoscale=False)
+    await _set_availability(svc, {"fire": 0, "police": 3, "ems": 2, "coastal": 1})
+    assert await svc.autoscale() == 0
+    assert await _open_academy_disciplines(db) == []
+
+
+async def test_autoscale_debounces_before_building(db):
+    svc, _ = _make(db, autoscale=True)
+    await _set_availability(svc, {"fire": 0, "police": 3, "ems": 2, "coastal": 1})
+    assert await svc.autoscale() == 0                 # 1st zero: debounce, no build
+    assert await _open_academy_disciplines(db) == []
+    await _set_availability(svc, {"fire": 0, "police": 3, "ems": 2, "coastal": 1})
+    assert await svc.autoscale() == 1                 # 2nd zero: builds
+    assert await _open_academy_disciplines(db) == ["fire"]
+
+
+async def test_autoscale_maps_ems_to_rescue(db):
+    svc, _ = _make(db, autoscale=True)
+    for _ in range(2):
+        await _set_availability(svc, {"fire": 5, "police": 3, "ems": 0, "coastal": 1})
+        await svc.autoscale()
+    assert await _open_academy_disciplines(db) == ["rescue"]
+
+
+async def test_autoscale_recovery_resets_the_streak(db):
+    svc, _ = _make(db, autoscale=True)
+    await _set_availability(svc, {"fire": 0, "police": 3, "ems": 2, "coastal": 1})
+    await svc.autoscale()                             # streak 1
+    await _set_availability(svc, {"fire": 4, "police": 3, "ems": 2, "coastal": 1})
+    await svc.autoscale()                             # recovered -> streak reset
+    await _set_availability(svc, {"fire": 0, "police": 3, "ems": 2, "coastal": 1})
+    assert await svc.autoscale() == 0                 # only 1 fresh zero -> no build
+    assert await _open_academy_disciplines(db) == []
+
+
+async def test_autoscale_cooldown_blocks_immediate_rebuild(db):
+    svc, _ = _make(db, autoscale=True)
+    for _ in range(2):
+        await _set_availability(svc, {"fire": 0, "police": 3, "ems": 2, "coastal": 1})
+        await svc.autoscale()
+    assert await _open_academy_disciplines(db) == ["fire"]
+    # Mark the pending build done so it isn't the thing blocking, then keep 0.
+    for r in await AutomationRepo(db).recent(10):
+        if r["kind"] == "academy":
+            await AutomationRepo(db).set_status(r["id"], "done", "built")
+    for _ in range(3):
+        await _set_availability(svc, {"fire": 0, "police": 3, "ems": 2, "coastal": 1})
+        assert await svc.autoscale() == 0             # 24h cooldown holds
+    assert await _open_academy_disciplines(db) == []
+
+
+async def test_autoscale_defers_to_member_building_requests(db):
+    svc, _ = _make(db, autoscale=True)
+    await AutomationRepo(db).create(
+        kind="building", thread_id=0, post_id=1,
+        requester_name="member", requester_mc_id=1, payload="{}",
+    )
+    for _ in range(2):
+        await _set_availability(svc, {"fire": 0, "police": 3, "ems": 2, "coastal": 1})
+        assert await svc.autoscale() == 0             # member build has priority
+    assert await _open_academy_disciplines(db) == []
+
+
+async def test_autoscale_one_build_in_flight_at_a_time(db):
+    svc, _ = _make(db, autoscale=True)
+    for _ in range(2):
+        await _set_availability(svc, {"fire": 0, "police": 0, "ems": 2, "coastal": 1})
+        await svc.autoscale()
+    # Only one academy queued even though two disciplines are at zero.
+    assert len(await _open_academy_disciplines(db)) == 1
+
+
+async def test_autoscale_skips_stale_availability(db):
+    svc, _ = _make(db, autoscale=True)
+    for _ in range(2):
+        await _set_availability(svc, {"fire": 0, "police": 3, "ems": 2, "coastal": 1},
+                                age_s=4 * 3600)       # 4h old > 3h cap
+        assert await svc.autoscale() == 0
+    assert await _open_academy_disciplines(db) == []
+
+
+async def test_autoscale_ignores_incomplete_reading(db):
+    # A partial outage: fire reads 0 but not every fire academy page was read.
+    # That is "unknown", not "no classrooms" — it must never build.
+    svc, _ = _make(db, autoscale=True)
+    for _ in range(3):
+        await _set_availability(svc, {"fire": 0, "police": 3, "ems": 2, "coastal": 1},
+                                complete={"fire": False, "police": True,
+                                          "ems": True, "coastal": True})
+        assert await svc.autoscale() == 0
+    assert await _open_academy_disciplines(db) == []
+
+
+async def test_autoscale_build_defers_to_member_build_at_execute_time(db):
+    # An autoscale academy already queued must still yield the funds to a
+    # member hospital/prison request that arrives later.
+    svc, _ = _make(db, autoscale=True, funds=9_000_000, names=[])
+    rid = await svc.enqueue("fire", requester_name="autoscale",
+                            discord_user_id=0, channel_id=0)
+    await AutomationRepo(db).create(
+        kind="building", thread_id=0, post_id=1,
+        requester_name="member", requester_mc_id=1, payload="{}",
+    )
+    row = await svc.run_one(rid)
+    assert row["status"] == "waiting"
+    assert "priority" in row["status_detail"]
+    # A manual panel build (not autoscale) does NOT defer.
+    rid2 = await svc.enqueue("police", requester_name="Staffer",
+                             discord_user_id=5, channel_id=5)
+    row2 = await svc.run_one(rid2)
+    assert row2["status"] == "done"
 
 
 async def test_coords_cached_but_re_geocode_on_address_change(db):

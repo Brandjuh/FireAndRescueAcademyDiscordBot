@@ -467,6 +467,12 @@ class TrainingsService(BoardRequestService):
                     path = nxt
 
                 counts = {key: 0 for key in _AGENCY_ORDER}
+                # Per-discipline completeness: a discipline is only trustworthy
+                # if EVERY one of its academies' detail pages was read. A
+                # partial outage (list loads, some detail pages 429/parse-fail)
+                # would otherwise report a fresh "0" that means "unknown", not
+                # "no free classrooms" — which auto-scale must never build on.
+                complete = {key: True for key in _AGENCY_ORDER}
                 harvest: dict[str, dict[str, int]] = {
                     key: {} for key in _AGENCY_ORDER
                 }
@@ -482,6 +488,7 @@ class TrainingsService(BoardRequestService):
                             )
                         )
                     except MissionChiefError as exc:
+                        complete[listing.discipline] = False
                         log.debug("training availability: academy %s failed (%s)",
                                   listing.building_id, exc)
                         continue
@@ -502,6 +509,7 @@ class TrainingsService(BoardRequestService):
 
         await self.state.set(AVAILABILITY_STATE_KEY, json.dumps({
             "counts": counts,
+            "complete": complete,
             "at": int(dt.datetime.now(dt.timezone.utc).timestamp()),
         }))
         await self._store_course_harvest(harvest)

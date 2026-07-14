@@ -133,6 +133,13 @@ automation:
     interval: 10              # queue retry interval in minutes
     address: "Tepper Avenue, 10454 New York, Manhattan"
     min_alliance_funds: 2000000
+    # Auto-scale: when a discipline (fire/police/ems/coastal) runs out of free
+    # classrooms, automatically build a new academy of that type. Off by
+    # default — it spends alliance funds. Anti-runaway: the 0 must persist a
+    # couple of hourly checks, then a 24h per-discipline cooldown applies, only
+    # one auto-build runs at a time, and member hospital/prison requests take
+    # the funds first. Low funds just queue the build.
+    autoscale: false
   events:
     enabled: false            # master switch for event/mission starts
     thread_id: 15293

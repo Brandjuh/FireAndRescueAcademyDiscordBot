@@ -16,6 +16,7 @@ rather than duplicating them.
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import re
@@ -24,7 +25,7 @@ import aiosqlite
 
 from ..config import Config
 from ..db.database import Database
-from ..db.repos import AutomationRepo
+from ..db.repos import AutomationRepo, StateRepo
 from ..geo.geocoder import GeocodeError
 from ..mc.browser_builder import BrowserBuilder, BrowserUnavailable
 from ..mc.errors import MissionChiefError
@@ -33,11 +34,31 @@ from ..mc.parsers.academy import find_next_page_path, parse_alliance_buildings_p
 log = logging.getLogger(__name__)
 
 KIND = "academy"
+BUILDING_KIND = "building"                  # member hospital/prison requests
 ALLIANCE_BUILDINGS_PATH = "/verband/gebauede"
 MAX_LIST_PAGES = 12
 # Transient build/geocode failures are bounded; a funds-wait does NOT bump
 # attempts, so a low-funds build can wait as long as it needs to.
 MAX_ATTEMPTS = 8
+
+# --- auto-scale: build a new academy when a discipline runs out of classrooms.
+# The free-classroom counts come from the trainings availability walk (cached
+# in state, refreshed ~hourly); this key must match trainings.py.
+AVAILABILITY_STATE_KEY = "training_availability"
+AUTOSCALE_STATE_KEY = "academy_autoscale"
+# Anti-runaway: a discipline must read 0 free classrooms on this many
+# consecutive checks (~1 per hour) before we build, then wait the cooldown
+# before another of the same discipline. At most one auto-build is in flight
+# at a time, and member hospital/prison requests take priority for the funds.
+AUTOSCALE_DEBOUNCE_CHECKS = 2
+AUTOSCALE_COOLDOWN_HOURS = 24
+# Don't act on availability data older than this (a stale reading could be
+# wrong); skip the run instead.
+AUTOSCALE_MAX_AVAILABILITY_AGE_S = 3 * 3600
+# Training discipline → academy button key.
+_DISCIPLINE_TO_ACADEMY = {
+    "fire": "fire", "police": "police", "ems": "rescue", "coastal": "coastal",
+}
 
 # Button key → build-type key (must exist in BUILDING_TYPE_IDS), display label
 # and emoji. The name is "[AA] <label> #N".
@@ -66,6 +87,7 @@ class AcademyService:
         # hospital/prison-only). Optional so the service works without it.
         self._upgrader = upgrader
         self.requests = AutomationRepo(db)
+        self.state = StateRepo(db)
         self._auto = cfg.automation.academy
         self._coords: tuple[float, float, str] | None = None
         self._geocoded_for: str | None = None
@@ -162,6 +184,22 @@ class AcademyService:
                 f"[{reason}] would build {name} at {self._auto.address}",
             )
             return
+
+        # Member hospital/prison requests take the funds first: an auto-scale
+        # academy waits while any are open (a manual panel build is a deliberate
+        # choice and does not defer). Enforced here at build time — not only at
+        # enqueue — so a member request arriving after the academy was queued
+        # still wins the funds.
+        if request["requester_name"] == "autoscale":
+            member_open = await self.requests.open_count(BUILDING_KIND)
+            if member_open:
+                await self.requests.set_status(
+                    request_id, "waiting",
+                    f"{member_open} member building request(s) have priority; "
+                    "waiting",
+                    announce=False,
+                )
+                return
 
         # Funds gate → queue when low (never spend below the floor).
         funds, funds_error = await self._buildings._live_funds()
@@ -358,3 +396,129 @@ class AcademyService:
             if not nxt:
                 break
             path = nxt
+
+    # -- auto-scale ------------------------------------------------------
+
+    async def autoscale(self) -> int:
+        """Queue a new academy for any discipline that has run out of free
+        classrooms. Gated behind ``automation.academy.autoscale``.
+
+        Anti-runaway: a discipline must read 0 free classrooms on
+        ``AUTOSCALE_DEBOUNCE_CHECKS`` consecutive runs before we build (and only
+        when that reading is COMPLETE — every academy's page was read, so a
+        partial outage that looks like 0 can't trigger a build), then a 24h
+        per-discipline cooldown — derived from the durable queued request, not a
+        best-effort state blob — at most one auto-build in flight at a time, and
+        pending member hospital/prison requests take the funds first. Low funds
+        just queue the build (retried by the poller)."""
+        if not self._auto.autoscale or self.dry_run:
+            return 0
+        counts, complete = await self._availability_counts()
+        if counts is None:
+            return 0  # no fresh, trustworthy signal — do nothing rather than guess
+
+        state = await self._load_autoscale_state()
+        streak: dict = state.get("zero_streak", {})
+
+        candidates: list[tuple[str, str]] = []
+        for discipline, kind in _DISCIPLINE_TO_ACADEMY.items():
+            free = counts.get(discipline)
+            # Only a trustworthy, complete reading counts; anything else breaks
+            # the consecutive-zeros chain (fails toward NOT building).
+            if not isinstance(free, int) or not complete.get(discipline):
+                streak[discipline] = 0
+                continue
+            if free > 0:
+                streak[discipline] = 0
+                continue
+            streak[discipline] = streak.get(discipline, 0) + 1
+            if streak[discipline] >= AUTOSCALE_DEBOUNCE_CHECKS:
+                candidates.append((discipline, kind))
+
+        built = 0
+        if candidates:
+            member_open = await self.requests.open_count(BUILDING_KIND)
+            academy_open = await self.requests.open_count(KIND)
+            if member_open:
+                log.info("academy autoscale: %d discipline(s) at 0 classrooms, "
+                         "but %d member building request(s) open — deferring for "
+                         "priority", len(candidates), member_open)
+            elif academy_open:
+                log.info("academy autoscale: holding — an academy build is still "
+                         "in flight (max one at a time)")
+            else:
+                for discipline, kind in candidates:
+                    if await self._recently_autobuilt(kind):
+                        continue  # 24h per-discipline cooldown (durable)
+                    await self.enqueue(
+                        kind, requester_name="autoscale",
+                        discord_user_id=0, channel_id=0,
+                    )
+                    streak[discipline] = 0
+                    built = 1
+                    log.info("academy autoscale: %s at 0 free classrooms — queued "
+                             "a new %s academy", discipline, kind)
+                    break  # one per run
+
+        state["zero_streak"] = streak
+        await self.state.set(AUTOSCALE_STATE_KEY, json.dumps(state))
+        return built
+
+    async def _availability_counts(self) -> tuple[dict | None, dict]:
+        """(counts, complete) from the cached availability walk, or
+        ``(None, {})`` when there is no fresh, well-formed snapshot."""
+        raw = await self.state.get(AVAILABILITY_STATE_KEY)
+        if not raw:
+            return None, {}
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return None, {}
+        if not isinstance(data, dict):
+            return None, {}
+        at = data.get("at")
+        if not isinstance(at, (int, float)):
+            return None, {}
+        age = datetime.datetime.now(datetime.timezone.utc).timestamp() - at
+        if age > AUTOSCALE_MAX_AVAILABILITY_AGE_S:
+            log.info("academy autoscale: availability data is %.0f min old — "
+                     "skipping", age / 60)
+            return None, {}
+        counts = data.get("counts")
+        if not isinstance(counts, dict):
+            return None, {}
+        complete = data.get("complete")
+        # Older snapshots have no completeness → treat as unknown (not complete),
+        # so autoscale waits for a fresh, completeness-tagged reading.
+        return counts, (complete if isinstance(complete, dict) else {})
+
+    async def _recently_autobuilt(self, kind: str) -> bool:
+        """True if an auto-scale academy of this kind was queued within the
+        cooldown window. Derived from the durable request row (not a separate
+        state blob), so a crash or state-write failure can't un-gate it."""
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=AUTOSCALE_COOLDOWN_HOURS)
+        ).isoformat(timespec="seconds")
+        for row in await self.requests.recent(100):
+            if row["kind"] != KIND or row["requester_name"] != "autoscale":
+                continue
+            if (row["created_at"] or "") < cutoff:
+                continue
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (ValueError, TypeError):
+                continue
+            if payload.get("academy") == kind:
+                return True
+        return False
+
+    async def _load_autoscale_state(self) -> dict:
+        raw = await self.state.get(AUTOSCALE_STATE_KEY)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return data if isinstance(data, dict) else {}

@@ -143,6 +143,7 @@ class AcademyAutomationConfig:
     interval: int
     address: str
     min_alliance_funds: int
+    autoscale: bool
 
 
 @dataclass(frozen=True)
@@ -491,6 +492,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 min_alliance_funds=int(
                     _get(raw, "automation", "academy", "min_alliance_funds", default=2_000_000)
+                ),
+                autoscale=bool(
+                    _get(raw, "automation", "academy", "autoscale", default=False)
                 ),
             ),
             events=EventsAutomationConfig(

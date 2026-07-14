@@ -414,7 +414,7 @@ class FRABot(commands.Bot):
         # `enabled` flag is off, otherwise a low-funds click is orphaned: the
         # panel promises auto-retry but nothing would ever drain the queue.
         academy_panel = int(getattr(self.cfg.discord.channels, "academy_panel", 0) or 0)
-        if automation.academy.enabled or academy_panel:
+        if automation.academy.enabled or academy_panel or automation.academy.autoscale:
             sched.add_interval_job(
                 self._guarded(self.academy.process_queue, "academy-builds"),
                 minutes=automation.academy.interval,
@@ -429,6 +429,17 @@ class FRABot(commands.Bot):
                 minutes=360,
                 name="academy-extensions",
                 initial_delay_seconds=900.0,
+            )
+        # Auto-scale: build a new academy when a discipline runs out of free
+        # classrooms (own switch, off by default — it spends alliance funds).
+        # Hourly, matching the training availability refresh, with a debounce
+        # + 24h cooldown so one transient reading can't spawn a fleet.
+        if automation.academy.autoscale:
+            sched.add_interval_job(
+                self._guarded(self.academy.autoscale, "academy-autoscale"),
+                minutes=60,
+                name="academy-autoscale",
+                initial_delay_seconds=1200.0,
             )
         # Daily worldwide auto-build: one hospital + one prison at a real OSM
         # location. Scheduled even in dry-run (it reports what it would build);
