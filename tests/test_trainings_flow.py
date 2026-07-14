@@ -894,3 +894,27 @@ async def test_board_parse_uses_the_live_catalog_and_counts(db):
         "discipline": "fire", "name": "Technical Rescue Training",
         "duration": 4, "count": 3,
     }]
+
+
+async def test_find_academies_uses_api_type_id(db):
+    import json
+    svc, _ = _service(db, dry_run=True)
+    # A coastal academy (type 24) with NO list-page start button — the API
+    # type-id must still find it; a fire station (type 0) is ignored.
+    svc.client = FakeClient({
+        "/api/buildings": json.dumps([
+            {"id": 700, "building_type": 24, "latitude": 1.0, "longitude": 2.0},
+            {"id": 701, "building_type": 0, "latitude": 1.0, "longitude": 2.0},
+        ]),
+    })
+    academies = await svc._find_academies("coastal")
+    assert [a.building_id for a in academies] == [700]
+    assert academies[0].discipline == "coastal"
+
+
+async def test_find_academies_falls_back_to_list_scrape(db):
+    # No usable /api/buildings JSON → the alliance-buildings scrape still finds
+    # the fire academy (it has a list-page start button).
+    svc, _ = _service(db, dry_run=True)
+    academies = await svc._find_academies("fire")
+    assert [a.building_id for a in academies] == [4951748]
