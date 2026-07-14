@@ -28,6 +28,7 @@ from ..mc.parsers.academy import (
     parse_academy_page,
     parse_alliance_buildings_page,
 )
+from ..mc.buildings_api import parse_api_buildings
 from ..mc.parsers.board import BoardPost
 from ..mc.trainings_catalog import (
     DISCIPLINES,
@@ -40,7 +41,13 @@ from .board_requests import BoardRequestService
 log = logging.getLogger(__name__)
 
 ALLIANCE_BUILDINGS_PATH = "/verband/gebauede"
+API_BUILDINGS_PATH = "/api/buildings"
 MAX_ACADEMY_LIST_PAGES = 10
+# Academy building type-ids on MissionChief (the icon IS the type). This is
+# the reliable way to find an academy — it identifies the discipline AND tells
+# academies apart from stations, without depending on a scraped list-page
+# "start course" button that can render differently per academy.
+ACADEMY_TYPE_IDS = {"fire": 4, "police": 7, "ems": 19, "coastal": 24}
 ALLIANCE_SIGNUP_SECONDS = 3600  # class stays open to the alliance for 1h
 BOARD_FEE = 0                   # board classes are free
 RETRY_MINUTES = 15              # backoff between busy retries (bounded by MAX_ATTEMPTS)
@@ -947,26 +954,19 @@ class TrainingsService(BoardRequestService):
         return {"status": "busy" if busy else "failed", "reason": last_reason}
 
     async def _find_academies(self, discipline: str) -> list[AcademyListing]:
-        """Alliance academies for a discipline, preferred building first."""
-        listings: list[AcademyListing] = []
-        path = ALLIANCE_BUILDINGS_PATH
-        for _ in range(MAX_ACADEMY_LIST_PAGES):
-            html = await self.client.fetch_page(path)
-            listings.extend(parse_alliance_buildings_page(html))
-            next_path = find_next_page_path(html)
-            if not next_path:
-                break
-            path = next_path
+        """Alliance academies for a discipline, preferred building first.
 
-        candidates = [
-            listing
-            for listing in listings
-            if listing.discipline == discipline and listing.has_start_button
-        ]
+        Identified by building type-id from ``/api/buildings`` (the icon = the
+        type) — the reliable signal that tells an academy from a station and
+        never depends on a scraped list-page button. Falls back to the old
+        alliance-buildings scrape if the API is unavailable."""
+        candidates = await self._academies_from_api(discipline)
+        if not candidates:
+            candidates = await self._academies_from_list(discipline)
         preferred_id = self._auto.preferred_academies.get(discipline)
         candidates.sort(key=lambda a: 0 if a.building_id == preferred_id else 1)
         if not candidates and preferred_id:
-            # List scrape failed us; still try the known building.
+            # Everything failed us; still try the known building.
             candidates = [
                 AcademyListing(
                     building_id=preferred_id,
@@ -976,6 +976,46 @@ class TrainingsService(BoardRequestService):
                 )
             ]
         return candidates
+
+    async def _academies_from_api(self, discipline: str) -> list[AcademyListing]:
+        type_id = ACADEMY_TYPE_IDS.get(discipline)
+        if type_id is None:
+            return []
+        try:
+            raw = await self.client.fetch_page(API_BUILDINGS_PATH)
+            buildings = parse_api_buildings(raw)
+        except MissionChiefError as exc:
+            log.info("training: /api/buildings unavailable (%s); using list scrape", exc)
+            return []
+        except Exception as exc:  # noqa: BLE001 — bad/non-JSON body → fall back
+            log.info("training: could not parse /api/buildings (%s); using list scrape", exc)
+            return []
+        return [
+            AcademyListing(
+                building_id=b.building_id,
+                name=f"{discipline} academy #{b.building_id}",
+                discipline=discipline,
+                has_start_button=True,
+            )
+            for b in buildings
+            if b.building_type_id == type_id and b.building_id is not None
+        ]
+
+    async def _academies_from_list(self, discipline: str) -> list[AcademyListing]:
+        listings: list[AcademyListing] = []
+        path = ALLIANCE_BUILDINGS_PATH
+        for _ in range(MAX_ACADEMY_LIST_PAGES):
+            html = await self.client.fetch_page(path)
+            listings.extend(parse_alliance_buildings_page(html))
+            next_path = find_next_page_path(html)
+            if not next_path:
+                break
+            path = next_path
+        return [
+            listing
+            for listing in listings
+            if listing.discipline == discipline and listing.has_start_button
+        ]
 
 
 def _overview_guide(min_rate: float) -> str:
