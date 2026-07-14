@@ -158,6 +158,8 @@ SETTINGS: tuple[Setting, ...] = (
             "Fixed address every academy is built at"),
     Setting("automation.academy.min_alliance_funds", "int", True,
             "Never build an academy below this alliance balance", minimum=0),
+    Setting("automation.academy.autoscale", "bool", True,
+            "Auto-build a new academy when a discipline hits 0 free classrooms"),
     Setting("automation.missions_forum.enabled", "bool", False,
             "Daily missions-forum sync"),
     Setting("automation.missions_forum.sync_time", "time", False,

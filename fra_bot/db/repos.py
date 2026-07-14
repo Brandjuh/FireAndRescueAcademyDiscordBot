@@ -1051,11 +1051,16 @@ class AutomationRepo:
             (utcnow_iso(), request_id),
         )
 
-    async def open_count(self) -> int:
-        async with self._db.conn.execute(
+    async def open_count(self, kind: str | None = None) -> int:
+        sql = (
             "SELECT COUNT(*) AS n FROM automation_requests "
             "WHERE status IN ('pending', 'waiting', 'processing')"
-        ) as cur:
+        )
+        params: tuple = ()
+        if kind is not None:
+            sql += " AND kind = ?"
+            params = (kind,)
+        async with self._db.conn.execute(sql, params) as cur:
             row = await cur.fetchone()
         return row["n"]
 
