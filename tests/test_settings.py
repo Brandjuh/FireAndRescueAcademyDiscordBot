@@ -122,7 +122,9 @@ def test_apply_mutates_nested_frozen_config(cfg):
     assert current(cfg, setting) is True
     apply(cfg, setting, False)
     assert cfg.automation.dry_run is False
-    nested = resolve("min_alliance_funds")
+    # "min_alliance_funds" alone is now ambiguous (building + academy), so
+    # the suffix must be qualified — exactly the resolver's intended behaviour.
+    nested = resolve("building.min_alliance_funds")
     apply(cfg, nested, 5_000_000)
     assert cfg.automation.building.min_alliance_funds == 5_000_000
 

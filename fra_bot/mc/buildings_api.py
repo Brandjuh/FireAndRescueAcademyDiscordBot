@@ -15,7 +15,11 @@ from dataclasses import dataclass
 from typing import Any
 
 # Numeric building-type ids on MissionChief (match browser_builder).
-BUILDING_TYPE_IDS = {"hospital": 2, "prison": 10}
+BUILDING_TYPE_IDS = {
+    "hospital": 2, "prison": 10,
+    "fire academy": 4, "police academy": 7,
+    "rescue (ems) academy": 19, "coastal rescue school": 24,
+}
 
 
 @dataclass(frozen=True)

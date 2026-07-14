@@ -96,6 +96,11 @@ class FRABot(commands.Bot):
         # Phase 2 board automation.
         self.trainings = TrainingsService(cfg, self.mc, self.db)
         self.buildings = BuildingsService(cfg, self.mc, self.db, self.geocoder)
+        # Academy build panel: fixed-address academy builds, reusing the
+        # building service's browser builder + live-funds read + geocoder.
+        from .services.academy import AcademyService
+
+        self.academy = AcademyService(cfg, self.db, self.buildings)
         # Events and custom missions both start large alliance missions on the
         # same alliance-wide free cooldown; a shared lock serializes their
         # check-then-start so one free window is never double-spent.
@@ -189,6 +194,7 @@ class FRABot(commands.Bot):
         await self.mc.start()
         await self.geocoder.start()
 
+        from .cogs.academy import AcademyCog, AcademyPanelView
         from .cogs.admin import AdminCog
         from .cogs.automation import AutomationCog
         from .cogs.dossier import DossierCog, DossierPanelView
@@ -216,6 +222,7 @@ class FRABot(commands.Bot):
         await self.add_cog(PanelKeeperCog(self))
         await self.add_cog(DmMirrorCog(self))
         await self.add_cog(ClassesPanelCog(self))
+        await self.add_cog(AcademyCog(self))
 
         # Persistent panels survive restarts; register their views.
         missions_cog = self.get_cog("MissionsCog")
@@ -227,6 +234,9 @@ class FRABot(commands.Bot):
         requests_cog = self.get_cog("RequestsCog")
         if requests_cog is not None:
             self.add_view(RequestPanelView(requests_cog))
+        academy_cog = self.get_cog("AcademyCog")
+        if academy_cog is not None:
+            self.add_view(AcademyPanelView(academy_cog))
         dm_cog = self.get_cog("DmMirrorCog")
         if dm_cog is not None:
             from .cogs.dm_mirror import DmPanelView
@@ -392,6 +402,20 @@ class FRABot(commands.Bot):
                 minutes=automation.building.interval,
                 name="board-buildings",
                 initial_delay_seconds=210.0,
+            )
+        # Academy panel builds queued because funds were low: drain + retry.
+        # The buttons themselves work regardless of this switch (they build on
+        # click); this only auto-resumes builds that had to wait for funds.
+        # Run the drain whenever the panel is live (channel set), even if the
+        # `enabled` flag is off, otherwise a low-funds click is orphaned: the
+        # panel promises auto-retry but nothing would ever drain the queue.
+        academy_panel = int(getattr(self.cfg.discord.channels, "academy_panel", 0) or 0)
+        if automation.academy.enabled or academy_panel:
+            sched.add_interval_job(
+                self._guarded(self.academy.process_queue, "academy-builds"),
+                minutes=automation.academy.interval,
+                name="academy-builds",
+                initial_delay_seconds=200.0,
             )
         # Daily worldwide auto-build: one hospital + one prison at a real OSM
         # location. Scheduled even in dry-run (it reports what it would build);

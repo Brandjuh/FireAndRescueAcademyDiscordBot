@@ -76,6 +76,8 @@ discord:
     # Class-availability panel: free training classes per agency, updated
     # hourly (edited in place). 0 = off.
     class_panel: 1421627971831070730
+    # Academy-build panel (Fire/Police/Rescue/Coastal buttons). 0 = off.
+    academy_panel: 1426226521231589507
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
   # Role that is always pinged by the eventpinger (Notify-Event).
@@ -121,6 +123,16 @@ automation:
     # Honours dry_run (reports what it would build). Off by default.
     daily_build_enabled: false
     daily_build_time: "03:00"   # HH:MM in reports.timezone
+  academy:
+    # Discord-panel academy builds at a FIXED address (duplicates allowed).
+    # Staff click Fire/Police/Rescue/Coastal; the bot builds "[AA] <type>
+    # academy #N" (next number scanned live). Too little money -> queued and
+    # retried by this poller once funds recover. Honours dry_run.
+    enabled: false            # master switch for the funds-retry queue poller
+    role_id: 0                # role allowed to click (0 = admins only)
+    interval: 10              # queue retry interval in minutes
+    address: "Tepper Avenue, 10454 New York, Manhattan"
+    min_alliance_funds: 2000000
   events:
     enabled: false            # master switch for event/mission starts
     thread_id: 15293

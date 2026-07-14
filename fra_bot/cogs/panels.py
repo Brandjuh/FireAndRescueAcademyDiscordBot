@@ -84,6 +84,10 @@ class PanelKeeperCog(commands.Cog):
                 "classes", "ClassesPanelCog",
                 lambda: int(getattr(cfg.discord.channels, "class_panel", 0) or 0),
             ),
+            PanelSpec(
+                "academy", "AcademyCog",
+                lambda: int(getattr(cfg.discord.channels, "academy_panel", 0) or 0),
+            ),
         ]
 
     def _spec(self, key: str) -> PanelSpec | None:
