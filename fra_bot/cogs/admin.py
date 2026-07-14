@@ -284,18 +284,57 @@ class AdminCog(commands.Cog):
             names = ", ".join(sorted({s.group for s in rt.SETTINGS}))
             await ctx.send(f"Unknown group `{group}`. Groups: {names}")
             return
-        embed = discord.Embed(
-            title="⚙️ Settings",
-            colour=discord.Colour.blurple(),
-            description=(
-                "Change with `!fra set <key> <value>` · reset with "
-                "`!fra settings reset <key>`\n\\* = overridden via command · "
-                "⟳ = applies after restart"
-            ),
+        # Split into several embeds/fields so nothing is truncated: Discord
+        # caps a field value at 1024 chars and an embed at ~6000 / 25 fields,
+        # and the automation group alone now blows past a single field.
+        header = (
+            "Change with `!fra set <key> <value>` · reset with "
+            "`!fra settings reset <key>`\n\\* = overridden via command · "
+            "⟳ = applies after restart"
         )
+        fields: list[tuple[str, str]] = []
         for name, lines in groups.items():
-            embed.add_field(name=name, value="\n".join(lines)[:1024], inline=False)
-        await ctx.send(embed=embed)
+            chunk: list[str] = []
+            size = 0
+            part = 1
+            for line in lines:
+                if chunk and size + len(line) + 1 > 1024:
+                    label = name if part == 1 else f"{name} (cont. {part})"
+                    fields.append((label, "\n".join(chunk)))
+                    chunk, size, part = [], 0, part + 1
+                chunk.append(line)
+                size += len(line) + 1
+            if chunk:
+                label = name if part == 1 else f"{name} (cont. {part})"
+                fields.append((label, "\n".join(chunk)))
+
+        # Pack fields into embeds (≤10 fields / ≤5000 chars each) and send each.
+        first = True
+        pending: list[tuple[str, str]] = []
+        pending_size = 0
+
+        async def _flush() -> None:
+            nonlocal first, pending, pending_size
+            if not pending:
+                return
+            embed = discord.Embed(
+                title="⚙️ Settings" if first else "⚙️ Settings (cont.)",
+                colour=discord.Colour.blurple(),
+                description=header if first else None,
+            )
+            for field_name, field_value in pending:
+                embed.add_field(name=field_name, value=field_value, inline=False)
+            await ctx.send(embed=embed)
+            first = False
+            pending = []
+            pending_size = 0
+
+        for field_name, field_value in fields:
+            if pending and (len(pending) >= 10 or pending_size + len(field_value) > 5000):
+                await _flush()
+            pending.append((field_name, field_value))
+            pending_size += len(field_value) + len(field_name)
+        await _flush()
 
     @settings_group.command(name="reset")
     async def settings_reset(self, ctx: commands.Context, key: str = "") -> None:
