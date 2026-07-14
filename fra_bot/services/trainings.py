@@ -48,7 +48,8 @@ MAX_ACADEMY_LIST_PAGES = 10
 # academies apart from stations, without depending on a scraped list-page
 # "start course" button that can render differently per academy.
 ACADEMY_TYPE_IDS = {"fire": 4, "police": 7, "ems": 19, "coastal": 24}
-ALLIANCE_SIGNUP_SECONDS = 3600  # class stays open to the alliance for 1h
+ALLIANCE_SIGNUP_SECONDS = 3600            # normal class: open to the alliance 1h
+ALLIANCE_SIGNUP_SECONDS_DEFERRED = 43200  # a class that had to wait: open 12h
 BOARD_FEE = 0                   # board classes are free
 RETRY_MINUTES = 15              # backoff between busy retries (bounded by MAX_ATTEMPTS)
 CLASS_CAPACITY = 10             # people per class (game constant, informational)
@@ -463,53 +464,45 @@ class TrainingsService(BoardRequestService):
 
         try:
             with bulk_traffic():
-                listings: list[AcademyListing] = []
-                path = ALLIANCE_BUILDINGS_PATH
-                for _ in range(MAX_ACADEMY_LIST_PAGES):
-                    html = await self.client.fetch_page(path)
-                    listings.extend(parse_alliance_buildings_page(html))
-                    nxt = find_next_page_path(html)
-                    if not nxt:
-                        break
-                    path = nxt
+                # Find academies by building TYPE-ID (the icon = the type), the
+                # same reliable signal _find_academies uses; scrape fallback.
+                academies = await self._academy_ids_by_discipline()
+                if not any(academies.values()):
+                    log.info("training availability: no academies detected — skipping")
+                    return None
 
                 counts = {key: 0 for key in _AGENCY_ORDER}
                 # Per-discipline completeness: a discipline is only trustworthy
                 # if EVERY one of its academies' detail pages was read. A
-                # partial outage (list loads, some detail pages 429/parse-fail)
-                # would otherwise report a fresh "0" that means "unknown", not
-                # "no free classrooms" — which auto-scale must never build on.
+                # partial outage (some detail pages 429/parse-fail) would
+                # otherwise report a fresh "0" that means "unknown", not "no
+                # free classrooms" — which auto-scale must never build on.
                 complete = {key: True for key in _AGENCY_ORDER}
                 harvest: dict[str, dict[str, int]] = {
                     key: {} for key in _AGENCY_ORDER
                 }
-                seen: set[int] = set()
-                for listing in listings:
-                    if listing.discipline not in counts or listing.building_id in seen:
-                        continue
-                    seen.add(listing.building_id)
-                    try:
-                        page = parse_academy_page(
-                            await self.client.fetch_page(
-                                f"/buildings/{listing.building_id}"
+                for discipline, ids in academies.items():
+                    for building_id in ids:
+                        try:
+                            page = parse_academy_page(
+                                await self.client.fetch_page(f"/buildings/{building_id}")
                             )
-                        )
-                    except MissionChiefError as exc:
-                        complete[listing.discipline] = False
-                        log.debug("training availability: academy %s failed (%s)",
-                                  listing.building_id, exc)
-                        continue
-                    counts[listing.discipline] += max(0, page.available_rooms)
-                    # Free ride: the education dropdown on this page IS the
-                    # authoritative course list — harvest it so the Discord
-                    # chooser never misses a newly added course.
-                    for label in page.courses:
-                        name, days = _clean_course_label(label)
-                        if not name:
+                        except MissionChiefError as exc:
+                            complete[discipline] = False
+                            log.debug("training availability: academy %s failed (%s)",
+                                      building_id, exc)
                             continue
-                        if days is None:
-                            days = _static_days(listing.discipline, name)
-                        harvest[listing.discipline].setdefault(name, days)
+                        counts[discipline] += max(0, page.available_rooms)
+                        # Free ride: the education dropdown on this page IS the
+                        # authoritative course list — harvest it so the Discord
+                        # chooser never misses a newly added course.
+                        for label in page.courses:
+                            name, days = _clean_course_label(label)
+                            if not name:
+                                continue
+                            if days is None:
+                                days = _static_days(discipline, name)
+                            harvest[discipline].setdefault(name, days)
         except MissionChiefError as exc:
             log.warning("training availability: could not read academy list: %s", exc)
             return None
@@ -671,13 +664,22 @@ class TrainingsService(BoardRequestService):
 
         ambiguous_reasons = [self._ambiguity_help(a) for a in ambiguous]
 
+        # A class that had to WAIT for a free classroom (this request was
+        # already retried at least once) is opened for 12h so the members who
+        # waited still have time to join; a first-try class opens for the
+        # normal 1h.
+        deferred = (request["attempts"] or 0) > 0
+        signup = (
+            ALLIANCE_SIGNUP_SECONDS_DEFERRED if deferred else ALLIANCE_SIGNUP_SECONDS
+        )
+
         for match, want in match_counts:
             # Discord requests may ask for several copies of the same class
             # (capped at MAX_CLASSES_PER_REQUEST); board requests are 1.
             remaining = want
             reminder_scheduled = False
             while remaining > 0:
-                outcome = await self._open_training(match)
+                outcome = await self._open_training(match, duration=signup)
                 results.append({
                     "training": match.name,
                     "outcome": outcome["status"],
@@ -782,6 +784,24 @@ class TrainingsService(BoardRequestService):
         if real_opened and not self.is_discord_request(request) and not self.dry_run:
             await self._notify_ingame(requester, real_opened)
 
+    async def _on_give_up(self, request) -> None:
+        """Tell the member when a training request is abandoned after repeated
+        'no free classroom' — the classes stayed full for too long."""
+        try:
+            payload = json.loads(request["payload"] or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        pending = payload.get("pending_trainings") or []
+        names = ", ".join(
+            p.get("name", "?") for p in pending if isinstance(p, dict)
+        ) or "the requested class(es)"
+        who = request["requester_name"] or "member"
+        await self.reply_for(request, (
+            f"Training request could not be completed for {who}.\n\n"
+            f"No free classroom became available for: {names}. "
+            "The current classes are likely full — please try again later."
+        ))
+
     async def _maybe_schedule_reminder(
         self, request_id: int, payload: dict, match: TrainingMatch
     ) -> None:
@@ -844,7 +864,9 @@ class TrainingsService(BoardRequestService):
         except Exception:  # noqa: BLE001 - a PM must never fail the request
             log.exception("training: in-game PM to %s failed", requester)
 
-    async def _open_training(self, match: TrainingMatch) -> dict:
+    async def _open_training(
+        self, match: TrainingMatch, *, duration: int = ALLIANCE_SIGNUP_SECONDS
+    ) -> dict:
         """Try to open one class.
 
         Returns a dict with ``status`` one of:
@@ -911,7 +933,7 @@ class TrainingsService(BoardRequestService):
                         "authenticity_token": page.authenticity_token,
                         "building_rooms_use": "1",
                         "education_select": course_value,
-                        "alliance[duration]": str(ALLIANCE_SIGNUP_SECONDS),
+                        "alliance[duration]": str(duration),
                         "alliance[cost]": str(BOARD_FEE),
                         "commit": "Educate",
                     },
@@ -1016,6 +1038,46 @@ class TrainingsService(BoardRequestService):
             for listing in listings
             if listing.discipline == discipline and listing.has_start_button
         ]
+
+    async def _academy_ids_by_discipline(self) -> dict[str, list[int]]:
+        """``{discipline: [academy building ids]}`` for the availability walk.
+
+        Primary source is ``/api/buildings`` by TYPE-ID (icon = type); if that
+        is unavailable it falls back to the alliance-buildings scrape (which may
+        raise, letting the caller treat it as "couldn't read")."""
+        out: dict[str, list[int]] = {key: [] for key in _AGENCY_ORDER}
+        try:
+            buildings = parse_api_buildings(
+                await self.client.fetch_page(API_BUILDINGS_PATH)
+            )
+        except MissionChiefError:
+            buildings = None
+        except Exception:  # noqa: BLE001 — bad/non-JSON body → scrape fallback
+            buildings = None
+        if buildings:
+            id_to_disc = {tid: disc for disc, tid in ACADEMY_TYPE_IDS.items()}
+            seen: set[int] = set()
+            for b in buildings:
+                disc = id_to_disc.get(b.building_type_id)
+                if disc and b.building_id is not None and b.building_id not in seen:
+                    seen.add(b.building_id)
+                    out[disc].append(b.building_id)
+            if any(out.values()):
+                return out
+        # Fallback: the alliance-buildings scrape (keyword discipline).
+        seen = set()
+        path = ALLIANCE_BUILDINGS_PATH
+        for _ in range(MAX_ACADEMY_LIST_PAGES):
+            html = await self.client.fetch_page(path)
+            for listing in parse_alliance_buildings_page(html):
+                if listing.discipline in out and listing.building_id not in seen:
+                    seen.add(listing.building_id)
+                    out[listing.discipline].append(listing.building_id)
+            nxt = find_next_page_path(html)
+            if not nxt:
+                break
+            path = nxt
+        return out
 
 
 def _overview_guide(min_rate: float) -> str:

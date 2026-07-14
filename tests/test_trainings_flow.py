@@ -918,3 +918,47 @@ async def test_find_academies_falls_back_to_list_scrape(db):
     svc, _ = _service(db, dry_run=True)
     academies = await svc._find_academies("fire")
     assert [a.building_id for a in academies] == [4951748]
+
+
+async def test_open_training_uses_given_signup_duration(db):
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+    svc, client = _service(db, dry_run=False)
+    match = TrainingMatch(discipline="fire", name="HazMat", duration_days=3, count=1)
+    await svc._open_training(match, duration=43200)
+    assert client.posts, "expected an education POST"
+    assert client.posts[-1][1]["alliance[duration]"] == "43200"
+
+
+async def test_on_give_up_notifies_member(db):
+    import json
+    svc, _ = _service(db, dry_run=False)
+    replies = []
+
+    async def _rec(request, content):
+        replies.append(content)
+
+    svc.reply_for = _rec
+    request = {
+        "payload": json.dumps({"pending_trainings": [{"name": "HazMat", "count": 1}]}),
+        "requester_name": "Alice",
+    }
+    await svc._on_give_up(request)
+    assert replies and "HazMat" in replies[0] and "could not be completed" in replies[0]
+
+
+async def test_collect_availability_uses_api_type_id(db):
+    import json
+    svc, _ = _service(db, dry_run=False)
+    api = json.dumps([{"id": 800, "building_type": 24, "latitude": 1.0, "longitude": 2.0}])
+    page = (
+        "<form action='/buildings/800/education' method='post'>"
+        "<input type='hidden' name='authenticity_token' value='tok'/>"
+        "<select name='building_rooms_use'><option value='1'>1</option>"
+        "<option value='3'>3</option></select>"
+        "<select name='alliance[cost]'><option value='0'>Free</option></select>"
+        "<select name='education_select'><option value='7'>Ocean Navigation</option></select>"
+        "</form>"
+    )
+    svc.client = FakeClient({"/api/buildings": api, "/buildings/800": page})
+    counts = await svc._collect_availability()
+    assert counts is not None and counts["coastal"] == 3

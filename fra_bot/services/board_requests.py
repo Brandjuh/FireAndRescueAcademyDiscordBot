@@ -315,6 +315,11 @@ class BoardRequestService:
                         request["id"], "failed",
                         f"gave up after {request['attempts']} failed attempts",
                     )
+                    try:
+                        await self._on_give_up(request)
+                    except Exception:  # noqa: BLE001 — a notice must not wedge the poll
+                        log.exception("%s: give-up notice failed for %s",
+                                      self.kind, request["id"])
                     await self._schedule_cleanup(request["id"])
                 continue
             if not await self.requests.claim(request["id"]):
@@ -346,6 +351,11 @@ class BoardRequestService:
                     )
             await self._schedule_cleanup(request["id"])
         return executed
+
+    async def _on_give_up(self, request) -> None:
+        """Hook: a request was abandoned after ``MAX_ATTEMPTS``. Subclasses may
+        notify the requester (e.g. "no free classroom was available")."""
+        return None
 
     async def _schedule_cleanup(self, request_id: int) -> None:
         """Queue a handled request's original post for the 12h board tidy-up
