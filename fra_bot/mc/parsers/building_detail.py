@@ -96,6 +96,13 @@ def parse_extension_offers(html: str, building_id: int) -> list[ExtensionOffer]:
     ext_re = re.compile(rf"^/buildings/{building_id}/extension/credits/(\d+)")
     offers: dict[int, ExtensionOffer] = {}
     for link in soup.find_all("a", href=True):
+        # A locked next-in-chain extension (e.g. an academy's 2nd/3rd
+        # classroom) renders as a `disabled` button that still carries its
+        # href — buying it would be rejected, so skip it. It reappears
+        # (enabled) once the previous one is built, and the re-fetch loop
+        # picks it up then.
+        if "disabled" in (link.get("class") or []):
+            continue
         href = link["href"]
         if not href.startswith(prefix):
             continue

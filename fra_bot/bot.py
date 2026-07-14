@@ -96,11 +96,17 @@ class FRABot(commands.Bot):
         # Phase 2 board automation.
         self.trainings = TrainingsService(cfg, self.mc, self.db)
         self.buildings = BuildingsService(cfg, self.mc, self.db, self.geocoder)
+        # On-command alliance hospital/prison level + extension upgrades, also
+        # used to finish a freshly-built academy by buying its extensions.
+        self.building_upgrade = BuildingUpgradeService(cfg, self.mc, self.db)
         # Academy build panel: fixed-address academy builds, reusing the
-        # building service's browser builder + live-funds read + geocoder.
+        # building service's browser builder + live-funds read + geocoder, and
+        # the upgrade service to buy the new academy's extensions.
         from .services.academy import AcademyService
 
-        self.academy = AcademyService(cfg, self.db, self.buildings)
+        self.academy = AcademyService(
+            cfg, self.db, self.buildings, upgrader=self.building_upgrade
+        )
         # Events and custom missions both start large alliance missions on the
         # same alliance-wide free cooldown; a shared lock serializes their
         # check-then-start so one free window is never double-spent.
@@ -141,8 +147,6 @@ class FRABot(commands.Bot):
         from .services.rank_roles import RankRolesService
 
         self.rank_roles = RankRolesService(cfg, self.db, self)
-        # On-command alliance hospital/prison level + extension upgrades.
-        self.building_upgrade = BuildingUpgradeService(cfg, self.mc, self.db)
 
         self._jobs_started = False
 
@@ -416,6 +420,15 @@ class FRABot(commands.Bot):
                 minutes=automation.academy.interval,
                 name="academy-builds",
                 initial_delay_seconds=200.0,
+            )
+            # Academy extensions unlock one at a time (~7 days each); a slow
+            # sweep buys the next available one on each of our academies so
+            # they max out over the following weeks without hammering.
+            sched.add_interval_job(
+                self._guarded(self.academy.sweep_extensions, "academy-extensions"),
+                minutes=360,
+                name="academy-extensions",
+                initial_delay_seconds=900.0,
             )
         # Daily worldwide auto-build: one hospital + one prison at a real OSM
         # location. Scheduled even in dry-run (it reports what it would build);

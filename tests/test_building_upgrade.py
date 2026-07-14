@@ -49,6 +49,19 @@ def test_parse_price_ignores_leading_counts():
     assert offers[0].price == 100_000
 
 
+def test_parse_extension_offers_skips_disabled():
+    # An academy shows all three "Additional classroom" extensions at once, but
+    # the next-in-chain ones are `disabled` until the previous is built. Buying
+    # a disabled one would be rejected, so only the enabled offer is returned.
+    html = """
+    <a class="btn btn-success " href="/buildings/55/extension/credits/0">400,000 Credits</a>
+    <a class="btn btn-success disabled" href="/buildings/55/extension/credits/1">400,000 Credits</a>
+    <a class="btn btn-success disabled" href="/buildings/55/extension/credits/2">400,000 Credits</a>
+    """
+    offers = parse_extension_offers(html, 55)
+    assert [o.ext_id for o in offers] == [0]
+
+
 def test_classify_alliance_buildings():
     html = """
     <table>

@@ -47,16 +47,24 @@ ACADEMIES: dict[str, dict[str, str]] = {
     "fire":    {"build_key": "fire academy",          "label": "Fire academy",          "emoji": "🚒"},
     "police":  {"build_key": "police academy",        "label": "Police academy",        "emoji": "🚓"},
     "rescue":  {"build_key": "rescue (ems) academy",  "label": "Rescue academy",        "emoji": "🚑"},
-    "coastal": {"build_key": "coastal rescue school", "label": "Coastal Rescue school", "emoji": "🌊"},
+    "coastal": {"build_key": "coastal rescue school", "label": "Coastal Rescue School", "emoji": "🌊"},
 }
+
+# Matches any academy we built via the panel — "[AA] <label> #NNN" — so the
+# extension sweep only touches our own academies.
+_OUR_ACADEMY_RE = re.compile(r"^\s*\[AA\]\s.+#\d+\s*$", re.IGNORECASE)
 
 
 class AcademyService:
-    def __init__(self, cfg: Config, db: Database, buildings) -> None:
+    def __init__(self, cfg: Config, db: Database, buildings, upgrader=None) -> None:
         self.cfg = cfg
         # Reuse the building service's browser builder, live-funds read and
         # geocoder (an academy build is a building build minus dedup/geocode).
         self._buildings = buildings
+        # The building-upgrade service finishes a fresh academy by buying its
+        # extensions (all of them — the "skip the large one" rule is
+        # hospital/prison-only). Optional so the service works without it.
+        self._upgrader = upgrader
         self.requests = AutomationRepo(db)
         self._auto = cfg.automation.academy
         self._coords: tuple[float, float, str] | None = None
@@ -210,6 +218,10 @@ class AcademyService:
             await self.requests.set_status(
                 request_id, "done", detail, payload=json.dumps(merged), announce=True,
             )
+            # Finish it: buy the extensions that are available now. The rest
+            # unlock one at a time (~7 days each) and the periodic sweep buys
+            # them as they open.
+            await self._finish_extensions(name)
         else:
             await self.requests.set_status(
                 request_id, "failed", f"{name}: {result.detail}",
@@ -239,7 +251,8 @@ class AcademyService:
         return self._coords
 
     async def _next_name(self, spec: dict[str, str]) -> str:
-        return f"[AA] {spec['label']} #{await self._next_number(spec)}"
+        # Zero-pad to three digits: "[AA] Fire academy #007".
+        return f"[AA] {spec['label']} #{await self._next_number(spec):03d}"
 
     async def _next_number(self, spec: dict[str, str]) -> int:
         """Scan the alliance's LIVE building list for existing
@@ -261,3 +274,87 @@ class AcademyService:
                 break
             path = nxt
         return highest + 1
+
+    # -- extensions ------------------------------------------------------
+
+    async def _finish_extensions(self, name: str) -> None:
+        """Right after a build, buy the extension(s) available now. Extensions
+        unlock one at a time (each ~7 days), so this typically buys the first;
+        :meth:`sweep_extensions` buys the rest as they open. The funds floor is
+        NOT enforced here — the build itself was already funds-gated, and a
+        fresh building is finished in one go (as with hospital/prison
+        post-creation)."""
+        if self._upgrader is None or self.dry_run:
+            return
+        try:
+            building_id = await self._find_building_id(name)
+        except MissionChiefError as exc:
+            log.info("academy: could not list buildings to extend %s (%s)", name, exc)
+            return
+        if building_id is None:
+            log.info("academy: %s not listed yet; the sweep will extend it later", name)
+            return
+        await self._extend_one(building_id, name)
+
+    async def sweep_extensions(self) -> int:
+        """Buy any now-available extension on each of our ``[AA]`` academies.
+        Scheduled periodically so the sequential (7-day) extensions max out
+        over time. Returns the number of extensions bought this run."""
+        if self._upgrader is None or self.dry_run:
+            return 0
+        try:
+            academies = await self._list_our_academies()
+        except MissionChiefError as exc:
+            log.info("academy sweep: could not list buildings (%s)", exc)
+            return 0
+        bought = 0
+        for building_id, name in academies:
+            bought += await self._extend_one(building_id, name)
+        if bought:
+            log.info("academy sweep: bought %d extension(s) across %d academies",
+                     bought, len(academies))
+        return bought
+
+    async def _extend_one(self, building_id: int, name: str) -> int:
+        try:
+            report = await self._upgrader.upgrade_one(
+                building_id, kind=KIND, name=name, enforce_floor=False,
+            )
+        except Exception:  # noqa: BLE001 — extending must never crash the caller
+            log.exception("academy: extension buy failed for %s", name)
+            return 0
+        if report.extensions_bought:
+            log.info("academy: %s — bought %d extension(s)",
+                     name, report.extensions_bought)
+        return report.extensions_bought
+
+    async def _find_building_id(self, name: str) -> int | None:
+        target = (name or "").strip().casefold()
+        async for listing in self._walk_buildings():
+            if (listing.name or "").strip().casefold() == target:
+                return listing.building_id
+        return None
+
+    async def _list_our_academies(self) -> list[tuple[int, str]]:
+        """Every academy we built — ``(building_id, name)`` — identified by the
+        ``[AA] … #NNN`` naming scheme and an academy discipline."""
+        out: list[tuple[int, str]] = []
+        seen: set[int] = set()
+        async for listing in self._walk_buildings():
+            if listing.building_id in seen or listing.discipline is None:
+                continue
+            if _OUR_ACADEMY_RE.match(listing.name or ""):
+                seen.add(listing.building_id)
+                out.append((listing.building_id, listing.name))
+        return out
+
+    async def _walk_buildings(self):
+        path = ALLIANCE_BUILDINGS_PATH
+        for _ in range(MAX_LIST_PAGES):
+            html = await self.client.fetch_page(path)
+            for listing in parse_alliance_buildings_page(html):
+                yield listing
+            nxt = find_next_page_path(html)
+            if not nxt:
+                break
+            path = nxt
