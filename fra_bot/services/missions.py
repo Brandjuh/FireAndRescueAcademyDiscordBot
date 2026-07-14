@@ -1063,6 +1063,17 @@ class MissionScheduler:
             try:
                 resolved = await self._resolve(entry["location_text"] or "")
             except GeocodeError as exc:
+                # A transient geocode failure (network, Nominatim 429/5xx) must
+                # NOT permanently pause a good entry — the queue path already
+                # keeps such requests waiting. Only a permanent failure (bad
+                # place, dead API key) deactivates; otherwise keep the turn and
+                # retry next poll.
+                if getattr(exc, "transient", False):
+                    log.info(
+                        "rotation entry %s kept active — transient geocode "
+                        "error (%s); will retry", entry["id"], exc,
+                    )
+                    return 0
                 await self.rotation.deactivate_with_note(
                     entry["id"], f"⚠️ geocode failed: {exc}"
                 )
@@ -1234,6 +1245,23 @@ class MissionScheduler:
                 allow_redirects=False,
             )
         except MissionChiefError as exc:
+            # The POST may have reached MissionChief and created the mission
+            # before the response was lost. Confirm via the free-mission
+            # cooldown before deciding: a start we can PROVE happened must be
+            # reported as started so the caller advances the rotation cycle /
+            # marks the request done — otherwise the same free large mission
+            # is re-fired on the next window (the "same mission two days in a
+            # row" a lost response would otherwise cause). If we cannot prove
+            # it started, retry as before.
+            verified = await self._verify_started(new_path, latitude, longitude, free_before)
+            if verified:
+                await self.set_start_backoff()
+                return StartOutcome(
+                    "started",
+                    f"{kind} started at {latitude:.5f},{longitude:.5f} "
+                    "(response lost — confirmed via cooldown)",
+                    verified=True,
+                )
             return StartOutcome("http_error", f"start request failed ({exc}); will retry")
 
         if status >= 400:
