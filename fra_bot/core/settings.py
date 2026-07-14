@@ -116,6 +116,8 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("discord.notify_event_role_id", "int", True,
             "Role always pinged on a mission/event start",
             aliases=("notify_event_role",)),
+    Setting("discord.vehicle_announce_role_id", "int", True,
+            "Role pinged for new-vehicle announcements (0 = none)"),
     Setting("discord.mission_announce_role_id", "int", True,
             "Role pinged on new/updated-mission announcements (0 = none)",
             aliases=("mission_announce_role",)),

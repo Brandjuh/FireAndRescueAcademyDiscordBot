@@ -519,3 +519,19 @@ async def test_buildings_failure_does_not_fake_a_vehicle_update(db, monkeypatch)
     assert summary["skipped"] == 3
     assert all(not t.messages for t in forum.threads)  # no "Vehicle updated" notes
     assert announce.sent == []                          # no false announcement
+
+
+async def test_new_vehicle_announcement_pings_configured_role(db):
+    cfg = _cfg()
+    cfg.discord.vehicle_announce_role_id = 4242
+    service, _forum, announce, _ = _service(db, cfg=cfg)
+    thread = SimpleNamespace(jump_url="http://x/1", mention="<#1>")
+    assert await service._announce(_veh(99, "Test Rig"), thread) == 1
+    assert announce.sent[-1].startswith("<@&4242>")
+
+
+async def test_new_vehicle_announcement_without_role_has_no_ping(db):
+    service, _forum, announce, _ = _service(db)  # no role configured
+    thread = SimpleNamespace(jump_url="http://x/1", mention="<#1>")
+    await service._announce(_veh(99, "Test Rig"), thread)
+    assert announce.sent and not announce.sent[-1].startswith("<@&")

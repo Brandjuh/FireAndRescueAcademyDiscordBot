@@ -85,6 +85,9 @@ discord:
   # Role pinged on new/updated-mission announcements in the
   # mission_announce channel (0 = message without a ping).
   mission_announce_role_id: 0
+  # Role pinged on new-vehicle announcements in the vehicle_announce
+  # channel (0 = message without a ping).
+  vehicle_announce_role_id: 0
 
 automation:
   # SAFETY FIRST: with dry_run on, the bot detects and reports board

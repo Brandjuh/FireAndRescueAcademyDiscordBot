@@ -677,16 +677,27 @@ class VehiclesForumService:
         channel_id = self._cfg.discord.channels.vehicle_announce
         return self._bot.get_channel(channel_id) if channel_id else None
 
+    def _announce_role_prefix(self):
+        """(ping text, allowed_mentions) for the optional new-vehicle role."""
+        role_id = getattr(self._cfg.discord, "vehicle_announce_role_id", 0)
+        if role_id:
+            return (
+                f"<@&{role_id}> ",
+                discord.AllowedMentions(roles=[discord.Object(id=role_id)]),
+            )
+        return "", discord.AllowedMentions.none()
+
     async def _announce(self, vehicle: dict, thread) -> int:
         channel = self._announce_channel()
         if channel is None:
             return 0
         name = vehicle_name(vehicle)
         jump = getattr(thread, "jump_url", "") or getattr(thread, "mention", "")
+        ping, mentions = self._announce_role_prefix()
         try:
             await channel.send(
-                f"🆕 **New vehicle in MissionChief:** {name}\n➡️ {jump}",
-                allowed_mentions=discord.AllowedMentions.none(),
+                f"{ping}🆕 **New vehicle in MissionChief:** {name}\n➡️ {jump}",
+                allowed_mentions=mentions,
             )
             return 1
         except discord.HTTPException as exc:
