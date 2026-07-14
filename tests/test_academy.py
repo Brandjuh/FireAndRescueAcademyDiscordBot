@@ -152,8 +152,8 @@ async def test_build_when_funds_ok(db):
     row = await _enqueue_run(svc)
     assert row["status"] == "done"
     assert buildings._builder.calls[0]["building_type"] == "fire academy"
-    assert buildings._builder.calls[0]["name"] == "[AA] Fire academy #5"
-    assert "#5" in row["status_detail"]
+    assert buildings._builder.calls[0]["name"] == "[AA] Fire academy #005"
+    assert "#005" in row["status_detail"]
 
 
 async def test_low_funds_queues_then_builds_on_recovery(db):
@@ -183,7 +183,7 @@ async def test_dry_run_reports_without_building(db):
     svc, buildings = _make(db, dry_run=True, names=["[AA] Police academy #1"])
     row = await _enqueue_run(svc, "police")
     assert row["status"] == "skipped"
-    assert "would build [AA] Police academy #2" in row["status_detail"]
+    assert "would build [AA] Police academy #002" in row["status_detail"]
     assert buildings._builder.calls == []
 
 
@@ -214,6 +214,90 @@ async def test_enqueue_rejects_unknown_kind(db):
     svc, _ = _make(db)
     with pytest.raises(ValueError):
         await svc.enqueue("navy", requester_name="x", discord_user_id=1, channel_id=1)
+
+
+# ---------------------------------------------------------------------------
+# Naming + extensions
+# ---------------------------------------------------------------------------
+
+def test_coastal_label_uses_capital_school():
+    assert acad.ACADEMIES["coastal"]["label"] == "Coastal Rescue School"
+
+
+async def test_names_are_three_digit_padded(db):
+    svc, _ = _make(db, names=["[AA] Fire academy #4"])
+    assert await svc._next_name(acad.ACADEMIES["fire"]) == "[AA] Fire academy #005"
+    svc2, _ = _make(db, names=[])
+    assert await svc2._next_name(acad.ACADEMIES["police"]) == "[AA] Police academy #001"
+
+
+class _FakeUpgrader:
+    def __init__(self, bought=1):
+        self.calls = []
+        self._bought = bought
+
+    async def upgrade_one(self, building_id, *, kind, name, enforce_floor=False):
+        self.calls.append({"building_id": building_id, "kind": kind,
+                           "name": name, "enforce_floor": enforce_floor})
+        return SimpleNamespace(extensions_bought=self._bought)
+
+
+async def test_successful_build_triggers_extension_finish(db):
+    svc, _ = _make(db, funds=9_000_000, names=["[AA] Fire academy #4"])
+    called = []
+
+    async def spy(name):
+        called.append(name)
+
+    svc._finish_extensions = spy
+    row = await _enqueue_run(svc)
+    assert row["status"] == "done"
+    assert called == ["[AA] Fire academy #005"]        # finisher gets the 3-digit name
+
+
+async def test_finish_extensions_buys_on_the_new_building(db):
+    up = _FakeUpgrader()
+    svc, _ = _make(db, names=["[AA] Fire academy #007"])   # building_id 1000
+    svc._upgrader = up
+    await svc._finish_extensions("[AA] Fire academy #007")
+    assert len(up.calls) == 1
+    assert up.calls[0]["building_id"] == 1000
+    assert up.calls[0]["kind"] == "academy"
+    assert up.calls[0]["enforce_floor"] is False           # finish immediately
+
+
+async def test_finish_extensions_without_upgrader_is_noop(db):
+    svc, _ = _make(db, names=["[AA] Fire academy #007"])
+    await svc._finish_extensions("[AA] Fire academy #007")  # must not raise
+
+
+async def test_finish_extensions_skips_when_not_listed_yet(db):
+    up = _FakeUpgrader()
+    svc, _ = _make(db, names=["[AA] Fire academy #001"])
+    svc._upgrader = up
+    await svc._finish_extensions("[AA] Fire academy #999")  # not on the page
+    assert up.calls == []
+
+
+async def test_sweep_extensions_buys_on_each_academy(db):
+    up = _FakeUpgrader()
+    svc, _ = _make(db)
+    svc._upgrader = up
+
+    async def fake_list():
+        return [(1000, "[AA] Fire academy #001"), (1001, "[AA] Police academy #002")]
+
+    svc._list_our_academies = fake_list
+    assert await svc.sweep_extensions() == 2                # one extension each
+    assert {c["building_id"] for c in up.calls} == {1000, 1001}
+
+
+async def test_sweep_extensions_is_noop_in_dry_run(db):
+    up = _FakeUpgrader()
+    svc, _ = _make(db, dry_run=True)
+    svc._upgrader = up
+    assert await svc.sweep_extensions() == 0
+    assert up.calls == []
 
 
 async def test_coords_cached_but_re_geocode_on_address_change(db):
