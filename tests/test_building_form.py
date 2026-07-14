@@ -14,7 +14,10 @@ BUILDING_TYPE_SELECT = """
 <option value="2">Hospital</option>
 <option value="14">Clinic</option>
 <option value="5">Police station</option>
+<option value="7">Police academy</option>
 <option value="10">Prison</option>
+<option value="19">Rescue (EMS) academy</option>
+<option value="24">Coastal Rescue School</option>
 <option value="9">Staging area</option>
 </select>
 """

@@ -30,7 +30,14 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
-BUILDING_TYPE_IDS = {"hospital": "2", "prison": "10"}
+# Keys are the /buildings/new option LABELS lowercased (the drift guard in
+# tests/test_building_form.py checks each against the live form). Academy ids
+# come from that select, cross-checked against LSSM buildings.ts.
+BUILDING_TYPE_IDS = {
+    "hospital": "2", "prison": "10",
+    "fire academy": "4", "police academy": "7",
+    "rescue (ems) academy": "19", "coastal rescue school": "24",
+}
 NAME_LIMIT = 40
 
 # 1. Select the building type — dispatches 'change', which the page's own

@@ -86,6 +86,8 @@ class DiscordChannels:
     # The class-availability panel: free training classes per agency,
     # refreshed hourly by the keeper; 0 = off.
     class_panel: int = 1421627971831070730
+    # The academy-build panel (Fire/Police/Rescue/Coastal buttons); 0 = off.
+    academy_panel: int = 1426226521231589507
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,20 @@ class BuildingAutomationConfig:
     # OSM location, funds-gated and deduped against existing buildings.
     daily_build_enabled: bool
     daily_build_time: str  # "HH:MM" in reports.timezone
+
+
+@dataclass(frozen=True)
+class AcademyAutomationConfig:
+    """Discord-panel academy builds at a fixed address (overlap allowed).
+
+    ``enabled`` gates the funds-gated retry queue; the panel buttons still
+    enqueue when it is off, but a low-funds build only retries once the
+    queue poller runs. ``role_id`` = 0 means admins only."""
+    enabled: bool
+    role_id: int
+    interval: int
+    address: str
+    min_alliance_funds: int
 
 
 @dataclass(frozen=True)
@@ -226,6 +242,7 @@ class AutomationConfig:
     reply_to_board: bool
     training: TrainingAutomationConfig
     building: BuildingAutomationConfig
+    academy: AcademyAutomationConfig
     events: EventsAutomationConfig
     mission: MissionAutomationConfig
     tax_warnings: TaxWarningsConfig
@@ -408,6 +425,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 class_panel=int(
                     channels.get("class_panel", 1421627971831070730)
                 ),
+                academy_panel=int(
+                    channels.get("academy_panel", 1426226521231589507)
+                ),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])
@@ -459,6 +479,18 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 daily_build_time=str(
                     _get(raw, "automation", "building", "daily_build_time", default="03:00")
+                ),
+            ),
+            academy=AcademyAutomationConfig(
+                enabled=bool(_get(raw, "automation", "academy", "enabled", default=False)),
+                role_id=int(_get(raw, "automation", "academy", "role_id", default=0)),
+                interval=int(_get(raw, "automation", "academy", "interval", default=10)),
+                address=str(
+                    _get(raw, "automation", "academy", "address",
+                         default="Tepper Avenue, 10454 New York, Manhattan")
+                ),
+                min_alliance_funds=int(
+                    _get(raw, "automation", "academy", "min_alliance_funds", default=2_000_000)
                 ),
             ),
             events=EventsAutomationConfig(

@@ -840,6 +840,21 @@ class AdminCog(commands.Cog):
         outcome = await keeper.ensure("requests", channel=channel, force=True)
         await ctx.send(f"✅ Request panel {outcome} in <#{channel.id}>.")
 
+    @fra.command(name="academypanel", aliases=["academiespanel"])
+    async def academy_panel(self, ctx: commands.Context) -> None:
+        """(Re)post the academy-build panel (configured channel, else this
+        one). The keeper maintains it automatically afterwards."""
+        keeper = self.bot.get_cog("PanelKeeperCog")
+        if keeper is None:
+            await ctx.send("Panel keeper not loaded.")
+            return
+        channel_id = getattr(self.bot.cfg.discord.channels, "academy_panel", 0)
+        channel = self.bot.get_channel(channel_id) if channel_id else ctx.channel
+        if channel is None:
+            channel = ctx.channel
+        outcome = await keeper.ensure("academy", channel=channel, force=True)
+        await ctx.send(f"✅ Academy panel {outcome} in <#{channel.id}>.")
+
     @fra.command(name="classpanel", aliases=["classespanel"])
     async def class_panel(self, ctx: commands.Context) -> None:
         """(Re)post the class-availability panel (configured channel, else
