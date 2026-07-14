@@ -560,6 +560,48 @@ async def test_rotation_geocode_failure_deactivates(db):
     assert "geocode failed" in (row["address"] or "")
 
 
+async def test_rotation_transient_geocode_keeps_entry_active(db):
+    # A transient geocode error (Nominatim 429/5xx) must NOT permanently pause
+    # a good rotation entry — otherwise a brief outage silently collapses the
+    # rotation to whatever's already cached and it repeats forever.
+    class FlakyGeo(FakeGeo):
+        async def search(self, query):
+            from fra_bot.geo.geocoder import GeocodeError
+            raise GeocodeError("nominatim 429", status=429, transient=True)
+
+    sched = MissionScheduler(_cfg(dry_run=True), FakeClient(), db, FlakyGeo())
+    rid = await sched.rotation.add(location_text="Flaky", kind="large",
+                                   mission_source="preset", created_by="admin")
+    handled = await sched._advance()
+    assert handled == 0                                   # nothing started
+    row = await sched.rotation.get(rid)
+    assert row["active"] == 1                             # kept for retry, not paused
+    assert row["last_started_at"] is None                # its turn is preserved
+
+
+async def test_rotation_lost_post_after_start_is_confirmed_not_refired(db):
+    # The POST reaches MissionChief and starts the mission, but the response is
+    # lost (network error). Confirming via the advanced cooldown must mark the
+    # entry started so it is NOT re-fired (same large mission two days running).
+    from fra_bot.mc.errors import MissionChiefError
+
+    class LostPostClient(FakeClient):
+        async def post_form(self, path, data, **kwargs):
+            self.posted = True          # server DID create the mission in-game
+            self.post_calls += 1
+            raise MissionChiefError("connection reset after commit")
+
+    sched = MissionScheduler(_cfg(dry_run=False), LostPostClient(), db, FakeGeo())
+    rid = await sched.rotation.add(location_text="CityX", kind="large",
+                                   mission_source="preset", latitude=1.0, longitude=2.0,
+                                   address="CityX", created_by="admin")
+    handled = await sched._process_rotation()
+    assert handled == 1                                   # counted as started
+    row = await sched.rotation.get(rid)
+    assert row["last_started_at"] is not None             # advanced -> won't re-fire
+    assert row["start_count"] == 1
+
+
 # -- recurring promotion + next-up ------------------------------------------
 
 async def test_recurring_request_promotes_to_rotation(db):
