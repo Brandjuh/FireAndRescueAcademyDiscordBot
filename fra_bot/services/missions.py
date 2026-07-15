@@ -76,7 +76,7 @@ from ..mc.parsers.mission_spec import (
     MissionSpecError,
     parse_board_request,
 )
-from .board_cleanup import deletion_due_at
+from .board_cleanup import deletion_due_at, schedule_reply_cleanup
 
 log = logging.getLogger(__name__)
 
@@ -715,9 +715,16 @@ class MissionScheduler:
         if not self.cfg.automation.reply_to_board:
             return
         try:
-            await self.board.post_reply(thread_id, content)
+            posted = await self.board.post_reply(thread_id, content)
         except MissionChiefError as exc:
             log.warning("mission: board reply to %s failed: %s", thread_id, exc)
+            return
+        if posted:
+            # Our own notice gets the same 12h tidy-up as the request post.
+            await schedule_reply_cleanup(
+                self.board, self.deletions, thread_id, content,
+                kind="mission", dry_run=self.dry_run,
+            )
 
     # -- queue + rotation advance ---------------------------------------
 

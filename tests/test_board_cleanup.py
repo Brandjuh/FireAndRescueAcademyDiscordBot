@@ -175,3 +175,77 @@ async def test_training_terminal_schedules_cleanup_live(db):
     await svc.requests.set_status(rid, "done", "opened")
     await svc._schedule_cleanup(rid)
     assert await svc.deletions.pending_count() == 1
+
+
+# -- the bot's OWN reply gets the 12h tidy-up too ---------------------------
+
+class _ReplyBoard:
+    """Fake board: posting succeeds and the just-posted reply is found."""
+
+    def __init__(self, *, found=777, fail_lookup=False):
+        self.found = found
+        self.fail_lookup = fail_lookup
+        self.lookups = []
+        self.replies = []
+
+    async def post_reply(self, thread_id, content):
+        self.replies.append((int(thread_id), content))
+        return True
+
+    async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+        if self.fail_lookup:
+            from fra_bot.mc.errors import MissionChiefError
+            raise MissionChiefError("boom")
+        self.lookups.append((int(thread_id), marker, max_pages))
+        return self.found
+
+
+async def test_schedule_reply_cleanup_queues_own_post(db):
+    from fra_bot.services.board_cleanup import schedule_reply_cleanup
+
+    board = _ReplyBoard(found=777)
+    repo = BoardDeletionRepo(db)
+    await schedule_reply_cleanup(
+        board, repo, 5935, "Training request processed for Alice.\nOpened: ...",
+        kind="training", dry_run=False,
+    )
+    assert board.lookups == [(5935, "Training request processed for Alice.", 1)]
+    async with db.conn.execute(
+        "SELECT thread_id, post_id, reason FROM board_pending_deletions"
+    ) as cur:
+        rows = await cur.fetchall()
+    assert [(r["thread_id"], r["post_id"], r["reason"]) for r in rows] == [
+        (5935, 777, "bot training reply")
+    ]
+    assert await repo.due() == []  # 12h out, not due yet
+
+
+async def test_schedule_reply_cleanup_dry_run_and_not_found(db):
+    from fra_bot.services.board_cleanup import schedule_reply_cleanup
+
+    repo = BoardDeletionRepo(db)
+    await schedule_reply_cleanup(          # dry-run: never scheduled
+        _ReplyBoard(), repo, 5935, "text", kind="training", dry_run=True,
+    )
+    await schedule_reply_cleanup(          # not found: best-effort skip
+        _ReplyBoard(found=None), repo, 5935, "text", kind="training", dry_run=False,
+    )
+    await schedule_reply_cleanup(          # lookup error: swallowed
+        _ReplyBoard(fail_lookup=True), repo, 5935, "text", kind="training", dry_run=False,
+    )
+    assert await repo.pending_count() == 0
+
+
+async def test_training_reply_schedules_own_cleanup(db):
+    from tests.test_trainings_flow import _service
+
+    svc, _ = _service(db, dry_run=False)
+    svc.cfg.automation.reply_to_board = True
+    svc.board = _ReplyBoard(found=888)
+    await svc.reply("Training request processed for Alice.")
+    assert svc.board.replies                          # reply was posted
+    async with db.conn.execute(
+        "SELECT post_id, reason FROM board_pending_deletions"
+    ) as cur:
+        rows = await cur.fetchall()
+    assert [(r["post_id"], r["reason"]) for r in rows] == [(888, "bot training reply")]

@@ -47,7 +47,7 @@ from ..mc.board import (
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.board import BoardPost
-from .board_cleanup import deletion_due_at
+from .board_cleanup import deletion_due_at, schedule_reply_cleanup
 
 log = logging.getLogger(__name__)
 
@@ -395,9 +395,16 @@ class BoardRequestService:
         if not self.cfg.automation.reply_to_board:
             return
         try:
-            await self.board.post_reply(self.thread_id, content)
+            posted = await self.board.post_reply(self.thread_id, content)
         except MissionChiefError as exc:
             log.warning("%s: board reply failed: %s", self.kind, exc)
+            return
+        if posted:
+            # Our own notice gets the same 12h tidy-up as the request post.
+            await schedule_reply_cleanup(
+                self.board, self.deletions, self.thread_id, content,
+                kind=self.kind, dry_run=self.dry_run,
+            )
 
     @staticmethod
     def is_discord_request(request: aiosqlite.Row) -> bool:
