@@ -40,6 +40,39 @@ def deletion_due_at() -> str:
     ).isoformat()
 
 
+async def schedule_reply_cleanup(
+    board: BoardClient,
+    deletions: BoardDeletionRepo,
+    thread_id: int,
+    content: str,
+    *,
+    kind: str,
+    dry_run: bool,
+) -> None:
+    """Queue the bot's OWN just-posted reply for the same 12h tidy-up as the
+    handled request post, so processed-notices don't pile up on the board.
+
+    The reply is located as the newest bot-authored post on the thread's last
+    page containing the reply's first line (guides never go through the reply
+    path, so they are never scheduled). Best-effort: if the post can't be
+    found the reply simply stays. Live-only, like every board deletion."""
+    if dry_run:
+        return
+    snippet = next((ln for ln in content.splitlines() if ln.strip()), "")
+    if not snippet:
+        return
+    try:
+        post_id = await board.find_bot_post(int(thread_id), snippet, max_pages=1)
+    except MissionChiefError as exc:
+        log.debug("%s: could not locate own reply to tidy up (%s)", kind, exc)
+        return
+    if post_id:
+        await deletions.schedule(
+            int(thread_id), int(post_id),
+            due_at=deletion_due_at(), reason=f"bot {kind} reply",
+        )
+
+
 class BoardCleanupService:
     """Periodically deletes board request posts whose grace period has passed."""
 

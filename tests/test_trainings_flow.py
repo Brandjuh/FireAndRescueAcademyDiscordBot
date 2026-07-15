@@ -185,6 +185,9 @@ async def test_dry_run_board_reply_says_would_open(db):
             replies.append(content)
             return True
 
+        async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+            return None
+
     svc.board = _Recorder()
     rid = await svc.requests.create(
         kind="training", thread_id=5935, post_id=8,
@@ -278,6 +281,9 @@ async def test_reply_for_skips_discord_source(db):
         async def post_reply(self, thread_id, content):
             sent.append(content)
             return True
+
+        async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+            return None
 
     svc.board = _Recorder()
     await svc.reply_for({"thread_id": 5935}, "to the board")
@@ -691,6 +697,9 @@ async def test_live_success_reply_uses_reference_format_and_sends_pm(db):
             replies.append(content)
             return True
 
+        async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+            return None
+
     svc.board = _Board()
     rid = await svc.requests.create(
         kind="training", thread_id=5935, post_id=11,
@@ -727,6 +736,9 @@ async def test_all_failed_reply_uses_could_not_be_processed(db):
         async def post_reply(self, thread_id, content):
             replies.append(content)
             return True
+
+        async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+            return None
 
     svc.board = _Board()
     rid = await svc.requests.create(

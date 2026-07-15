@@ -184,6 +184,8 @@ def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", alliance_json="[]"
                             reverse_address=reverse_address)
     svc.state = StateRepo(db)
     svc.runs = RunsRepo(db)
+    from fra_bot.db.repos import BoardDeletionRepo
+    svc.deletions = BoardDeletionRepo(db)
     svc._geocoder = FakeGeo()
     svc._overpass = FakeOverpass(OVERPASS_DATA if overpass_data is None else overpass_data)
     svc._builder = FakeBuilder()
@@ -382,6 +384,9 @@ async def test_dry_run_board_request_not_blocked_by_funds_read(db):
             replies.append(content)
             return True
 
+        async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+            return None
+
     svc.board = _Board()
     rid = await svc.requests.create(
         kind="building", thread_id=15304, post_id=3,
@@ -520,6 +525,9 @@ def _board_svc(db, monkeypatch):
         async def post_reply(self, thread_id, content):
             replies.append(content)
             return True
+
+        async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+            return None
 
     svc.board = _Board()
     return svc, replies
