@@ -215,6 +215,19 @@ def build_event_payload(
     return [(key, value) for key, value in merged.items() if value != "" or key.endswith("]")]
 
 
+def parse_large_mission_types(html: str) -> list[int]:
+    """All selectable large-mission type ids on ``/missionAllianceNew`` —
+    the ``mission_position[mission_type_id]`` radios. Sorted, deduped;
+    empty when the form exposes no choice."""
+    soup = BeautifulSoup(html, "lxml")
+    out: set[int] = set()
+    for inp in soup.select('input[name="mission_position[mission_type_id]"]'):
+        value = inp.get("value")
+        if value and str(value).isdigit():
+            out.add(int(value))
+    return sorted(out)
+
+
 def parse_event_types(html: str) -> list[dict]:
     """Read the event-type radios from /missionAllianceEventNew.
 

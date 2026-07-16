@@ -27,6 +27,7 @@ import datetime
 import hashlib
 import json
 import logging
+import random
 from dataclasses import dataclass
 
 import aiosqlite
@@ -57,6 +58,7 @@ from ..mc.parsers.logs import parse_logs_page
 from ..mc.parsers.events import (
     EVENT_KINDS,
     EVENT_TYPES,
+    parse_large_mission_types,
     build_alliance_event_payload,
     build_event_payload,
     is_free_submit,
@@ -1410,10 +1412,18 @@ class MissionScheduler:
                 form, saved.to_custom(), latitude=latitude, longitude=longitude,
                 address=address,
             )
-        # preset large
+        # Preset large. Without an explicit preset the form's default radio
+        # never changes, so keeping it would start the exact same game
+        # mission every window — pick a random selectable type per start
+        # instead, so the daily rotation has real variety.
+        type_id = preset_type_id
+        if type_id is None:
+            choices = parse_large_mission_types(html) or list(PRESET_TYPE_IDS)
+            type_id = random.choice(choices)
+            log.info("mission: no preset chosen — random large type %s", type_id)
         return build_event_payload(
             form, kind="large", latitude=latitude, longitude=longitude,
-            address=address, mission_type_id=preset_type_id,
+            address=address, mission_type_id=type_id,
         )
 
     async def _verify_started(
