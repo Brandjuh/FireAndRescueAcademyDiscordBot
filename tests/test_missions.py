@@ -1493,3 +1493,58 @@ async def test_saved_missions_html_returns_plain_when_anchors_present(tmp_path):
     svc.cfg = SimpleNamespace(missionchief=SimpleNamespace(base_url="https://x"))
     svc.client = SimpleNamespace(session=SimpleNamespace(cookie_jar=[]))
     assert await svc._saved_missions_html("<html></html>") == "<html></html>"
+
+
+# -- random large type when no preset chosen ---------------------------------
+
+def test_parse_large_mission_types_reads_radios():
+    from fra_bot.mc.parsers.events import parse_large_mission_types
+
+    html = """
+    <form><input type="radio" name="mission_position[mission_type_id]" value="41"/>
+    <input type="radio" name="mission_position[mission_type_id]" value="62" checked/>
+    <input type="radio" name="mission_position[mission_type_id]" value="41"/>
+    <input type="radio" name="mission_position[mission_type_id]" value="x"/></form>
+    """
+    assert parse_large_mission_types(html) == [41, 62]
+    assert parse_large_mission_types("<html>no form</html>") == []
+
+
+async def test_preset_large_without_type_picks_random_per_start(db, monkeypatch):
+    # Two selectable types on the form; without an explicit preset the start
+    # must pick one of THEM (not silently keep the checked default forever).
+    two_types = _large_form().replace(
+        '<input type="radio" name="mission_position[mission_type_id]" value="41" checked/>',
+        '<input type="radio" name="mission_position[mission_type_id]" value="41" checked/>'
+        '<input type="radio" name="mission_position[mission_type_id]" value="62"/>',
+    )
+    import fra_bot.services.missions as m
+
+    monkeypatch.setattr(m.random, "choice", lambda seq: max(seq))  # deterministic
+    client = FakeClient(two_types)
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    rid = await sched.rotation.add(
+        location_text="CityX", kind="large", mission_source="preset",
+        latitude=1.0, longitude=2.0, address="CityX", created_by="admin",
+    )
+    assert await sched._process_rotation() == 1
+    body = dict(client.posted_body)
+    assert body["mission_position[mission_type_id]"] == "62"   # picked from the form
+    assert (await sched.rotation.get(rid))["start_count"] == 1
+
+
+async def test_explicit_preset_type_is_kept(db, monkeypatch):
+    import fra_bot.services.missions as m
+
+    monkeypatch.setattr(m.random, "choice", lambda seq: (_ for _ in ()).throw(
+        AssertionError("random must not be used when a preset is chosen")))
+    client = FakeClient()
+    sched = _scheduler(_cfg(dry_run=False), client, db)
+    await sched.rotation.add(
+        location_text="CityX", kind="large", mission_source="preset",
+        preset_type_id=112, latitude=1.0, longitude=2.0, address="CityX",
+        created_by="admin",
+    )
+    assert await sched._process_rotation() == 1
+    body = dict(client.posted_body)
+    assert body["mission_position[mission_type_id]"] == "112"
