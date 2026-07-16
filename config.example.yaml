@@ -109,6 +109,14 @@ automation:
     # the applications channel carries Accept/Deny buttons instead, so
     # admins decide from Discord. Honours dry_run.
     auto_accept: false
+  chat:
+    # Alliance chat ↔ Discord bridge: mirrors the game's alliance chat
+    # into discord.channels.chat_bridge and relays human messages from
+    # that channel back into the game as "[DiscordName] text". First
+    # sync only baselines (no history flood); game posts are spaced
+    # ≥30 s apart. Relaying into the game honours dry_run.
+    enabled: false
+    interval_seconds: 30
   training:
     enabled: false            # master switch for training auto-start
     thread_id: 5935           # /alliance_threads/<id> with training requests
