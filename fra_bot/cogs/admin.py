@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import logging
 
 import discord
@@ -193,6 +194,34 @@ class AdminCog(commands.Cog):
             ),
         )
         embed.add_field(name="Open requests", value=str(await self._automation.open_count()))
+
+        # Surface silent board-reply failures: a member whose class opened
+        # but who never saw the bot's board notice lands exactly here.
+        reply_lines = []
+        for kind in ("training", "building", "event"):
+            raw = await self._state.get(f"board_reply_last_failure:{kind}")
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                continue
+            reply_lines.append(
+                f"⚠️ {kind}: {data.get('detail', '?')} "
+                f"({str(data.get('at', ''))[:16]})"
+            )
+        if reply_lines:
+            embed.add_field(
+                name="Board replies FAILING",
+                value="\n".join(reply_lines)[:1024], inline=False,
+            )
+        if not auto.reply_to_board:
+            embed.add_field(
+                name="Board replies",
+                value="⚠️ reply_to_board is OFF — the bot never posts board "
+                "notices (`!fra set reply_to_board on`)",
+                inline=False,
+            )
 
         recent = await self._automation.recent(limit=8)
         if recent:
