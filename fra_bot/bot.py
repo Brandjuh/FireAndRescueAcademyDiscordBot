@@ -391,22 +391,26 @@ class FRABot(commands.Bot):
             name="treasury-pre-reset",
         )
 
-        # Phase 2 board automation pollers (each gated by its own switch).
+        # Phase 2 board automation pollers. ALWAYS registered; each poll
+        # checks its own switch LIVE (services' poll_enabled) and returns
+        # instantly when off. Gating registration on the switch instead
+        # made `!fra set training.enabled on` a trap: the flag flipped in
+        # memory (intake accepted requests, the one-shot kick ran) but the
+        # retry poll didn't exist until restart, stranding any request
+        # whose first attempt hit a transient 'busy'.
         automation = self.cfg.automation
-        if automation.training.enabled:
-            sched.add_interval_job(
-                self._guarded(self.trainings.poll, "board-trainings"),
-                minutes=automation.training.interval,
-                name="board-trainings",
-                initial_delay_seconds=150.0,
-            )
-        if automation.building.enabled:
-            sched.add_interval_job(
-                self._guarded(self.buildings.poll, "board-buildings"),
-                minutes=automation.building.interval,
-                name="board-buildings",
-                initial_delay_seconds=210.0,
-            )
+        sched.add_interval_job(
+            self._guarded(self.trainings.poll, "board-trainings"),
+            minutes=automation.training.interval,
+            name="board-trainings",
+            initial_delay_seconds=150.0,
+        )
+        sched.add_interval_job(
+            self._guarded(self.buildings.poll, "board-buildings"),
+            minutes=automation.building.interval,
+            name="board-buildings",
+            initial_delay_seconds=210.0,
+        )
         # Academy panel builds queued because funds were low: drain + retry.
         # The buttons themselves work regardless of this switch (they build on
         # click); this only auto-resumes builds that had to wait for funds.
@@ -454,18 +458,14 @@ class FRABot(commands.Bot):
             )
         # The unified mission scheduler handles BOTH request boards — the
         # events board (kind=event) and the mission board (kind=large) — plus
-        # the Discord queue and the rotation. Run it when any of those is on.
-        if (
-            automation.mission.enabled
-            or automation.mission.board_enabled
-            or automation.events.enabled
-        ):
-            sched.add_interval_job(
-                self._guarded(self.missions_service.poll, "missions"),
-                minutes=automation.mission.interval,
-                name="missions",
-                initial_delay_seconds=270.0,
-            )
+        # the Discord queue and the rotation. Always registered; the poll
+        # reads the three switches live and no-ops when all are off.
+        sched.add_interval_job(
+            self._guarded(self.missions_service.poll, "missions"),
+            minutes=automation.mission.interval,
+            name="missions",
+            initial_delay_seconds=270.0,
+        )
         # Safety net: release requests/missions stranded in 'processing' (an
         # action interrupted while the bot kept running). The startup sweep
         # only catches ones stranded across a restart; this catches the rest

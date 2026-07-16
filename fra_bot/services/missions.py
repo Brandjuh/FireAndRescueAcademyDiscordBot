@@ -421,7 +421,17 @@ class MissionScheduler:
         A broken board must never starve the queue: each board scan is
         isolated, and the queue/rotation advance ALWAYS runs — otherwise a
         single unreachable thread would leave Discord-sourced requests
-        pending forever."""
+        pending forever.
+
+        The switches are read LIVE each pass (the job is always registered,
+        see bot.py) so `!fra set` enables the pipeline without a restart."""
+        auto = self.cfg.automation
+        if not (
+            auto.mission.enabled
+            or auto.mission.board_enabled
+            or auto.events.enabled
+        ):
+            return
         run_id = await self.runs.start("missions")
         try:
             scanned = 0

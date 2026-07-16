@@ -21,6 +21,8 @@ import time
 from collections import deque
 from contextlib import contextmanager
 
+from ..mc.errors import MissionChiefError
+
 log = logging.getLogger(__name__)
 
 # Task-local flag marking the current work as LOW-priority bulk traffic.
@@ -45,8 +47,14 @@ def bulk_traffic():
         _BULK_TRAFFIC.reset(token)
 
 
-class CircuitOpenError(RuntimeError):
-    """Raised when the circuit breaker is open and traffic is paused."""
+class CircuitOpenError(MissionChiefError):
+    """Raised when the circuit breaker is open and traffic is paused.
+
+    A ``MissionChiefError`` subclass ON PURPOSE: every queue/poll handler
+    treats MissionChiefError as "transient, retry later" (requests go back
+    to 'waiting'). As a plain RuntimeError this escaped those handlers into
+    the generic except-Exception paths, permanently failing a member's
+    request over a 15-minute traffic pause."""
 
     def __init__(self, retry_at: float):
         self.retry_at = retry_at
