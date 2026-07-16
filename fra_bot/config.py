@@ -88,6 +88,8 @@ class DiscordChannels:
     class_panel: int = 1421627971831070730
     # The academy-build panel (Fire/Police/Rescue/Coastal buttons); 0 = off.
     academy_panel: int = 1426226521231589507
+    # Alliance chat ↔ Discord bridge channel; 0 = off.
+    chat_bridge: int = 0
 
 
 @dataclass(frozen=True)
@@ -247,6 +249,17 @@ class TaxWarningsConfig:
 
 
 @dataclass(frozen=True)
+class ChatBridgeConfig:
+    """Alliance chat ↔ Discord bridge (reference bot: chatmanager).
+
+    Mirrors the game's alliance chat into ``discord.channels.chat_bridge``
+    and relays human messages from that channel back into the game as
+    ``[DiscordName] text``. ``interval_seconds`` is clamped to ≥30."""
+    enabled: bool
+    interval_seconds: int
+
+
+@dataclass(frozen=True)
 class ApplicationsAutomationConfig:
     """Alliance application handling (reference bot: newmembernotify).
 
@@ -272,6 +285,7 @@ class AutomationConfig:
     dm_mirror: DmMirrorConfig
     rank_roles: RankRolesConfig
     applications: ApplicationsAutomationConfig
+    chat: ChatBridgeConfig
 
 
 @dataclass(frozen=True)
@@ -466,6 +480,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 academy_panel=int(
                     channels.get("academy_panel", 1426226521231589507)
                 ),
+                chat_bridge=int(channels.get("chat_bridge", 0)),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])
@@ -641,6 +656,14 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                     _get(raw, "automation", "applications", "auto_accept",
                          default=False)
                 ),
+            ),
+            chat=ChatBridgeConfig(
+                enabled=bool(
+                    _get(raw, "automation", "chat", "enabled", default=False)
+                ),
+                interval_seconds=max(30, int(
+                    _get(raw, "automation", "chat", "interval_seconds", default=30)
+                )),
             ),
             tax_warnings=TaxWarningsConfig(
                 enabled=bool(
