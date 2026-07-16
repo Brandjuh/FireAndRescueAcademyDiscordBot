@@ -188,6 +188,47 @@ async def test_own_relayed_message_is_not_mirrored_back(db):
     assert result["skipped_echoes"] == 1
     assert channel.sent == []
     assert await cog.chat.last_seen() == 6941664
+    # The echo match taught the bridge its own game account name.
+    assert await cog.chat.own_account() == "mtycofire"
+
+
+async def test_echo_matching_survives_rendering_differences(db):
+    from fra_bot.services.chat_sync import ChatSyncService
+
+    svc = ChatSyncService(FakeClient({}), db)
+    await svc.remember_echo("[Brandjuh] hello there")
+    # The game may fold case/whitespace differently than what we sent.
+    assert await svc.consume_echo("  [brandjuh]   HELLO there ") is True
+
+
+async def test_learned_own_account_skips_even_after_echo_expired(db):
+    # No echo in memory (expired/lost) — the learned account name still
+    # keeps our own game posts out of Discord.
+    history = CHAT_HISTORY_HTML  # both messages authored by Mtycofire
+    client = FakeClient({"/alliance_chats": history})
+    channel = FakeChannel()
+    cog = _cog(db, client, channel)
+    await cog.chat.set_last_seen(6941600)  # both messages are "fresh"
+    await cog.chat.learn_own_account("Mtycofire")
+    result = await cog._sync_once()
+    assert result["skipped_echoes"] == 2
+    assert channel.sent == []
+
+
+async def test_failed_send_takes_the_echo_back(db):
+    from fra_bot.mc.errors import FetchError
+    from fra_bot.services.chat_sync import ChatSyncService
+
+    class _RejectingClient(FakeClient):
+        async def post_form(self, path, data, **kwargs):
+            return 500, "", ""
+
+    svc = ChatSyncService(_RejectingClient({"/": CHAT_FORM_HTML}), db)
+    svc._last_post_at = 0.0
+    with pytest.raises(FetchError):
+        await svc.send_from_discord("Brandjuh", "hello there")
+    # The rolled-back echo must not swallow a genuine future message.
+    assert await svc.consume_echo("[Brandjuh] hello there") is False
 
 
 async def test_reset_rebaselines_without_replaying_history(db):

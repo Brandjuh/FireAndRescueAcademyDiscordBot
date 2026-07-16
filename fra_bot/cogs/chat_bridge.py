@@ -92,8 +92,17 @@ class ChatBridgeCog(commands.Cog):
         fresh = [m for m in messages if m.chat_id > last_seen]
         posted = skipped = 0
         for message in fresh:
-            if await self.chat.consume_echo(message.message):
+            if await self.chat.is_own_account(message.username):
+                # Our own game account only ever says what we relayed from
+                # Discord — mirroring it back is always a duplicate, even
+                # when the echo memory has expired.
                 skipped += 1
+            elif await self.chat.consume_echo(message.message):
+                skipped += 1
+                # The author of a message WE relayed is our own account:
+                # remember it, so own posts are skipped forever after —
+                # not just within the echo memory's TTL.
+                await self.chat.learn_own_account(message.username)
             else:
                 if channel is None:
                     break  # keep the watermark so nothing is lost
@@ -180,6 +189,8 @@ class ChatBridgeCog(commands.Cog):
             f"- Last seen chat id: `{last_seen}`"
             + (" — baseline pending: the NEXT pass marks history seen, then "
                "only NEW game messages appear" if last_seen <= 0 else ""),
+            f"- Own game account: "
+            f"{await self.chat.own_account() or '*(not learned yet — learns on the first relayed message)*'}",
         ]
         try:
             messages = await self.chat.fetch_history()
