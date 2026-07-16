@@ -404,20 +404,45 @@ class BoardRequestService:
         OUR dedicated request topics, not game actions — members need the
         feedback ("got it", "couldn't use that link") regardless of whether
         real starts are enabled. Action messages carry their own [dry-run]
-        markers where relevant."""
+        markers where relevant.
+
+        A failed reply is RECORDED (state key read by `!fra automation`),
+        not just logged: a member whose class opened but who never saw the
+        board notice reports "the bot said nothing" — the operator must be
+        able to see why without grepping the log file."""
         if not self.cfg.automation.reply_to_board:
             return
         try:
             posted = await self.board.post_reply(self.thread_id, content)
         except MissionChiefError as exc:
-            log.warning("%s: board reply failed: %s", self.kind, exc)
+            log.error("%s: board reply failed: %s", self.kind, exc)
+            await self._record_reply_failure(str(exc))
             return
         if posted:
+            await self.state.delete(self._reply_failure_key())
             # Our own notice gets the same 12h tidy-up as the request post.
             await schedule_reply_cleanup(
                 self.board, self.deletions, self.thread_id, content,
                 kind=self.kind, dry_run=self.dry_run,
             )
+        else:
+            detail = getattr(self.board, "last_error", None) or "post not confirmed"
+            log.error("%s: board reply NOT posted: %s", self.kind, detail)
+            await self._record_reply_failure(str(detail))
+
+    def _reply_failure_key(self) -> str:
+        return f"board_reply_last_failure:{self.kind}"
+
+    async def _record_reply_failure(self, detail: str) -> None:
+        import datetime as dt
+
+        await self.state.set(
+            self._reply_failure_key(),
+            json.dumps({
+                "at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "detail": detail[:300],
+            }),
+        )
 
     @staticmethod
     def is_discord_request(request: aiosqlite.Row) -> bool:

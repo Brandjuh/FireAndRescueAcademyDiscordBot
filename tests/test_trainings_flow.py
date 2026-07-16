@@ -292,6 +292,41 @@ async def test_reply_for_skips_discord_source(db):
     assert sent == ["to the board"]
 
 
+async def test_failed_board_reply_is_recorded_for_the_operator(db):
+    # A reply the forum refuses must not vanish into the log file: the
+    # failure lands in state, where `!fra automation` surfaces it.
+    import json as _json
+
+    svc, _ = _service(db, dry_run=False)
+    svc.cfg.automation.reply_to_board = True
+
+    class _NoToken:
+        last_error = "no reply form/token on the thread"
+
+        async def post_reply(self, thread_id, content):
+            return False
+
+    svc.board = _NoToken()
+    await svc.reply("hello board")
+    raw = await svc.state.get("board_reply_last_failure:training")
+    assert raw is not None
+    assert "token" in _json.loads(raw)["detail"]
+
+    # A later SUCCESSFUL reply clears the recorded failure.
+    class _OK:
+        last_error = None
+
+        async def post_reply(self, thread_id, content):
+            return True
+
+        async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+            return None
+
+    svc.board = _OK()
+    await svc.reply("hello again")
+    assert await svc.state.get("board_reply_last_failure:training") is None
+
+
 async def test_discord_training_request_schedules_reminder(db):
     """A Discord request (thread 0) with remind=True runs the normal open
     flow and leaves a reminder due when the course should finish; the
