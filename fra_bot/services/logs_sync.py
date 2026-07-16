@@ -51,6 +51,7 @@ class LogsSyncService:
         max_pages = FIRST_RUN_PAGES if first_run else MAX_INCREMENTAL_PAGES
 
         collected: list[dict] = []  # newest first, across pages
+        seen_signatures: set[str] = set()
         pages_fetched = 0
         try:
             for page_number in range(1, max_pages + 1):
@@ -63,7 +64,18 @@ class LogsSyncService:
                     )
                 if not page.rows:
                     break
-                collected.extend(page.rows)
+                # A log line landing MID-WALK shifts every row down one, so
+                # page N+1 re-shows the tail of page N. Everything goes into
+                # ONE insert batch here (unlike the backfill's page-per-batch,
+                # which dedupes this via the DB occurrence count), so drop
+                # rows already collected from an EARLIER page — without this
+                # the re-shown row counts as a second occurrence and the feed
+                # posts it twice. Repeats within one page stay: those are
+                # genuinely repeated events, not shift artifacts.
+                collected.extend(
+                    r for r in page.rows if r["signature"] not in seen_signatures
+                )
+                seen_signatures.update(r["signature"] for r in page.rows)
 
                 if not first_run:
                     signatures = [row["signature"] for row in page.rows]

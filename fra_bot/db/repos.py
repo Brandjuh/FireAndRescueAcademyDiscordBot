@@ -1973,15 +1973,19 @@ class MissionsForumRepo:
         )
 
     async def touch_seen(self, mission_keys: list[str]) -> None:
-        """Mark keys as still present in the JSON (bulk, no content change)."""
+        """Mark keys as still present in the JSON (bulk, no content change).
+
+        Serialized via the DB transaction lock: a bare executemany+commit on
+        the shared connection could commit another coroutine's transaction
+        half-way through."""
         if not mission_keys:
             return
         now = utcnow_iso()
-        await self._db.conn.executemany(
-            "UPDATE missions_forum_posts SET last_seen_at = ? WHERE mission_key = ?",
-            [(now, key) for key in mission_keys],
-        )
-        await self._db.conn.commit()
+        async with self._db.transaction() as conn:
+            await conn.executemany(
+                "UPDATE missions_forum_posts SET last_seen_at = ? WHERE mission_key = ?",
+                [(now, key) for key in mission_keys],
+            )
 
     async def delete(self, mission_key: str) -> None:
         """Forget a mapping (e.g. its thread was deleted by hand)."""
@@ -2044,15 +2048,18 @@ class VehiclesForumRepo:
         )
 
     async def touch_seen(self, vehicle_keys: list[str]) -> None:
-        """Mark keys as still present in the catalog (bulk, no content change)."""
+        """Mark keys as still present in the catalog (bulk, no content change).
+
+        Serialized via the DB transaction lock — see
+        :meth:`MissionsForumRepo.touch_seen`."""
         if not vehicle_keys:
             return
         now = utcnow_iso()
-        await self._db.conn.executemany(
-            "UPDATE vehicles_forum_posts SET last_seen_at = ? WHERE vehicle_key = ?",
-            [(now, key) for key in vehicle_keys],
-        )
-        await self._db.conn.commit()
+        async with self._db.transaction() as conn:
+            await conn.executemany(
+                "UPDATE vehicles_forum_posts SET last_seen_at = ? WHERE vehicle_key = ?",
+                [(now, key) for key in vehicle_keys],
+            )
 
     async def delete(self, vehicle_key: str) -> None:
         """Forget a mapping (e.g. its thread was deleted by hand)."""

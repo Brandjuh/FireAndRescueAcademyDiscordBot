@@ -1282,8 +1282,19 @@ class AdminCog(commands.Cog):
                 await ctx.send(f"Nothing recorded for `{who}` — nothing to clear.")
             return
         if action.lower() == "scan":
+            # Share the scheduled job's lock: a manual scan racing the
+            # scheduled pass would evaluate the same members twice and
+            # double-send warnings (the sends aren't idempotent).
+            lock = self.bot.job_lock("tax-warnings")
+            if lock.locked():
+                await ctx.send(
+                    "⏳ A tax-warning scan is already running — this one "
+                    "would double-send warnings, so it was skipped."
+                )
+                return
             message = await ctx.send("⏳ Running a tax-warning scan…")
-            lines = await svc.scan(force=True)
+            async with lock:
+                lines = await svc.scan(force=True)
             body = "\n".join(lines) if lines else "Nothing to do — nobody is due."
             await message.edit(content=f"💰 Tax warnings:\n{body}"[:1900])
             return
