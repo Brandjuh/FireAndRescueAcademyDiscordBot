@@ -25,6 +25,7 @@ from ..mc.parsers.chat import (
     discord_timestamp,
     truncate_embed_value,
 )
+from .admin import is_fra_admin
 
 log = logging.getLogger(__name__)
 
@@ -154,6 +155,81 @@ class ChatBridgeCog(commands.Cog):
             await message.add_reaction(emoji)
         except discord.HTTPException:
             pass
+
+    # -- diagnosis (admins) ---------------------------------------------------
+
+    @commands.group(name="chatbridge", invoke_without_command=True)
+    @is_fra_admin()
+    async def chatbridge(self, ctx: commands.Context) -> None:
+        """Bridge status + a LIVE fetch test, so 'no messages showing'
+        pinpoints itself: config, fetch, parse or just the baseline."""
+        channel = self._channel()
+        channel_id = int(
+            getattr(self.bot.cfg.discord.channels, "chat_bridge", 0) or 0
+        )
+        last_seen = await self.chat.last_seen()
+        lines = [
+            f"- Enabled: **{'on' if self._enabled else 'OFF'}**"
+            + ("" if self._enabled else " → `!fra set chat.enabled on`"),
+            f"- Channel: {'<#%d>' % channel_id if channel_id else '**not set**'}"
+            + (" (⚠️ id set but channel NOT found — wrong id or no access)"
+               if channel_id and channel is None else "")
+            + ("" if channel_id else " → `!fra set chat_bridge #kanaal`"),
+            f"- Poll interval: {int(self.sync_loop.seconds or 0)}s "
+            f"(loop {'running' if self.sync_loop.is_running() else '**NOT RUNNING**'})",
+            f"- Last seen chat id: `{last_seen}`"
+            + (" — baseline pending: the NEXT pass marks history seen, then "
+               "only NEW game messages appear" if last_seen <= 0 else ""),
+        ]
+        try:
+            messages = await self.chat.fetch_history()
+            newest = max((m.chat_id for m in messages), default=0)
+            lines.append(
+                f"- Live fetch: **{len(messages)} messages parsed**, "
+                f"newest id `{newest}`"
+            )
+            if messages and last_seen > 0:
+                fresh = sum(1 for m in messages if m.chat_id > last_seen)
+                lines.append(
+                    f"- Unposted (newer than watermark): **{fresh}** — "
+                    "these post on the next pass"
+                )
+            if not messages:
+                lines.append(
+                    "  ⚠️ ZERO messages parsed — either the alliance chat is "
+                    "empty, or the page layout changed (check the logs)."
+                )
+        except MissionChiefError as exc:
+            lines.append(f"- Live fetch FAILED: {exc}")
+        await ctx.send("🌉 **Chat bridge status**\n" + "\n".join(lines)[:1800])
+
+    @chatbridge.command(name="sync")
+    @is_fra_admin()
+    async def chatbridge_sync(self, ctx: commands.Context) -> None:
+        """Run one game→Discord pass right now and report what happened."""
+        if self._channel() is None:
+            await ctx.send("⚠️ No bridge channel — `!fra set chat_bridge #kanaal` first.")
+            return
+        try:
+            result = await self._sync_once()
+        except MissionChiefError as exc:
+            await ctx.send(f"❌ Sync failed: {exc}")
+            return
+        await ctx.send(
+            f"✅ Sync pass: {result['seen']} new seen, {result['posted']} "
+            f"posted, {result['skipped_echoes']} own echoes skipped."
+        )
+
+    @chatbridge.command(name="reset")
+    @is_fra_admin()
+    async def chatbridge_reset(self, ctx: commands.Context) -> None:
+        """Reset the watermark: the next pass re-baselines (marks current
+        history seen; nothing is replayed)."""
+        await self.chat.reset_watermark()
+        await ctx.send(
+            "↩️ Watermark reset — the next pass baselines on the current "
+            "history; only messages AFTER that appear in Discord."
+        )
 
 
 async def setup(bot) -> None:
