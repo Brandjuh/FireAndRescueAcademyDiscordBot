@@ -90,6 +90,8 @@ class DiscordChannels:
     academy_panel: int = 1426226521231589507
     # Alliance chat ↔ Discord bridge channel; 0 = off.
     chat_bridge: int = 0
+    # Public sanction announcements; 0 = fall back to admin_log.
+    sanctions: int = 0
 
 
 @dataclass(frozen=True)
@@ -249,6 +251,16 @@ class TaxWarningsConfig:
 
 
 @dataclass(frozen=True)
+class SanctionsConfig:
+    """Sanctions register (reference bot: sanctionmanager). The bot only
+    RECORDS and announces; on a member's 3rd official warning it posts the
+    configured follow-up as an ADVISORY to the admin log — it never kicks
+    or bans anyone itself."""
+    auto_action_enabled: bool
+    third_warning_action: str  # "Kick" | "Ban" (advisory text only)
+
+
+@dataclass(frozen=True)
 class ChatBridgeConfig:
     """Alliance chat ↔ Discord bridge (reference bot: chatmanager).
 
@@ -286,6 +298,7 @@ class AutomationConfig:
     rank_roles: RankRolesConfig
     applications: ApplicationsAutomationConfig
     chat: ChatBridgeConfig
+    sanctions: SanctionsConfig
 
 
 @dataclass(frozen=True)
@@ -481,6 +494,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                     channels.get("academy_panel", 1426226521231589507)
                 ),
                 chat_bridge=int(channels.get("chat_bridge", 0)),
+                sanctions=int(channels.get("sanctions", 0)),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])
@@ -664,6 +678,16 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 interval_seconds=max(30, int(
                     _get(raw, "automation", "chat", "interval_seconds", default=30)
                 )),
+            ),
+            sanctions=SanctionsConfig(
+                auto_action_enabled=bool(
+                    _get(raw, "automation", "sanctions", "auto_action_enabled",
+                         default=False)
+                ),
+                third_warning_action=str(
+                    _get(raw, "automation", "sanctions", "third_warning_action",
+                         default="Kick")
+                ),
             ),
             tax_warnings=TaxWarningsConfig(
                 enabled=bool(
