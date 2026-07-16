@@ -1081,9 +1081,18 @@ class MissionScheduler:
         head of the cycle whose 7-day window is closed must not hide a
         large entry whose 24h window is free (the same cross-kind
         starvation the queue guards against with blocked_kinds). One poll
-        still starts at most one entry."""
+        still starts at most one entry.
+
+        A kind with OPEN member requests is skipped entirely: those own
+        the kind's next free window. A parked request (waiting out a
+        computed eligible_at that may overshoot the real window by a bit)
+        must find the window still FREE at its recheck — the rotation
+        grabbing it would leapfrog the member's request with some other
+        event and scramble the schedule."""
         heads = []
         for kind in _KIND_LABELS:
+            if await self.missions.open_for_kind(kind, limit=1):
+                continue  # member requests own this kind's window
             entry = await self.rotation.next_entry(kind=kind)
             if entry is not None:
                 heads.append(entry)

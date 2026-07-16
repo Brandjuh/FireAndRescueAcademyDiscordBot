@@ -394,3 +394,79 @@ async def test_own_start_outbox_stays_silent_while_watcher_active(db):
                    latitude=1.0, longitude=2.0)
     await cog._deliver_pending()
     assert len(channel.sent) == 1
+
+
+# -- the next-up preview (the "why is the next mission NYC again?" race) ------
+
+async def test_next_details_skips_the_just_started_location(db):
+    from types import SimpleNamespace as NS
+
+    from fra_bot.services.missions import MissionScheduler
+    from tests.test_missions import FakeClient as MissionsFakeClient, FakeGeo, _cfg
+
+    sched = MissionScheduler(_cfg(dry_run=True), MissionsFakeClient(), db, FakeGeo())
+    # NYC just started (announcement fired BEFORE mark_started could stamp
+    # it), Chicago is genuinely next.
+    await sched.rotation.add(
+        location_text="New York", created_by="admin", kind="large",
+        address="City of New York, New York, United States",
+    )
+    await sched.rotation.add(
+        location_text="Chicago", created_by="admin", kind="large",
+    )
+    cog = _cog(db, guild=FakeGuild([]), scheduler=sched)
+    row = {
+        "kind": "large",
+        "address": "City of New York, New York, United States",
+        "created_at": "2026-07-17T01:38:00+00:00",
+    }
+    details = await cog._next_details(row)
+    assert details is not None
+    assert "Chicago" in details["location"]
+
+
+async def test_next_details_single_entry_rotation_stays_honest(db):
+    from fra_bot.services.missions import MissionScheduler
+    from tests.test_missions import FakeClient as MissionsFakeClient, FakeGeo, _cfg
+
+    sched = MissionScheduler(_cfg(dry_run=True), MissionsFakeClient(), db, FakeGeo())
+    await sched.rotation.add(
+        location_text="New York", created_by="admin", kind="large",
+        address="City of New York, New York, United States",
+    )
+    cog = _cog(db, guild=FakeGuild([]), scheduler=sched)
+    row = {
+        "kind": "large",
+        "address": "City of New York, New York, United States",
+        "created_at": "2026-07-17T01:38:00+00:00",
+    }
+    details = await cog._next_details(row)
+    # One entry in the rotation: the same place genuinely IS next.
+    assert details is not None
+    assert "New York" in details["location"]
+
+
+async def test_next_details_ignores_processing_queue_head(db):
+    from fra_bot.services.missions import MissionScheduler
+    from tests.test_missions import FakeClient as MissionsFakeClient, FakeGeo, _cfg
+
+    sched = MissionScheduler(_cfg(dry_run=True), MissionsFakeClient(), db, FakeGeo())
+    # The queue head is the request being started RIGHT NOW — not "next".
+    mid = await sched.missions.create(
+        source="discord", kind="large", mission_source="preset",
+        location_text="New York",
+        address="City of New York, New York, United States",
+    )
+    await sched.missions.claim(mid)  # status -> processing
+    await sched.rotation.add(
+        location_text="Chicago", created_by="admin", kind="large",
+    )
+    cog = _cog(db, guild=FakeGuild([]), scheduler=sched)
+    row = {
+        "kind": "large",
+        "address": "City of New York, New York, United States",
+        "created_at": "2026-07-17T01:38:00+00:00",
+    }
+    details = await cog._next_details(row)
+    assert details is not None
+    assert "Chicago" in details["location"]

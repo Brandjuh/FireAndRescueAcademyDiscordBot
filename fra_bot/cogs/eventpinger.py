@@ -128,6 +128,17 @@ def discord_timestamp(value) -> str:
     return f"<t:{int(parsed.timestamp())}:F>"
 
 
+def _same_place(a: str | None, b: str | None) -> bool:
+    """Loose location equality for the next-up preview: normalized, and a
+    containment match counts ("New York" vs the geocoder's full "City of
+    New York, New York, United States")."""
+    na = " ".join(str(a or "").split()).casefold()
+    nb = " ".join(str(b or "").split()).casefold()
+    if not na or not nb:
+        return False
+    return na == nb or na in nb or nb in na
+
+
 def format_notification_mentions(
     notify_role_mention: str, region_role_mention: str | None
 ) -> str:
@@ -380,14 +391,26 @@ class EventPingerCog(commands.Cog):
     async def _next_details(self, row) -> dict | None:
         """What starts next for this kind: the head of the member queue,
         else the rotation entry whose turn is next. The expected time is
-        this start plus the kind's free-slot interval."""
+        this start plus the kind's free-slot interval.
+
+        This runs the moment the game announces a start — usually BEFORE
+        the scheduler finished verifying and stamped last_started_at on
+        the entry it just used. Without correction the just-started
+        entry still sorts first and the ping claims the SAME location is
+        next ("why is the next mission NYC again?"). So: 'processing'
+        queue rows (being started right now) don't count as next, and
+        the first rotation entry matching the announced location is
+        skipped — unless it is genuinely the only entry left."""
         scheduler = getattr(self.bot, "missions_service", None)
         if scheduler is None:
             return None
         kind = row["kind"]
         nxt = None
         try:
-            queued = await scheduler.missions.open_for_kind(kind, limit=1)
+            queued = [
+                q for q in await scheduler.missions.open_for_kind(kind, limit=5)
+                if q["status"] != "processing"
+            ]
             if queued:
                 nxt = queued[0]
             else:
@@ -399,7 +422,12 @@ class EventPingerCog(commands.Cog):
                     key=lambda e: (e["last_started_at"] is not None,
                                    e["last_started_at"] or "", e["id"])
                 )
-                nxt = entries[0] if entries else None
+                remaining = [
+                    e for e in entries
+                    if not _same_place(row["address"],
+                                       e["address"] or e["location_text"])
+                ] or entries  # a single-entry rotation IS next again, honestly
+                nxt = remaining[0] if remaining else None
         except Exception:
             log.exception("could not determine next %s for the ping", kind)
             return None
