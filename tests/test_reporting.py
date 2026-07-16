@@ -253,3 +253,54 @@ async def test_automation_report_groups_by_kind(db, registry):
     joined = " ".join(f"{f.name}: {f.value}" for f in result.fields)
     assert "Training: done: 2" in joined
     assert "Event: failed: 1" in joined
+
+
+async def test_income_daily_falls_back_to_finished_day(db, registry):
+    # The morning schedule fires minutes after the NY midnight reset: the new
+    # day has no snapshot yet, so the report must show the FINISHED day (the
+    # 23:55-NY pre-reset capture) instead of "No contributions recorded".
+    from fra_bot.db.repos import TreasuryRepo
+    from fra_bot.reporting.reports import _prev_ny_keys
+
+    prev_day, _ = _prev_ny_keys()
+    await TreasuryRepo(db).store_income_snapshot(
+        "daily", prev_day, [{"username": "Alice", "amount": 7500, "mc_user_id": 1}],
+    )
+    report = registry.get("income-daily")
+    result = await report.builder(resolve_period("today"))
+    assert prev_day in result.title                 # fell back to the finished day
+    assert "Alice" in result.description
+
+
+async def test_income_daily_explicit_yesterday_ignores_today(db, registry):
+    from fra_bot.db.repos import TreasuryRepo, ny_period_keys
+    from fra_bot.reporting.reports import _prev_ny_keys
+
+    day_key, _ = ny_period_keys()
+    prev_day, _ = _prev_ny_keys()
+    repo = TreasuryRepo(db)
+    await repo.store_income_snapshot(
+        "daily", day_key, [{"username": "TodayGuy", "amount": 1, "mc_user_id": 1}],
+    )
+    await repo.store_income_snapshot(
+        "daily", prev_day, [{"username": "FinalGuy", "amount": 9, "mc_user_id": 2}],
+    )
+    report = registry.get("income-daily")
+    result = await report.builder(resolve_period("yesterday"))
+    assert prev_day in result.title and "FinalGuy" in result.description
+    # And "today" still prefers the running day when it HAS a snapshot.
+    result2 = await report.builder(resolve_period("today"))
+    assert day_key in result2.title and "TodayGuy" in result2.description
+
+
+async def test_income_monthly_falls_back_to_finished_month(db, registry):
+    from fra_bot.db.repos import TreasuryRepo
+    from fra_bot.reporting.reports import _prev_ny_keys
+
+    _, prev_month = _prev_ny_keys()
+    await TreasuryRepo(db).store_income_snapshot(
+        "monthly", prev_month, [{"username": "Alice", "amount": 5, "mc_user_id": 1}],
+    )
+    report = registry.get("income-monthly")
+    result = await report.builder(resolve_period("month"))
+    assert prev_month in result.title and "Alice" in result.description
