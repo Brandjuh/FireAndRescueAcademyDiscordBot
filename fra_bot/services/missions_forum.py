@@ -219,16 +219,19 @@ class MissionsForumService:
         return channel
 
     async def _get_thread(self, thread_id: int):
-        """A thread by id, archived ones included; None when it's gone."""
+        """A thread by id, archived ones included; None when it's GONE.
+
+        Only a definitive NotFound maps to None — the caller treats None as
+        "deleted by hand" and deletes the mapping + reposts. A transient
+        error (rate limit, 5xx) must NOT look like that: it re-raises, the
+        per-mission handler in the sync loop logs it, and the mapping stays
+        so the next pass retries the same thread instead of duplicating it."""
         thread = self._bot.get_channel(thread_id)
         if thread is not None:
             return thread
         try:
             return await self._bot.fetch_channel(thread_id)
         except discord.NotFound:
-            return None
-        except discord.HTTPException as exc:
-            log.warning("Could not fetch mission thread %s: %s", thread_id, exc)
             return None
 
     # ------------------------------------------------------------------
@@ -654,7 +657,16 @@ class MissionsForumService:
             if self._stop:
                 stopped = True
                 break
-            thread = await self._get_thread(thread_id)
+            try:
+                thread = await self._get_thread(thread_id)
+            except discord.HTTPException as exc:
+                # Transient fetch error: skip this thread, KEEP its mapping
+                # so a re-run can still delete it — and never abort the
+                # whole wipe over one hiccup.
+                failed += 1
+                log.warning("Could not fetch mission thread %s during wipe: %s",
+                            thread_id, exc)
+                continue
             if thread is None:
                 if mission_key:
                     await self._repo.delete(mission_key)

@@ -417,34 +417,69 @@ class FRABot(commands.Bot):
         # Run the drain whenever the panel is live (channel set), even if the
         # `enabled` flag is off, otherwise a low-funds click is orphaned: the
         # panel promises auto-retry but nothing would ever drain the queue.
-        academy_panel = int(getattr(self.cfg.discord.channels, "academy_panel", 0) or 0)
-        if automation.academy.enabled or academy_panel or automation.academy.autoscale:
-            sched.add_interval_job(
-                self._guarded(self.academy.process_queue, "academy-builds"),
-                minutes=automation.academy.interval,
-                name="academy-builds",
-                initial_delay_seconds=200.0,
-            )
+        # (Draining only ever retries builds a member/admin/autoscale
+        # explicitly queued — it starts nothing on its own.) Always
+        # registered, switches read live: autoscale/enabled can be flipped
+        # on at runtime, and a queued build must never sit undrained just
+        # because every switch was off at startup.
+        async def _drain_academy_queue_if_on() -> None:
+            enabled = self.cfg.automation.academy.enabled
+            autoscale = self.cfg.automation.academy.autoscale
+            panel = int(getattr(self.cfg.discord.channels, "academy_panel", 0) or 0)
+            if not (enabled or panel or autoscale):
+                return
+            await self.academy.process_queue()
+
+        sched.add_interval_job(
+            self._guarded(_drain_academy_queue_if_on, "academy-builds"),
+            minutes=automation.academy.interval,
+            name="academy-builds",
+            initial_delay_seconds=200.0,
+        )
+
+        # The jobs below spend alliance funds AUTONOMOUSLY (no member click
+        # behind them), so each requires its own explicit switch — a live
+        # panel channel must not be enough. Always registered, switch read
+        # live each pass, so `!fra set` applies without a restart.
+        async def _sweep_extensions_if_enabled() -> None:
             # Academy extensions unlock one at a time (~7 days each); a slow
             # sweep buys the next available one on each of our academies so
             # they max out over the following weeks without hammering.
-            sched.add_interval_job(
-                self._guarded(self.academy.sweep_extensions, "academy-extensions"),
-                minutes=360,
-                name="academy-extensions",
-                initial_delay_seconds=900.0,
-            )
+            if not self.cfg.automation.academy.enabled:
+                # The sweep used to ride on the panel channel alone; after
+                # the switch became required it must not stop SILENTLY on a
+                # deployment that relied on that — say so, every pass (4x/day).
+                if int(getattr(self.cfg.discord.channels, "academy_panel", 0) or 0):
+                    log.info(
+                        "academy extension sweep is OFF (automation.academy."
+                        "enabled=false) — run `!fra set academy.enabled on` "
+                        "to resume buying extensions"
+                    )
+                return
+            await self.academy.sweep_extensions()
+
+        sched.add_interval_job(
+            self._guarded(_sweep_extensions_if_enabled, "academy-extensions"),
+            minutes=360,
+            name="academy-extensions",
+            initial_delay_seconds=900.0,
+        )
+
         # Auto-scale: build a new academy when a discipline runs out of free
         # classrooms (own switch, off by default — it spends alliance funds).
         # Hourly, matching the training availability refresh, with a debounce
         # + 24h cooldown so one transient reading can't spawn a fleet.
-        if automation.academy.autoscale:
-            sched.add_interval_job(
-                self._guarded(self.academy.autoscale, "academy-autoscale"),
-                minutes=60,
-                name="academy-autoscale",
-                initial_delay_seconds=1200.0,
-            )
+        async def _autoscale_if_enabled() -> None:
+            if not self.cfg.automation.academy.autoscale:
+                return
+            await self.academy.autoscale()
+
+        sched.add_interval_job(
+            self._guarded(_autoscale_if_enabled, "academy-autoscale"),
+            minutes=60,
+            name="academy-autoscale",
+            initial_delay_seconds=1200.0,
+        )
         # Daily worldwide auto-build: one hospital + one prison at a real OSM
         # location. Scheduled even in dry-run (it reports what it would build);
         # the build itself honours dry_run and the funds floor.

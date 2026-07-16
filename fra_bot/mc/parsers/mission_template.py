@@ -165,14 +165,22 @@ def looks_like_template(content: str) -> bool:
 
 
 def _split_inline(line: str) -> tuple[str, str] | None:
-    """Match 'Required Firetrucks 5' — a label with the value on the SAME
-    line. Returns (key, value) or None."""
+    """Match 'Required Firetrucks 5' AND 'Required Firetrucks: 5' — a label
+    with the value on the SAME line. Returns (key, value) or None.
+
+    ``_norm`` only strips a TRAILING colon, so the attached-colon form keeps
+    its ':' mid-string — requiring ``label + " "`` used to silently drop
+    every 'Label: value' requirement."""
     n = _norm(line)
     for label in _LABELS_BY_LENGTH:
-        if n.startswith(label + " "):
-            rest = n[len(label):].strip().lstrip(":").strip()
-            if rest:
-                return _LABEL_TO_KEY[label], rest
+        if not n.startswith(label):
+            continue
+        rest = n[len(label):]
+        if not rest or rest[0] not in " :":
+            continue  # prefix of a longer label, not this field
+        rest = rest.lstrip(" :").strip()
+        if rest:
+            return _LABEL_TO_KEY[label], rest
     return None
 
 

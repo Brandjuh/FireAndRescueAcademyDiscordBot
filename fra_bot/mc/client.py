@@ -313,7 +313,11 @@ class MissionChiefClient:
                 self._pacer.record_success()
                 return html
 
-            except aiohttp.ClientError as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                # asyncio.TimeoutError: the session's ClientTimeout(total=40)
+                # expiring is NOT an aiohttp.ClientError — without catching it
+                # here a slow page would skip the retry/backoff path (and the
+                # pacer's failure bookkeeping) and crash the calling job.
                 self._pacer.record_failure()
                 delay = min(5.0 * (2**attempt), 60.0)
                 log.warning(
@@ -374,7 +378,12 @@ class MissionChiefClient:
                 final_url = str(resp.url)
                 location = resp.headers.get("Location", "")
                 html = await resp.text()
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            # A timed-out POST is the classic lost-response case: the action
+            # may have landed. Wrapping it in FetchError (a MissionChiefError)
+            # keeps it inside the taxonomy the callers' ambiguous-submit
+            # verification paths key on — a bare TimeoutError would bypass
+            # them straight into the generic failure handlers.
             self._pacer.record_failure()
             raise FetchError(target, message=f"POST to {target} failed: {exc}") from exc
 

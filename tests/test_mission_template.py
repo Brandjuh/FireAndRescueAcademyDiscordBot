@@ -112,6 +112,24 @@ def test_inline_values_and_headers_parse():
     }
 
 
+def test_inline_values_with_attached_colon_parse():
+    # 'Label: value' (colon glued to the label) used to be silently dropped —
+    # the requirement never reached the started mission.
+    text = "\n".join([
+        "Location: Tokyo",
+        "Name: Refinery",
+        "Required Firetrucks: 12",
+        "Required HazMat:3",
+        "Required HazMat Vehicles : 4",
+    ])
+    _, _, values = parse_template(text)
+    assert values == {
+        "need_lf": 12,
+        "need_hazmat_container": 3,
+        "need_gwgefahrgut": 4,
+    }
+
+
 def test_bad_number_names_the_line():
     text = "Location: Oslo\nName: X\nRequired Firetrucks\nveel"
     with pytest.raises(CustomMissionError) as exc:

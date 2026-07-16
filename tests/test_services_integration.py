@@ -108,6 +108,34 @@ async def test_logs_backfill_walks_history_and_suppresses_feed(db):
     assert await logs.pending_posts() == []
 
 
+async def test_incremental_logs_dedupe_page_shift_overlap(db):
+    # A log line landing mid-walk shifts rows down: page 2 re-shows the tail
+    # of page 1. The re-shown row must NOT become a second occurrence (a
+    # duplicate feed post) — it is the same event.
+    from fra_bot.db.repos import LogsRepo, StateRepo
+    from fra_bot.services.logs_sync import STATE_INITIALIZED, LogsSyncService
+
+    cfg = SimpleNamespace(sync=SimpleNamespace(logs_backfill_pages_per_chunk=10))
+    client = FakeClient(
+        {
+            "/alliance_logfiles?page=1": _logs_html(
+                [("06 Jul 14:23", "Alpha added to the alliance"),
+                 ("06 Jul 13:00", "Beta added to the alliance")]
+            ),
+            "/alliance_logfiles?page=2": _logs_html(
+                [("06 Jul 13:00", "Beta added to the alliance"),  # re-shown
+                 ("05 Jul 10:00", "Gamma added to the alliance")]
+            ),
+            "*": "<html><body></body></html>",
+        }
+    )
+    await StateRepo(db).set(STATE_INITIALIZED, "1")  # not the first run
+    svc = LogsSyncService(cfg, client, db)
+    inserted = await svc.run()
+    assert inserted == 3  # Alpha, Beta (once), Gamma
+    assert await LogsRepo(db).count() == 3
+
+
 async def test_logs_backfill_resumes_from_cursor(db):
     from fra_bot.db.repos import StateRepo
     from fra_bot.services.logs_sync import (

@@ -74,9 +74,11 @@ class ReportsCog(commands.Cog):
         while True:
             try:
                 now = dt.datetime.now(self._tz)
+                # timedelta, NOT minute=delay: the setting allows up to 120
+                # and .replace(minute=60+) raises, killing every report.
                 target = now.replace(
-                    hour=0, minute=max(5, delay_minutes), second=0, microsecond=0
-                )
+                    hour=0, minute=0, second=0, microsecond=0
+                ) + dt.timedelta(minutes=max(5, delay_minutes))
                 if target <= now:
                     target += dt.timedelta(days=1)
                 await asyncio.sleep((target - now).total_seconds())

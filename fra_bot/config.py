@@ -338,6 +338,22 @@ def _get(data: dict, *keys: str, default=None, required: bool = False):
     return node
 
 
+def _valid_timezone(name: str) -> str:
+    """Validate an IANA timezone at LOAD time. A typo'd YAML value used to
+    pass through untouched and only blow up later inside the report loops
+    and daily jobs — every one of them silently dead. Fail fast instead."""
+    from zoneinfo import ZoneInfo
+
+    try:
+        ZoneInfo(name)
+    except Exception as exc:  # ZoneInfoNotFoundError, ValueError on bad keys
+        raise ConfigError(
+            f"reports.timezone {name!r} is not a valid IANA timezone "
+            f"(e.g. America/New_York): {exc}"
+        ) from exc
+    return name
+
+
 def load_config(path: str | Path = "config.yaml") -> Config:
     """Load configuration from YAML + environment variables."""
     load_dotenv()
@@ -646,7 +662,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         ),
         reports=ReportsConfig(
             daily_delay_minutes=int(_get(raw, "reports", "daily_delay_minutes", default=10)),
-            timezone=str(_get(raw, "reports", "timezone", default="America/New_York")),
+            timezone=_valid_timezone(
+                str(_get(raw, "reports", "timezone", default="America/New_York"))
+            ),
             scheduled=tuple(
                 ScheduledReport(
                     report=str(item["report"]),

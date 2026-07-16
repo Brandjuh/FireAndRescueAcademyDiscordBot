@@ -47,6 +47,24 @@ async def db(tmp_path):
     await database.close()
 
 
+def test_bad_yaml_timezone_fails_at_load(tmp_path, monkeypatch):
+    # A typo'd reports.timezone used to pass load and only blow up later
+    # inside every report loop / daily job — all of them silently dead.
+    from fra_bot.config import ConfigError, load_config
+
+    monkeypatch.setenv("DISCORD_TOKEN", "x")
+    monkeypatch.setenv("MC_EMAIL", "x@example.com")
+    monkeypatch.setenv("MC_PASSWORD", "x")
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        MINIMAL_YAML + "reports:\n  timezone: Europe/Amsterdamn\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    assert "Europe/Amsterdamn" in str(exc.value)
+
+
 # -- key resolution -----------------------------------------------------------
 
 def test_resolve_by_unique_suffix_and_alias():

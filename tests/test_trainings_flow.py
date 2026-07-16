@@ -1057,3 +1057,20 @@ async def test_collect_availability_uses_api_type_id(db):
     svc.client = FakeClient({"/api/buildings": api, "/buildings/800": page})
     counts = await svc._collect_availability()
     assert counts is not None and counts["coastal"] == 3
+
+
+async def test_collect_availability_marks_formless_page_incomplete(db):
+    # An academy page that fetches fine but has NO parseable education form
+    # is "unreadable", not "0 free classrooms" — a fresh false 0 would feed
+    # auto-scale a shortage that isn't there.
+    import json
+    svc, _ = _service(db, dry_run=False)
+    api = json.dumps([{"id": 800, "building_type": 24, "latitude": 1.0, "longitude": 2.0}])
+    svc.client = FakeClient({
+        "/api/buildings": api,
+        "/buildings/800": "<html><p>layout changed</p></html>",
+    })
+    counts = await svc._collect_availability()
+    assert counts is not None and counts["coastal"] == 0
+    cached = await svc.cached_availability()
+    assert cached["complete"]["coastal"] is False

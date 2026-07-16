@@ -497,6 +497,22 @@ class TrainingsService(BoardRequestService):
                             log.debug("training availability: academy %s failed (%s)",
                                       building_id, exc)
                             continue
+                        if page.action is None:
+                            # Fetched fine but NO education form was parsed —
+                            # a layout change or half-rendered page. That is
+                            # "unreadable", not "0 free classrooms": counting
+                            # it as 0 would feed auto-scale a false shortage.
+                            # WARNING, not debug: if the game were ever to
+                            # hide the form on a fully-booked academy, this
+                            # would (safely) hold auto-scale back — the
+                            # operator must be able to see that happening.
+                            complete[discipline] = False
+                            log.warning(
+                                "training availability: academy %s has no "
+                                "readable education form — %s counted as "
+                                "unreadable, not 0", building_id, discipline,
+                            )
+                            continue
                         counts[discipline] += max(0, page.available_rooms)
                         # Free ride: the education dropdown on this page IS the
                         # authoritative course list — harvest it so the Discord
