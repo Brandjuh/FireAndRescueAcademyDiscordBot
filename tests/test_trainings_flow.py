@@ -49,7 +49,8 @@ def _cfg(dry_run):
             dry_run=dry_run,
             reply_to_board=False,
             training=SimpleNamespace(
-                thread_id=5935, interval=5, min_contribution_rate=5.0,
+                enabled=True, thread_id=5935, interval=5,
+                min_contribution_rate=5.0,
                 preferred_academies={"fire": 4951748},
             ),
         )
@@ -930,6 +931,88 @@ async def test_find_academies_falls_back_to_list_scrape(db):
     svc, _ = _service(db, dry_run=True)
     academies = await svc._find_academies("fire")
     assert [a.building_id for a in academies] == [4951748]
+
+
+async def test_find_academies_unions_api_and_alliance_list(db):
+    # /api/buildings only lists OUR OWN buildings; academies built by other
+    # alliance members appear only on /verband/gebauede. Both must be found —
+    # the old API-first short-circuit hid the alliance list entirely.
+    import json
+    svc, _ = _service(db, dry_run=True)
+    svc.client = FakeClient({
+        "/api/buildings": json.dumps([
+            {"id": 700, "building_type": 4, "latitude": 1.0, "longitude": 2.0},
+        ]),
+        "/verband/gebauede": ACADEMY_LIST,  # fire academy 4951748 (preferred)
+    })
+    academies = await svc._find_academies("fire")
+    # Preferred (from config) sorts first; both sources contribute.
+    assert [a.building_id for a in academies] == [4951748, 700]
+
+
+async def test_find_academies_sees_coordinate_less_api_academy(db):
+    # An /api/buildings record without lat/lon must still count as an
+    # academy — the coordinate filter is for the build dedup, not for us.
+    import json
+    svc, _ = _service(db, dry_run=True)
+    svc.client = FakeClient({
+        "/api/buildings": json.dumps([{"id": 700, "building_type": 24}]),
+    })
+    academies = await svc._find_academies("coastal")
+    assert [a.building_id for a in academies] == [700]
+
+
+async def test_open_training_reports_detection_failure_not_full_classes(db):
+    # NO academy found anywhere: the reason must say detection came up
+    # empty, not the misleading "classrooms busy?" (members were told
+    # classes were full while detection was simply broken).
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+    svc, _ = _service(db, dry_run=True)
+    svc.client = FakeClient({})
+    svc._auto.preferred_academies = {}
+    match = TrainingMatch(discipline="ems", name="EMT", duration_days=1, count=1)
+    outcome = await svc._open_training(match)
+    assert outcome["status"] == "busy"
+    assert "no ems academy could be found" in outcome["reason"]
+
+
+async def test_open_training_circuit_open_on_post_is_retry_safe(db):
+    # The pacer refuses BEFORE anything is sent, so the outcome must be
+    # 'busy' (retry), never 'uncertain' (which burns the copy and tells the
+    # member to double-check a class that was never submitted).
+    from fra_bot.core.pacing import CircuitOpenError
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+
+    class _CircuitClient(FakeClient):
+        async def post_form(self, path, data, **kwargs):
+            raise CircuitOpenError(0.0)
+
+    svc, _ = _service(db, dry_run=False)
+    svc.client = _CircuitClient({
+        "/verband/gebauede": ACADEMY_LIST,
+        "/buildings/4951748": ACADEMY_PAGE,
+    })
+    match = TrainingMatch(discipline="fire", name="HazMat", duration_days=3, count=1)
+    outcome = await svc._open_training(match)
+    assert outcome["status"] == "busy"
+
+
+async def test_poll_skips_everything_while_disabled(db):
+    # The poll job is now ALWAYS registered; the switch is read live inside.
+    svc, client = _service(db, dry_run=True)
+    fetched = []
+    original = client.fetch_page
+
+    async def _spy(path, **kwargs):
+        fetched.append(path)
+        return await original(path, **kwargs)
+
+    client.fetch_page = _spy
+    svc._auto.enabled = False
+    await svc.poll()
+    assert fetched == []
+    svc._auto.enabled = True
+    assert svc.poll_enabled is True
 
 
 async def test_open_training_uses_given_signup_duration(db):

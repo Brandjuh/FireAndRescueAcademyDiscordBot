@@ -25,8 +25,8 @@ BUILDING_TYPE_IDS = {
 @dataclass(frozen=True)
 class ExistingBuilding:
     building_type_id: int | None
-    latitude: float
-    longitude: float
+    latitude: float | None
+    longitude: float | None
     building_id: int | None
 
 
@@ -51,8 +51,16 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
-def parse_api_buildings(raw: str | list | dict) -> list[ExistingBuilding]:
-    """Parse ``/api/buildings`` (a JSON list, or a dict wrapping one)."""
+def parse_api_buildings(
+    raw: str | list | dict, *, require_coordinates: bool = True
+) -> list[ExistingBuilding]:
+    """Parse ``/api/buildings`` (a JSON list, or a dict wrapping one).
+
+    ``require_coordinates`` drops records without a usable lat/lon — the
+    proximity dedup needs them. Enumeration-only callers (the trainings
+    service listing academies by type-id) pass ``False``: a missing
+    coordinate must not hide an academy from them.
+    """
     data = json.loads(raw) if isinstance(raw, str) else raw
     items: Any = data
     if isinstance(data, dict):
@@ -69,7 +77,7 @@ def parse_api_buildings(raw: str | list | dict) -> list[ExistingBuilding]:
             continue
         lat = _to_float(_first(rec, "latitude", "lat"))
         lon = _to_float(_first(rec, "longitude", "lon", "lng"))
-        if lat is None or lon is None:
+        if require_coordinates and (lat is None or lon is None):
             continue
         out.append(
             ExistingBuilding(
@@ -113,6 +121,8 @@ def nearest_duplicate(
     best: ExistingBuilding | None = None
     best_distance = radius_m
     for b in existing:
+        if b.latitude is None or b.longitude is None:
+            continue
         if type_id is not None and b.building_type_id is not None and b.building_type_id != type_id:
             continue
         distance = haversine_meters(latitude, longitude, b.latitude, b.longitude)

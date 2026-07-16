@@ -75,6 +75,24 @@ def test_parse_api_buildings_handles_list_and_wrapper_and_aliases():
     assert wrapped == [ExistingBuilding(10, 1.0, 2.0, 9)]
 
 
+def test_parse_api_buildings_without_coordinate_requirement():
+    # Enumeration-only callers (academy detection by type-id) must SEE a
+    # building that lacks coordinates — dropping it hid real academies.
+    rows = parse_api_buildings(
+        '[{"id": 8, "building_type": 24}]', require_coordinates=False
+    )
+    assert rows == [ExistingBuilding(24, None, None, 8)]
+    # The dedup default still drops it.
+    assert parse_api_buildings('[{"id": 8, "building_type": 24}]') == []
+
+
+def test_nearest_duplicate_skips_coordinate_less_buildings():
+    existing = [ExistingBuilding(2, None, None, 1),
+                ExistingBuilding(2, 40.0005, -74.0, 2)]
+    dup = nearest_duplicate(40.0, -74.0, "hospital", existing, radius_m=250)
+    assert dup is not None and dup.building_id == 2
+
+
 def test_haversine_and_nearest_duplicate():
     assert haversine_meters(40.0, -74.0, 40.0, -74.0) == 0
     # ~0.0005 deg latitude is ~55 m — inside 250 m.

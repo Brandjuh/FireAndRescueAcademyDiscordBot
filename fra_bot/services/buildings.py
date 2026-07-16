@@ -240,6 +240,10 @@ class BuildingsService(BoardRequestService):
     def thread_id(self) -> int:
         return self._auto.thread_id
 
+    @property
+    def poll_enabled(self) -> bool:
+        return bool(self._auto.enabled)
+
     def guide_body(self) -> str:
         return _building_guide(self._auto.min_alliance_funds)
 

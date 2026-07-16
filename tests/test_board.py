@@ -169,6 +169,39 @@ def test_parse_academy_page():
     assert page.find_course_value("Nonexistent") is None
 
 
+TWO_FORM_ACADEMY_HTML = """
+<form action="/buildings/4951748/education" method="post">
+  <input type="hidden" name="authenticity_token" value="tok-personal"/>
+  <select name="education_select">
+    <option value="99">HazMat (3 days)</option>
+  </select>
+  <input type="submit" value="Educate"/>
+</form>
+<form action="/buildings/4951748/education?alliance=true" method="post">
+  <input type="hidden" name="authenticity_token" value="tok-alliance"/>
+  <select name="building_rooms_use"><option value="1">1</option></select>
+  <select name="alliance[cost]"><option value="0">Free</option></select>
+  <select name="education_select">
+    <option value="12">HazMat (3 days)</option>
+  </select>
+  <input type="submit" value="Educate"/>
+</form>
+"""
+
+
+def test_parse_academy_page_prefers_last_education_form():
+    # The single-user education form can precede the alliance one; the
+    # reference bot always took the LAST education form (the alliance form,
+    # the only one with alliance[cost]). Submitting to the first would start
+    # a personal course instead of an alliance class.
+    page = parse_academy_page(TWO_FORM_ACADEMY_HTML)
+    assert page.action == "/buildings/4951748/education?alliance=true"
+    assert page.authenticity_token == "tok-alliance"
+    assert page.available_rooms == 1
+    assert page.costs == [0]
+    assert page.find_course_value("HazMat") == "12"
+
+
 # ---------------------------------------------------------------------
 # Building type detection
 # ---------------------------------------------------------------------

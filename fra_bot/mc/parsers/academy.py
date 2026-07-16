@@ -120,6 +120,15 @@ class AcademyPage:
 
 
 def parse_academy_page(html: str) -> AcademyPage:
+    """Parse an academy detail page into the alliance-education form.
+
+    The page can carry TWO education forms: the single-user one first and
+    the alliance one after it. The reference bot took the LAST ``education``
+    form (its parser overwrote the action as it read the page) — that is the
+    alliance form, the only one with ``alliance[cost]``/``alliance[duration]``
+    fields. Taking the first form submits a member-facing course instead of
+    an alliance class, so: every education form is read in document order and
+    later forms override earlier values (per field, where present)."""
     soup = BeautifulSoup(html, "lxml")
     page = AcademyPage()
 
@@ -151,11 +160,13 @@ def parse_academy_page(html: str) -> AcademyPage:
 
         course_select = form.find("select", attrs={"name": "education_select"})
         if course_select is not None:
+            courses = {}
             for opt in course_select.find_all("option"):
                 value = opt.get("value")
                 label = opt.get_text(strip=True)
                 if value and label:
-                    page.courses[label] = value
-        break
+                    courses[label] = value
+            if courses:
+                page.courses = courses
 
     return page

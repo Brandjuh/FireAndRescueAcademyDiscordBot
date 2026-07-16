@@ -121,6 +121,17 @@ class BoardRequestService:
     def dry_run(self) -> bool:
         return self.cfg.automation.dry_run
 
+    @property
+    def poll_enabled(self) -> bool:
+        """Read the service's master switch LIVE, each poll. The poll job is
+        always registered (see bot.py); gating here instead of at job
+        registration means `!fra set <kind>.enabled on` takes effect without
+        a restart — before, the flag flipped in memory (so the Discord intake
+        accepted requests and kicked the queue once) while the retry poll
+        did not exist until restart, stranding any request whose first
+        attempt hit a transient 'busy'."""
+        return True
+
     def _guide_id_key(self) -> str:
         return f"board_guide_id:{self.kind}:{self.thread_id}"
 
@@ -196,6 +207,8 @@ class BoardRequestService:
         return f"❌ {label}: could not create or edit the guide — {reason}"
 
     async def poll(self) -> None:
+        if not self.poll_enabled:
+            return
         run_id = await self.runs.start(f"board_{self.kind}")
         try:
             # Member requests come FIRST: scan for new posts, run the queue,

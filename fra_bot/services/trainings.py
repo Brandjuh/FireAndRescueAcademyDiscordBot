@@ -18,6 +18,7 @@ import logging
 import re
 
 from ..config import Config
+from ..core.pacing import CircuitOpenError
 from ..db.database import Database
 from ..db.repos import RemindersRepo
 from ..mc.client import MissionChiefClient
@@ -254,6 +255,10 @@ class TrainingsService(BoardRequestService):
     @property
     def thread_id(self) -> int:
         return self._auto.thread_id
+
+    @property
+    def poll_enabled(self) -> bool:
+        return bool(self._auto.enabled)
 
     def guide_body(self) -> str:
         return _overview_guide(self._auto.min_contribution_rate)
@@ -880,9 +885,21 @@ class TrainingsService(BoardRequestService):
         except MissionChiefError as exc:
             return {"status": "busy", "reason": f"could not list academies ({exc})"}
         if not academies:
+            # Distinct from "classrooms full": detection found NO academy at
+            # all. Full academies still show up here (their rooms are checked
+            # per building below) — an empty list means the API and the
+            # alliance list both came back without one, i.e. detection broke
+            # or the alliance really has no academy of this discipline.
+            log.warning(
+                "training: no %s academy found via /api/buildings or the "
+                "alliance building list", match.discipline,
+            )
             return {
                 "status": "busy",
-                "reason": f"no available {match.discipline} academy (classrooms busy?)",
+                "reason": (
+                    f"no {match.discipline} academy could be found "
+                    "(detection failed, or none is built)"
+                ),
             }
 
         last_reason = "no suitable academy"
@@ -939,6 +956,10 @@ class TrainingsService(BoardRequestService):
                     },
                     referer=self.client.url(path),
                 )
+            except CircuitOpenError as exc:
+                # Raised by the pacer BEFORE anything was sent — retrying is
+                # safe (unlike the ambiguous submit errors below).
+                return {"status": "busy", "reason": str(exc)}
             except MissionChiefError as exc:
                 # A submit error may or may not have landed — do NOT try
                 # another academy (that risks a double open). Report
@@ -978,13 +999,34 @@ class TrainingsService(BoardRequestService):
     async def _find_academies(self, discipline: str) -> list[AcademyListing]:
         """Alliance academies for a discipline, preferred building first.
 
-        Identified by building type-id from ``/api/buildings`` (the icon = the
-        type) — the reliable signal that tells an academy from a station and
-        never depends on a scraped list-page button. Falls back to the old
-        alliance-buildings scrape if the API is unavailable."""
+        Two sources are UNIONED, because neither sees everything:
+
+        * ``/api/buildings`` by building type-id (the icon = the type) — but
+          it only lists the buildings owned by OUR account, so academies
+          built by other alliance members are invisible to it.
+        * the alliance-buildings scrape (``/verband/gebauede``) — the
+          alliance-wide list the reference bot always used; it sees every
+          member's academy but depends on scraped keywords/buttons.
+
+        Taking only one (as before) silently missed academies: the API-first
+        short-circuit hid other members' academies whenever we owned any
+        matching building ourselves."""
         candidates = await self._academies_from_api(discipline)
-        if not candidates:
-            candidates = await self._academies_from_list(discipline)
+        seen = {a.building_id for a in candidates}
+        try:
+            for listing in await self._academies_from_list(discipline):
+                if listing.building_id not in seen:
+                    seen.add(listing.building_id)
+                    candidates.append(listing)
+        except MissionChiefError as exc:
+            # The scrape failing must not discard what the API found.
+            if not candidates:
+                raise
+            log.warning(
+                "training: alliance building list unavailable (%s); "
+                "using the %d API-found %s academies only",
+                exc, len(candidates), discipline,
+            )
         preferred_id = self._auto.preferred_academies.get(discipline)
         candidates.sort(key=lambda a: 0 if a.building_id == preferred_id else 1)
         if not candidates and preferred_id:
@@ -1005,12 +1047,14 @@ class TrainingsService(BoardRequestService):
             return []
         try:
             raw = await self.client.fetch_page(API_BUILDINGS_PATH)
-            buildings = parse_api_buildings(raw)
+            # No coordinate requirement: we only need id + type here, and
+            # a record without lat/lon must not hide an academy.
+            buildings = parse_api_buildings(raw, require_coordinates=False)
         except MissionChiefError as exc:
             log.info("training: /api/buildings unavailable (%s); using list scrape", exc)
             return []
         except Exception as exc:  # noqa: BLE001 — bad/non-JSON body → fall back
-            log.info("training: could not parse /api/buildings (%s); using list scrape", exc)
+            log.warning("training: could not parse /api/buildings (%s); using list scrape", exc)
             return []
         return [
             AcademyListing(
@@ -1042,13 +1086,18 @@ class TrainingsService(BoardRequestService):
     async def _academy_ids_by_discipline(self) -> dict[str, list[int]]:
         """``{discipline: [academy building ids]}`` for the availability walk.
 
-        Primary source is ``/api/buildings`` by TYPE-ID (icon = type); if that
-        is unavailable it falls back to the alliance-buildings scrape (which may
-        raise, letting the caller treat it as "couldn't read")."""
+        The UNION of ``/api/buildings`` by TYPE-ID (icon = type; own account's
+        buildings only) and the alliance-buildings scrape (every member's
+        academy) — the same two-source merge as :meth:`_find_academies`, so
+        the availability panel counts the whole alliance's classrooms. The
+        scrape may raise when the API found nothing, letting the caller treat
+        it as "couldn't read"."""
         out: dict[str, list[int]] = {key: [] for key in _AGENCY_ORDER}
+        seen: set[int] = set()
         try:
             buildings = parse_api_buildings(
-                await self.client.fetch_page(API_BUILDINGS_PATH)
+                await self.client.fetch_page(API_BUILDINGS_PATH),
+                require_coordinates=False,
             )
         except MissionChiefError:
             buildings = None
@@ -1056,27 +1105,33 @@ class TrainingsService(BoardRequestService):
             buildings = None
         if buildings:
             id_to_disc = {tid: disc for disc, tid in ACADEMY_TYPE_IDS.items()}
-            seen: set[int] = set()
             for b in buildings:
                 disc = id_to_disc.get(b.building_type_id)
                 if disc and b.building_id is not None and b.building_id not in seen:
                     seen.add(b.building_id)
                     out[disc].append(b.building_id)
-            if any(out.values()):
-                return out
-        # Fallback: the alliance-buildings scrape (keyword discipline).
-        seen = set()
-        path = ALLIANCE_BUILDINGS_PATH
-        for _ in range(MAX_ACADEMY_LIST_PAGES):
-            html = await self.client.fetch_page(path)
-            for listing in parse_alliance_buildings_page(html):
-                if listing.discipline in out and listing.building_id not in seen:
-                    seen.add(listing.building_id)
-                    out[listing.discipline].append(listing.building_id)
-            nxt = find_next_page_path(html)
-            if not nxt:
-                break
-            path = nxt
+        # Merge in the alliance-buildings scrape (keyword discipline). When
+        # the API already produced academies, a scrape failure only costs us
+        # the other members' academies — keep what we have.
+        try:
+            path = ALLIANCE_BUILDINGS_PATH
+            for _ in range(MAX_ACADEMY_LIST_PAGES):
+                html = await self.client.fetch_page(path)
+                for listing in parse_alliance_buildings_page(html):
+                    if listing.discipline in out and listing.building_id not in seen:
+                        seen.add(listing.building_id)
+                        out[listing.discipline].append(listing.building_id)
+                nxt = find_next_page_path(html)
+                if not nxt:
+                    break
+                path = nxt
+        except MissionChiefError:
+            if not any(out.values()):
+                raise
+            log.warning(
+                "training availability: alliance building list unavailable; "
+                "counting API-found academies only"
+            )
         return out
 
 
