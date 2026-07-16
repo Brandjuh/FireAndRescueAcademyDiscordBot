@@ -63,48 +63,53 @@ def type_colour(sanction_type: str) -> discord.Colour:
     return discord.Colour.yellow()  # verbal
 
 
+async def resolve_member_target(
+    bot, ctx: commands.Context, target: str
+) -> tuple[int | None, str | None, int | None]:
+    """(mc_user_id, mc_username, discord_user_id) for a @mention or an
+    MC name. A mention resolves MC identity through the verified link;
+    a name resolves through the roster (case-insensitive). Shared by the
+    sanction and timeline commands."""
+    member = None
+    try:
+        member = await commands.MemberConverter().convert(ctx, target)
+    except commands.BadArgument:
+        member = None
+    if member is not None:
+        link = await LinksRepo(bot.db).get_by_discord(member.id)
+        mc_user_id = (
+            int(link["mc_user_id"])
+            if link is not None and link["status"] == "approved" else None
+        )
+        name = member.display_name
+        if mc_user_id is not None:
+            roster = await MembersRepo(bot.db).active_members()
+            row = roster.get(mc_user_id)
+            if row is not None:
+                name = row["name"]
+        return mc_user_id, name, member.id
+    # Plain MC name: roster lookup, else record the name as given.
+    wanted = target.strip().casefold()
+    for mc_id, row in (await MembersRepo(bot.db).active_members()).items():
+        if str(row["name"]).casefold() == wanted:
+            link = await LinksRepo(bot.db).get_by_mc(mc_id)
+            discord_id = (
+                int(link["discord_id"])
+                if link is not None and link["status"] == "approved" else None
+            )
+            return mc_id, row["name"], discord_id
+    return None, target.strip(), None
+
+
 class SanctionsCog(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
         self.repo = SanctionsRepo(bot.db)
 
-    # -- target resolution -------------------------------------------------
-
     async def _resolve_target(
         self, ctx: commands.Context, target: str
     ) -> tuple[int | None, str | None, int | None]:
-        """(mc_user_id, mc_username, discord_user_id) for a @mention or an
-        MC name. A mention resolves MC identity through the verified link;
-        a name resolves through the roster (case-insensitive)."""
-        member = None
-        try:
-            member = await commands.MemberConverter().convert(ctx, target)
-        except commands.BadArgument:
-            member = None
-        if member is not None:
-            link = await LinksRepo(self.bot.db).get_by_discord(member.id)
-            mc_user_id = (
-                int(link["mc_user_id"])
-                if link is not None and link["status"] == "approved" else None
-            )
-            name = member.display_name
-            if mc_user_id is not None:
-                roster = await MembersRepo(self.bot.db).active_members()
-                row = roster.get(mc_user_id)
-                if row is not None:
-                    name = row["name"]
-            return mc_user_id, name, member.id
-        # Plain MC name: roster lookup, else record the name as given.
-        wanted = target.strip().casefold()
-        for mc_id, row in (await MembersRepo(self.bot.db).active_members()).items():
-            if str(row["name"]).casefold() == wanted:
-                link = await LinksRepo(self.bot.db).get_by_mc(mc_id)
-                discord_id = (
-                    int(link["discord_id"])
-                    if link is not None and link["status"] == "approved" else None
-                )
-                return mc_id, row["name"], discord_id
-        return None, target.strip(), None
+        return await resolve_member_target(self.bot, ctx, target)
 
     # -- commands ------------------------------------------------------------
 
