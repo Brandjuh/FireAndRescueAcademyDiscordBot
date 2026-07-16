@@ -11,12 +11,14 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import re
 
 import discord
 from discord.ext import commands, tasks
 
 from ..core import log_routes
 from ..db.repos import ApplicationsRepo, LogsRepo, MembersRepo, StateRepo
+from ..mc.errors import MissionChiefError
 from ..mc.parsers.logs import ACTION_PATTERNS
 from .display import (
     ACTION_DISPLAY,
@@ -51,6 +53,64 @@ def _event_unix(iso_ts: str | None) -> int | None:
         return None
 
 
+class ApplicationAcceptButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"fra:app:accept:(?P<aid>[0-9]+)",
+):
+    """Persistent Accept button on an application announcement (the manual
+    backup for auto-accept; the only path when auto-accept is off)."""
+
+    def __init__(self, application_id: int) -> None:
+        super().__init__(discord.ui.Button(
+            label="Accept",
+            style=discord.ButtonStyle.success,
+            custom_id=f"fra:app:accept:{application_id}",
+        ))
+        self.application_id = application_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match: re.Match):
+        return cls(int(match["aid"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("NotificationsCog")
+        if cog is not None:
+            await cog.handle_application_action(
+                interaction, self.application_id, "accept"
+            )
+
+
+class ApplicationDenyButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"fra:app:deny:(?P<aid>[0-9]+)",
+):
+    def __init__(self, application_id: int) -> None:
+        super().__init__(discord.ui.Button(
+            label="Deny",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"fra:app:deny:{application_id}",
+        ))
+        self.application_id = application_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match: re.Match):
+        return cls(int(match["aid"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("NotificationsCog")
+        if cog is not None:
+            await cog.handle_application_action(
+                interaction, self.application_id, "deny"
+            )
+
+
+def _application_view(application_id: int) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(ApplicationAcceptButton(application_id))
+    view.add_item(ApplicationDenyButton(application_id))
+    return view
+
+
 class NotificationsCog(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
@@ -73,6 +133,9 @@ class NotificationsCog(commands.Cog):
                 "; ".join(f"{g}: {sorted(k)}" for g, k in drift.items()),
             )
 
+        # Accept/Deny buttons resolve their application id from the
+        # custom_id, so they keep working across restarts.
+        bot.add_dynamic_items(ApplicationAcceptButton, ApplicationDenyButton)
         self.publish_loop.start()
 
     def cog_unload(self) -> None:
@@ -100,7 +163,9 @@ class NotificationsCog(commands.Cog):
 
     # ------------------------------------------------------------------
 
-    async def _send_or_skip(self, channel, embed, mark_posted, *, label: str) -> str:
+    async def _send_or_skip(
+        self, channel, embed, mark_posted, *, label: str, view=None
+    ) -> str:
         """Send one embed and mark the row posted.
 
         Returns 'ok', 'skip' (permanent 4xx — dropped so it can't block
@@ -108,7 +173,10 @@ class NotificationsCog(commands.Cog):
         the batch and try again next tick, preserving order).
         """
         try:
-            await channel.send(embed=embed)
+            if view is not None:
+                await channel.send(embed=embed, view=view)
+            else:
+                await channel.send(embed=embed)
         except discord.HTTPException as exc:
             status = getattr(exc, "status", None)
             if status is not None and 400 <= status < 500:
@@ -124,31 +192,141 @@ class NotificationsCog(commands.Cog):
         return "ok"
 
     async def _publish_applications(self) -> None:
+        """Announce new applications — auto-accepting them first when the
+        switch is on (reference bot: newmembernotify). Auto-accept failures
+        fall back to the manual Accept/Deny buttons, so an application can
+        never go unhandled silently."""
         channel = self.bot.channel_for("applications")
         if channel is None:
             return
+        auto = (
+            self.bot.cfg.automation.applications.auto_accept
+            and not self.bot.cfg.automation.dry_run
+        )
         for row in await self._apps.pending_announcements():
-            embed = discord.Embed(
-                title="📥 New alliance application",
-                colour=discord.Colour.green(),
-                description=(
-                    f"**{row['applicant_name']}** wants to join the alliance.\n"
-                    "Review it on the [applications page]"
-                    "(https://www.missionchief.com/verband/bewerbungen)."
-                )[:_DESC_LIMIT],
-                timestamp=dt.datetime.now(dt.timezone.utc),
-            )
+            name = row["applicant_name"]
+            view = None
+            if row["resolved_at"]:
+                # Vanished from the page (or accepted by us on a previous
+                # tick whose Discord send failed) before we could announce
+                # it — never re-fire the game action, just log it.
+                embed = discord.Embed(
+                    title="📥 Alliance application already handled",
+                    colour=discord.Colour.light_grey(),
+                    description=(
+                        f"**{name}** applied; the application was already "
+                        "handled (auto-accepted on an earlier pass, or "
+                        "decided in-game) before this announcement."
+                    )[:_DESC_LIMIT],
+                    timestamp=dt.datetime.now(dt.timezone.utc),
+                )
+            elif auto:
+                try:
+                    await self.bot.applications_sync.accept(row["application_id"])
+                    embed = discord.Embed(
+                        title="✅ Alliance application auto-accepted",
+                        colour=discord.Colour.green(),
+                        description=(
+                            f"**{name}** applied and was accepted "
+                            "automatically. Welcome them in!"
+                        )[:_DESC_LIMIT],
+                        timestamp=dt.datetime.now(dt.timezone.utc),
+                    )
+                except MissionChiefError as exc:
+                    embed = discord.Embed(
+                        title="⚠️ Auto-accept failed — decide manually",
+                        colour=discord.Colour.orange(),
+                        description=(
+                            f"**{name}** wants to join, but accepting "
+                            f"automatically failed: {exc}"
+                        )[:_DESC_LIMIT],
+                        timestamp=dt.datetime.now(dt.timezone.utc),
+                    )
+                    view = _application_view(row["application_id"])
+            else:
+                note = (
+                    "\n*(dry-run is on — the buttons will only report what "
+                    "they would do)*"
+                    if self.bot.cfg.automation.dry_run
+                    and self.bot.cfg.automation.applications.auto_accept
+                    else ""
+                )
+                embed = discord.Embed(
+                    title="📥 New alliance application",
+                    colour=discord.Colour.blue(),
+                    description=(
+                        f"**{name}** wants to join the alliance.{note}"
+                    )[:_DESC_LIMIT],
+                    timestamp=dt.datetime.now(dt.timezone.utc),
+                )
+                view = _application_view(row["application_id"])
             url = profile_url(row["mc_user_id"])
             if url:
                 embed.add_field(name="Profile", value=url[:_FIELD_LIMIT], inline=False)
+            embed.set_footer(text=f"Application ID: {row['application_id']}")
             outcome = await self._send_or_skip(
                 channel, embed,
                 lambda r=row: self._apps.mark_posted(r["application_id"]),
                 label="application",
+                view=view,
             )
             if outcome == "retry":
                 return
             await asyncio.sleep(_POST_PAUSE_SECONDS)
+
+    async def handle_application_action(
+        self, interaction: discord.Interaction, application_id: int, action: str
+    ) -> None:
+        """Accept/Deny button click on an application announcement."""
+        from .automation import _is_admin_interaction
+
+        if not _is_admin_interaction(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to do this.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        row = await self._apps.get(application_id)
+        name = row["applicant_name"] if row else f"application #{application_id}"
+        if self.bot.cfg.automation.dry_run:
+            await interaction.followup.send(
+                f"[dry-run] would **{action}** {name} — no game action taken.",
+                ephemeral=True,
+            )
+            return
+        try:
+            if action == "accept":
+                await self.bot.applications_sync.accept(application_id)
+            else:
+                await self.bot.applications_sync.deny(application_id)
+        except MissionChiefError as exc:
+            await interaction.followup.send(
+                f"❌ Could not {action} **{name}**: {exc}", ephemeral=True
+            )
+            return
+        accepted = action == "accept"
+        verb = "Accepted" if accepted else "Denied"
+        try:
+            message = interaction.message
+            embed = message.embeds[0] if message and message.embeds else None
+            if message is not None and embed is not None:
+                embed.colour = (
+                    discord.Colour.green() if accepted else discord.Colour.red()
+                )
+                embed.set_footer(
+                    text=f"{verb} by {interaction.user.display_name} — "
+                    f"application ID: {application_id}"
+                )
+                await message.edit(embed=embed, view=None)
+        except discord.HTTPException as exc:
+            log.warning("Could not update application embed %s: %s",
+                        application_id, exc)
+        await interaction.followup.send(f"✅ {verb} **{name}**.", ephemeral=True)
+        icon = "✅" if accepted else "❌"
+        await self.bot.notify_admin(
+            f"{icon} Alliance application of **{name}** {verb.lower()} by "
+            f"{interaction.user.display_name}."
+        )
 
     async def _publish_member_events(self) -> None:
         channel = self.bot.channel_for("member_events")

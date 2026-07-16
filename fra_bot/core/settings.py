@@ -210,6 +210,8 @@ SETTINGS: tuple[Setting, ...] = (
             "Automatically kick after 3 unresolved warnings"),
     Setting("automation.tax_warnings.interval_hours", "int", False,
             "Hours between warning scans", minimum=1, maximum=48),
+    Setting("automation.applications.auto_accept", "bool", True,
+            "Auto-accept new alliance applications (buttons stay as backup)"),
     Setting("automation.events.enabled", "bool", True, "Events board polling"),
     Setting("automation.events.thread_id", "int", True, "Events board thread"),
     Setting("automation.events.interval", "int", False, "Events poll interval (min)", minimum=2),

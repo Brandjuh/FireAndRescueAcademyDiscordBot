@@ -366,9 +366,26 @@ class ApplicationsRepo:
         ) as cur:
             return list(await cur.fetchall())
 
+    async def get(self, application_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM applications WHERE application_id = ?",
+            (application_id,),
+        ) as cur:
+            return await cur.fetchone()
+
     async def mark_posted(self, application_id: int) -> None:
         await self._db.execute(
             "UPDATE applications SET posted_at = ? WHERE application_id = ?",
+            (utcnow_iso(), application_id),
+        )
+
+    async def mark_resolved(self, application_id: int) -> None:
+        """Close an application we just accepted/denied ourselves, so
+        ``open_count`` is honest immediately (the next sync would catch it
+        anyway once the row vanishes from the page)."""
+        await self._db.execute(
+            "UPDATE applications SET resolved_at = ? "
+            "WHERE application_id = ? AND resolved_at IS NULL",
             (utcnow_iso(), application_id),
         )
 
