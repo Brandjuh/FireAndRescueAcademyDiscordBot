@@ -117,6 +117,13 @@ automation:
     # ≥30 s apart. Relaying into the game honours dry_run.
     enabled: false
     interval_seconds: 30
+  sanctions:
+    # Sanctions register (!sanction add/list/stats/revoke). The bot only
+    # RECORDS and announces — it never kicks or bans anyone itself. With
+    # auto_action_enabled, a member's 3rd official warning posts the
+    # configured follow-up (Kick/Ban) as an ADVISORY to the admin log.
+    auto_action_enabled: false
+    third_warning_action: Kick
   training:
     enabled: false            # master switch for training auto-start
     thread_id: 5935           # /alliance_threads/<id> with training requests

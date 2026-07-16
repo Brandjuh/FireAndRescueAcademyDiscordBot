@@ -1857,6 +1857,104 @@ class LinksRepo:
         )
 
 
+class SanctionsRepo:
+    """Sanctions register (reference bot: sanctionmanager) — records and
+    statistics only; the bot never executes a kick/ban itself."""
+
+    OFFICIAL_WARNINGS = (
+        "Warning - Official 1st warning",
+        "Warning - Official 2nd warning",
+        "Warning - Official 3rd and last warning",
+    )
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def add(
+        self, *, mc_user_id: int | None, mc_username: str | None,
+        discord_user_id: int | None, admin_discord_id: int, admin_name: str,
+        sanction_type: str, reason: str, notes: str | None = None,
+    ) -> int:
+        return await self._db.execute_returning_id(
+            """
+            INSERT INTO sanctions
+                (mc_user_id, mc_username, discord_user_id, admin_discord_id,
+                 admin_name, sanction_type, reason, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (mc_user_id, mc_username, discord_user_id, admin_discord_id,
+             admin_name, sanction_type, reason, notes, utcnow_iso()),
+        )
+
+    async def get(self, sanction_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM sanctions WHERE id = ?", (sanction_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def revoke(self, sanction_id: int, *, revoked_by: str) -> bool:
+        n = await self._db.execute(
+            "UPDATE sanctions SET status = 'revoked', revoked_at = ?, "
+            "revoked_by = ? WHERE id = ? AND status = 'active'",
+            (utcnow_iso(), revoked_by, sanction_id),
+        )
+        return n == 1
+
+    async def for_member(
+        self, *, mc_user_id: int | None = None,
+        discord_user_id: int | None = None, name: str | None = None,
+        limit: int = 25,
+    ) -> list[aiosqlite.Row]:
+        """A member's sanctions, newest first — matched on any known handle."""
+        clauses, params = [], []
+        if mc_user_id is not None:
+            clauses.append("mc_user_id = ?")
+            params.append(mc_user_id)
+        if discord_user_id is not None:
+            clauses.append("discord_user_id = ?")
+            params.append(discord_user_id)
+        if name:
+            clauses.append("mc_username = ? COLLATE NOCASE")
+            params.append(name)
+        if not clauses:
+            return []
+        async with self._db.conn.execute(
+            f"SELECT * FROM sanctions WHERE {' OR '.join(clauses)} "
+            "ORDER BY id DESC LIMIT ?",
+            (*params, limit),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def recent(self, limit: int = 15) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM sanctions ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def official_warning_count(
+        self, *, mc_user_id: int | None = None,
+        discord_user_id: int | None = None, name: str | None = None,
+    ) -> int:
+        """ACTIVE official warnings for a member (the escalation counter)."""
+        rows = await self.for_member(
+            mc_user_id=mc_user_id, discord_user_id=discord_user_id,
+            name=name, limit=100,
+        )
+        return sum(
+            1 for r in rows
+            if r["status"] == "active"
+            and r["sanction_type"] in self.OFFICIAL_WARNINGS
+        )
+
+    async def stats(self) -> list[aiosqlite.Row]:
+        """Counts per (sanction_type, status)."""
+        async with self._db.conn.execute(
+            "SELECT sanction_type, status, COUNT(*) AS n FROM sanctions "
+            "GROUP BY sanction_type, status ORDER BY n DESC"
+        ) as cur:
+            return list(await cur.fetchall())
+
+
 class TaxWarningsRepo:
     """Per-member tax (alliance donation) warning state for the automated
     5%-donation warning system."""
