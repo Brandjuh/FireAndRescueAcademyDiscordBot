@@ -657,7 +657,16 @@ class MissionsForumService:
             if self._stop:
                 stopped = True
                 break
-            thread = await self._get_thread(thread_id)
+            try:
+                thread = await self._get_thread(thread_id)
+            except discord.HTTPException as exc:
+                # Transient fetch error: skip this thread, KEEP its mapping
+                # so a re-run can still delete it — and never abort the
+                # whole wipe over one hiccup.
+                failed += 1
+                log.warning("Could not fetch mission thread %s during wipe: %s",
+                            thread_id, exc)
+                continue
             if thread is None:
                 if mission_key:
                     await self._repo.delete(mission_key)

@@ -417,16 +417,25 @@ class FRABot(commands.Bot):
         # Run the drain whenever the panel is live (channel set), even if the
         # `enabled` flag is off, otherwise a low-funds click is orphaned: the
         # panel promises auto-retry but nothing would ever drain the queue.
-        # (Draining only ever retries builds a member/admin explicitly
-        # clicked — it starts nothing on its own.)
-        academy_panel = int(getattr(self.cfg.discord.channels, "academy_panel", 0) or 0)
-        if automation.academy.enabled or academy_panel or automation.academy.autoscale:
-            sched.add_interval_job(
-                self._guarded(self.academy.process_queue, "academy-builds"),
-                minutes=automation.academy.interval,
-                name="academy-builds",
-                initial_delay_seconds=200.0,
-            )
+        # (Draining only ever retries builds a member/admin/autoscale
+        # explicitly queued — it starts nothing on its own.) Always
+        # registered, switches read live: autoscale/enabled can be flipped
+        # on at runtime, and a queued build must never sit undrained just
+        # because every switch was off at startup.
+        async def _drain_academy_queue_if_on() -> None:
+            enabled = self.cfg.automation.academy.enabled
+            autoscale = self.cfg.automation.academy.autoscale
+            panel = int(getattr(self.cfg.discord.channels, "academy_panel", 0) or 0)
+            if not (enabled or panel or autoscale):
+                return
+            await self.academy.process_queue()
+
+        sched.add_interval_job(
+            self._guarded(_drain_academy_queue_if_on, "academy-builds"),
+            minutes=automation.academy.interval,
+            name="academy-builds",
+            initial_delay_seconds=200.0,
+        )
 
         # The jobs below spend alliance funds AUTONOMOUSLY (no member click
         # behind them), so each requires its own explicit switch — a live
