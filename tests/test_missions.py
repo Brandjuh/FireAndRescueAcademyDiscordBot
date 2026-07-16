@@ -520,6 +520,53 @@ async def test_member_request_served_before_rotation(db):
     assert (await sched.rotation.get(rid))["last_started_at"] is not None
 
 
+async def test_rotation_never_steals_a_window_from_a_parked_request(db):
+    # Member request #N is parked 'waiting' for its window (future
+    # next_attempt_at, so not claimable). The rotation must NOT take that
+    # kind's free window in the meantime — starting some other event would
+    # leapfrog the member's request and scramble the schedule.
+    import datetime as dt
+
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    mid = await _enqueue(sched, kind="large")
+    await sched.missions.claim(mid)
+    await sched.missions.set_status(
+        mid, "waiting", "next free mission at tomorrow; queued",
+        next_attempt_at=(
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=6)
+        ).isoformat(),
+    )
+    rid = await sched.rotation.add(
+        location_text="Rotation City", created_by="admin", kind="large"
+    )
+
+    await sched._advance()
+    # The parked request still owns the window: rotation untouched.
+    assert (await sched.rotation.get(rid))["last_started_at"] is None
+    assert (await sched.missions.get(mid))["status"] == "waiting"
+
+
+async def test_rotation_of_other_kind_still_runs_past_parked_request(db):
+    # A parked LARGE request must not freeze the EVENT rotation — the
+    # windows are independent.
+    import datetime as dt
+
+    sched = _scheduler(_cfg(dry_run=True), FakeClient(), db)
+    mid = await _enqueue(sched, kind="large")
+    await sched.missions.claim(mid)
+    await sched.missions.set_status(
+        mid, "waiting", "window closed",
+        next_attempt_at=(
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=6)
+        ).isoformat(),
+    )
+    rid = await sched.rotation.add(
+        location_text="Event City", created_by="admin", kind="event"
+    )
+    await sched._advance()
+    assert (await sched.rotation.get(rid))["last_started_at"] is not None
+
+
 async def test_geocode_transient_failure_retries_not_fails(db):
     from fra_bot.geo.geocoder import GeocodeError
 
