@@ -103,6 +103,12 @@ automation:
   dry_run: true
   # Post confirmation replies in the board threads ([FRA] marker).
   reply_to_board: true
+  applications:
+    # Accept every new alliance application automatically (in-game).
+    # With this off — or when an auto-accept fails — the announcement in
+    # the applications channel carries Accept/Deny buttons instead, so
+    # admins decide from Discord. Honours dry_run.
+    auto_accept: false
   training:
     enabled: false            # master switch for training auto-start
     thread_id: 5935           # /alliance_threads/<id> with training requests

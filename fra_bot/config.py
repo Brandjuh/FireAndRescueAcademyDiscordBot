@@ -247,6 +247,17 @@ class TaxWarningsConfig:
 
 
 @dataclass(frozen=True)
+class ApplicationsAutomationConfig:
+    """Alliance application handling (reference bot: newmembernotify).
+
+    ``auto_accept`` accepts every new application in-game automatically;
+    with it off (or when an auto-accept fails) the announcement carries
+    Accept/Deny buttons so admins decide from Discord. Honours the global
+    ``dry_run`` switch."""
+    auto_accept: bool
+
+
+@dataclass(frozen=True)
 class AutomationConfig:
     dry_run: bool
     reply_to_board: bool
@@ -260,6 +271,7 @@ class AutomationConfig:
     vehicles_forum: VehiclesForumConfig
     dm_mirror: DmMirrorConfig
     rank_roles: RankRolesConfig
+    applications: ApplicationsAutomationConfig
 
 
 @dataclass(frozen=True)
@@ -623,6 +635,12 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                         or {}
                     ).items()
                 },
+            ),
+            applications=ApplicationsAutomationConfig(
+                auto_accept=bool(
+                    _get(raw, "automation", "applications", "auto_accept",
+                         default=False)
+                ),
             ),
             tax_warnings=TaxWarningsConfig(
                 enabled=bool(
