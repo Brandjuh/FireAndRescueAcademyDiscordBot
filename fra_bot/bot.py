@@ -206,6 +206,7 @@ class FRABot(commands.Bot):
         from .cogs.automation import AutomationCog
         from .cogs.chat_bridge import ChatBridgeCog
         from .cogs.sanctions import SanctionsCog
+        from .cogs.timeline import TimelineCog
         from .cogs.dossier import DossierCog, DossierPanelView
         from .cogs.eventpinger import EventPingerCog
         from .cogs.membersync import MemberSyncCog
@@ -234,6 +235,7 @@ class FRABot(commands.Bot):
         await self.add_cog(AcademyCog(self))
         await self.add_cog(ChatBridgeCog(self))
         await self.add_cog(SanctionsCog(self))
+        await self.add_cog(TimelineCog(self))
 
         # Persistent panels survive restarts; register their views.
         missions_cog = self.get_cog("MissionsCog")
