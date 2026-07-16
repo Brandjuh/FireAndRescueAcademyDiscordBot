@@ -109,6 +109,12 @@ class DiscordConfig:
     # Pinged on new-vehicle announcements in the vehicle_announce channel
     # (0 = no ping, just the message).
     vehicle_announce_role_id: int = 0
+    # Eventpinger announcement watcher: the channel where the official
+    # MissionChief app announces EVERY alliance mission/event start (also
+    # manual ones), and that app's user id. Each announcement gets a reply
+    # pinging Notify-Event + the resolved region role. 0 = watcher off.
+    event_watch_channel_id: int = 544461383358480385
+    event_watch_app_id: int = 743939319122886657
 
 
 @dataclass(frozen=True)
@@ -448,6 +454,14 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             ),
             vehicle_announce_role_id=int(
                 _get(raw, "discord", "vehicle_announce_role_id", default=0)
+            ),
+            event_watch_channel_id=int(
+                _get(raw, "discord", "event_watch_channel_id",
+                     default=544461383358480385)
+            ),
+            event_watch_app_id=int(
+                _get(raw, "discord", "event_watch_app_id",
+                     default=743939319122886657)
             ),
         ),
         automation=AutomationConfig(

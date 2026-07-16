@@ -41,6 +41,73 @@ log = logging.getLogger(__name__)
 # stale — the mission is well underway; posting it late is just noise.
 MAX_PING_AGE_HOURS = 24
 
+# The official MissionChief app's announcement titles (reference bot's
+# prefixes). Matching is case-insensitive on the normalized title.
+MISSION_PREFIX = "start alliance mission!"
+EVENT_PREFIX = "alliance event started!"
+
+
+def _normalize_text(value) -> str:
+    return " ".join(str(value or "").replace("\n", " ").split())
+
+
+def extract_announcement_from_message(message) -> tuple[str, str, str] | None:
+    """(kind, name, address) from a MissionChief announcement message —
+    embeds first, then plain content. kind is our 'large'/'event'."""
+    for title, body in iter_message_blocks(message):
+        found = extract_announcement(title, body)
+        if found:
+            return found
+    return None
+
+
+def iter_message_blocks(message):
+    for embed in getattr(message, "embeds", []) or []:
+        title = _normalize_text(getattr(embed, "title", "") or "")
+        parts = []
+        description = getattr(embed, "description", None)
+        if description:
+            parts.append(str(description))
+        for fld in getattr(embed, "fields", []) or []:
+            value = getattr(fld, "value", None)
+            if value is None and isinstance(fld, dict):
+                value = fld.get("value")
+            if value:
+                parts.append(str(value))
+        yield title, "\n".join(parts)
+
+    content = getattr(message, "content", "") or ""
+    if content:
+        lines = [line.strip() for line in str(content).splitlines() if line.strip()]
+        if lines:
+            yield lines[0], "\n".join(lines[1:])
+
+
+def extract_announcement(title: str, body: str) -> tuple[str, str, str] | None:
+    normalized_title = _normalize_text(title)
+    lowered = normalized_title.casefold()
+    if lowered.startswith(MISSION_PREFIX):
+        return (
+            "large",
+            normalized_title[len(MISSION_PREFIX):].strip(" -:"),
+            _first_address_line(body),
+        )
+    if lowered.startswith(EVENT_PREFIX):
+        return (
+            "event",
+            normalized_title[len(EVENT_PREFIX):].strip(" -:"),
+            _first_address_line(body),
+        )
+    return None
+
+
+def _first_address_line(body: str) -> str:
+    for line in str(body or "").splitlines():
+        clean = _normalize_text(line)
+        if clean:
+            return clean
+    return ""
+
 
 def announcement_label(kind: str) -> str:
     return "Alliance Mission" if kind == "large" else "Alliance Event"
@@ -117,6 +184,85 @@ class EventPingerCog(commands.Cog):
 
     def cog_unload(self) -> None:
         self.ping_loop.cancel()
+
+    # -- the announcement watcher ------------------------------------------
+    # The official MissionChief app announces EVERY alliance mission/event
+    # start (also ones an admin starts by hand). Watch those messages and
+    # ping the roles for each — not only for starts this bot performed.
+
+    def _is_watched_announcement(self, message) -> bool:
+        channel_id = int(getattr(self.bot.cfg.discord, "event_watch_channel_id", 0) or 0)
+        app_id = int(getattr(self.bot.cfg.discord, "event_watch_app_id", 0) or 0)
+        return bool(
+            channel_id and app_id
+            and getattr(getattr(message, "channel", None), "id", None) == channel_id
+            and getattr(getattr(message, "author", None), "id", None) == app_id
+        )
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        try:
+            if not self._is_watched_announcement(message):
+                return
+            found = extract_announcement_from_message(message)
+            if found is None:
+                return
+            kind, name, address = found
+            await self._send_announcement_ping(message, kind, name, address)
+        except Exception:  # noqa: BLE001 — a ping must never break the listener
+            log.exception("eventpinger: failed to handle an announcement")
+
+    async def _send_announcement_ping(
+        self, message, kind: str, name: str, address: str
+    ) -> None:
+        guild = message.guild
+        if guild is None:
+            return
+        region = await self._resolve_announcement_region(address)
+
+        notify_role_id = self.bot.cfg.discord.notify_event_role_id
+        notify_role = guild.get_role(notify_role_id) if notify_role_id else None
+        region_role = find_region_role(guild, region)
+
+        notify_mention = getattr(notify_role, "mention", f"<@&{notify_role_id}>")
+        region_mention = getattr(region_role, "mention", None)
+        content = format_notification_mentions(notify_mention, region_mention)
+        embed = build_notification_embed(
+            kind, name, address, region,
+            await self._next_details(
+                {"kind": kind,
+                 "created_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+            ),
+        )
+        try:
+            await message.channel.send(
+                content, embed=embed,
+                allowed_mentions=discord.AllowedMentions(
+                    roles=True, users=False, everyone=False
+                ),
+            )
+        except discord.HTTPException as exc:
+            log.warning("eventpinger: could not post announcement ping: %s", exc)
+
+    async def _resolve_announcement_region(self, address: str) -> RegionMatch | None:
+        """Announcements carry only the address TEXT: forward-geocode it for
+        the authoritative region, then fall back to the text heuristics."""
+        text = _normalize_text(address)
+        if not text:
+            return None
+        try:
+            details = await self.bot.geocoder.search_details(text)
+        except GeocodeError as exc:
+            log.info("eventpinger: geocode failed for %r (%s)", text, exc)
+            details = None
+        except Exception:
+            log.exception("eventpinger: announcement geocode failed")
+            details = None
+        if details:
+            match = region_from_address_details(details)
+            if match:
+                return match
+        return resolve_region(text)
 
     # -- delivery loop ----------------------------------------------------
 

@@ -88,6 +88,12 @@ discord:
   # Role pinged on new-vehicle announcements in the vehicle_announce
   # channel (0 = message without a ping).
   vehicle_announce_role_id: 0
+  # Eventpinger announcement watcher: the channel where the official
+  # MissionChief app announces every alliance mission/event start (also
+  # manual ones) and that app's user id. Each announcement gets a reply
+  # pinging Notify-Event + the resolved region role. 0 = watcher off.
+  event_watch_channel_id: 544461383358480385
+  event_watch_app_id: 743939319122886657
 
 automation:
   # SAFETY FIRST: with dry_run on, the bot detects and reports board
