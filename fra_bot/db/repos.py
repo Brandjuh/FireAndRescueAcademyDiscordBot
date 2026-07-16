@@ -1857,6 +1857,67 @@ class LinksRepo:
         )
 
 
+class FaqRepo:
+    """Custom FAQ entries (reference bot: faqmanager). Soft-deleted rows
+    stay for history but never surface in search or listings."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def add(
+        self, *, question: str, answer: str, created_by: str,
+        category: str | None = None, keywords: str | None = None,
+    ) -> int:
+        now = utcnow_iso()
+        return await self._db.execute_returning_id(
+            "INSERT INTO faq_entries (question, answer, category, keywords, "
+            "created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (question, answer, category, keywords, created_by, now, now),
+        )
+
+    async def get(self, faq_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM faq_entries WHERE id = ? AND is_deleted = 0",
+            (faq_id,),
+        ) as cur:
+            return await cur.fetchone()
+
+    async def all_active(self) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM faq_entries WHERE is_deleted = 0 ORDER BY id ASC"
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def update(
+        self, faq_id: int, *, question: str | None = None,
+        answer: str | None = None, category: str | None = None,
+        keywords: str | None = None,
+    ) -> bool:
+        sets, params = ["updated_at = ?"], [utcnow_iso()]
+        for column, value in (
+            ("question", question), ("answer", answer),
+            ("category", category), ("keywords", keywords),
+        ):
+            if value is not None:
+                sets.append(f"{column} = ?")
+                params.append(value)
+        params.append(faq_id)
+        n = await self._db.execute(
+            f"UPDATE faq_entries SET {', '.join(sets)} "
+            "WHERE id = ? AND is_deleted = 0",
+            tuple(params),
+        )
+        return n == 1
+
+    async def remove(self, faq_id: int) -> bool:
+        n = await self._db.execute(
+            "UPDATE faq_entries SET is_deleted = 1, updated_at = ? "
+            "WHERE id = ? AND is_deleted = 0",
+            (utcnow_iso(), faq_id),
+        )
+        return n == 1
+
+
 class SanctionsRepo:
     """Sanctions register (reference bot: sanctionmanager) — records and
     statistics only; the bot never executes a kick/ban itself."""
