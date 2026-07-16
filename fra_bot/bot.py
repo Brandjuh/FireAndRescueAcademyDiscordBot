@@ -446,6 +446,15 @@ class FRABot(commands.Bot):
             # sweep buys the next available one on each of our academies so
             # they max out over the following weeks without hammering.
             if not self.cfg.automation.academy.enabled:
+                # The sweep used to ride on the panel channel alone; after
+                # the switch became required it must not stop SILENTLY on a
+                # deployment that relied on that — say so, every pass (4x/day).
+                if int(getattr(self.cfg.discord.channels, "academy_panel", 0) or 0):
+                    log.info(
+                        "academy extension sweep is OFF (automation.academy."
+                        "enabled=false) — run `!fra set academy.enabled on` "
+                        "to resume buying extensions"
+                    )
                 return
             await self.academy.sweep_extensions()
 
