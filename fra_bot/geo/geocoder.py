@@ -299,6 +299,29 @@ class Geocoder:
         )
         return details
 
+    async def search_details(self, query: str) -> dict | None:
+        """Forward-geocode a free-form address to its structured parts
+        (state, country, country_code, …) — the announcement watcher's way
+        to a region role when it only has the announcement's address text.
+        Returns None when nothing matches."""
+        cached = await self._cache_get("search_details", query)
+        if cached is not None:
+            return cached or None
+
+        data = await self._nominatim(
+            "/search",
+            {"q": query, "format": "jsonv2", "limit": "1", "addressdetails": "1"},
+        )
+        details = None
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            candidate = data[0].get("address")
+            if isinstance(candidate, dict):
+                details = candidate
+        await self._state.set(
+            f"geocode/search_details/{query}", json.dumps(details or {})
+        )
+        return details
+
     def _geocode_url(self, path: str, params: dict[str, str]) -> str:
         """Build the request URL, injecting the API key when configured."""
         query = dict(params)

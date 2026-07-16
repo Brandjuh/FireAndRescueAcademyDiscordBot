@@ -279,3 +279,94 @@ async def test_delivery_marks_posted_and_skips_stale(db):
     assert len(channel.sent) == 1          # only the fresh one was sent
     assert await repo.unposted() == []     # both are marked handled
     assert ping_id != stale_id
+
+
+# -- the announcement watcher: ALL MissionChief app announcements ------------
+
+WATCH_CHANNEL = 544461383358480385
+MC_APP = 743939319122886657
+
+
+def _watch_cog(db, *, guild, geocoder=None):
+    cog = _cog(db, guild=guild, geocoder=geocoder)
+    cog.bot.cfg.discord.event_watch_channel_id = WATCH_CHANNEL
+    cog.bot.cfg.discord.event_watch_app_id = MC_APP
+    return cog
+
+
+def _announcement_message(guild, channel, *, title, body, author_id=MC_APP):
+    embed = SimpleNamespace(title=title, description=body, fields=[])
+    return SimpleNamespace(
+        channel=channel, author=SimpleNamespace(id=author_id),
+        guild=guild, embeds=[embed], content="",
+    )
+
+
+class FakeSearchGeocoder:
+    def __init__(self, details):
+        self.details = details
+        self.queries = []
+
+    async def search_details(self, query):
+        self.queries.append(query)
+        return self.details
+
+
+def test_extract_announcement_prefixes():
+    from fra_bot.cogs.eventpinger import extract_announcement
+
+    kind, name, address = extract_announcement(
+        "Start Alliance Mission! Major Fire", "Main Street 1, 10451 New York"
+    )
+    assert (kind, name) == ("large", "Major Fire")
+    assert address == "Main Street 1, 10451 New York"
+    kind, name, _ = extract_announcement("Alliance Event Started! Storm", "Miami, FL")
+    assert (kind, name) == ("event", "Storm")
+    assert extract_announcement("Some chatter", "hello") is None
+
+
+async def test_watcher_pings_for_foreign_announcement(db):
+    # An announcement the bot did NOT start still gets Notify-Event plus the
+    # resolved region role, in the same channel.
+    notify = FakeRole(NOTIFY_ROLE_ID, "Notify-Event")
+    state = FakeRole(2, "California (CA)")
+    guild = FakeGuild([notify, state])
+    channel = FakeChannel(guild)
+    channel.id = WATCH_CHANNEL
+    geocoder = FakeSearchGeocoder(
+        {"state": "California", "country": "United States", "country_code": "us"}
+    )
+    cog = _watch_cog(db, guild=guild, geocoder=geocoder)
+    message = _announcement_message(
+        guild, channel,
+        title="Start Alliance Mission! Warehouse Fire",
+        body="1 Market St, 94105 San Francisco",
+    )
+    await cog.on_message(message)
+    assert channel.sent, "expected an announcement ping"
+    content, kwargs = channel.sent[0]
+    assert notify.mention in content and state.mention in content
+    embed = kwargs["embed"]
+    assert any("Warehouse Fire" == f.value for f in embed.fields)
+
+
+async def test_watcher_ignores_other_authors_and_channels(db):
+    guild = FakeGuild([FakeRole(NOTIFY_ROLE_ID, "Notify-Event")])
+    channel = FakeChannel(guild)
+    channel.id = WATCH_CHANNEL
+    cog = _watch_cog(db, guild=guild)
+    # Wrong author.
+    await cog.on_message(_announcement_message(
+        guild, channel, title="Start Alliance Mission! X", body="Y", author_id=1,
+    ))
+    # Wrong channel.
+    other = FakeChannel(guild)
+    other.id = 123
+    await cog.on_message(_announcement_message(
+        guild, other, title="Start Alliance Mission! X", body="Y",
+    ))
+    # Right source but not an announcement.
+    await cog.on_message(_announcement_message(
+        guild, channel, title="hello world", body="Y",
+    ))
+    assert channel.sent == [] and other.sent == []
