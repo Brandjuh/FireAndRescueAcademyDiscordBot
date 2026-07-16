@@ -8,6 +8,8 @@ own package) so everything stays reportable.
 
 from __future__ import annotations
 
+import datetime as dt
+
 from ..db.database import Database
 from ..db.repos import (
     ApplicationsRepo,
@@ -18,8 +20,17 @@ from ..db.repos import (
     TreasuryRepo,
     ny_period_keys,
 )
-from .period import Period
+from .period import NY, Period
 from .registry import Report, ReportRegistry, ReportResult
+
+
+def _prev_ny_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
+    """(previous NY game day, previous NY month) as period keys."""
+    now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
+    ny_today = now_utc.astimezone(NY).date()
+    prev_day = ny_today - dt.timedelta(days=1)
+    prev_month_last = ny_today.replace(day=1) - dt.timedelta(days=1)
+    return prev_day.strftime("%Y-%m-%d"), prev_month_last.strftime("%Y-%m")
 
 _MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
@@ -135,8 +146,20 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
         return result
 
     async def income_daily(period: Period) -> ReportResult:
+        # "yesterday" reports the FINISHED game day (the 23:55-NY pre-reset
+        # capture); "today" reports the running day. The morning schedule
+        # fires minutes after the NY midnight reset, when the new day has no
+        # snapshot yet — fall back to the finished day instead of showing an
+        # empty "No contributions recorded".
         day_key, _ = ny_period_keys()
+        if period.name == "yesterday":
+            day_key, _ = _prev_ny_keys()
         rows = await treasury.latest_snapshot("daily", day_key)
+        if not rows and period.name != "yesterday":
+            prev_day, _ = _prev_ny_keys()
+            rows = await treasury.latest_snapshot("daily", prev_day)
+            if rows:
+                day_key = prev_day
         return ReportResult(
             title=f"💰 Daily top contributors ({day_key})",
             description=_top10_lines(rows),
@@ -144,8 +167,18 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
         )
 
     async def income_monthly(period: Period) -> ReportResult:
+        # Same shape as the daily report: "prev-month" is explicit, and a
+        # just-rolled-over month (the 1st, right after the NY reset) falls
+        # back to the finished month's final standings.
         _, month_key = ny_period_keys()
+        if period.name == "prev-month":
+            _, month_key = _prev_ny_keys()
         rows = await treasury.latest_snapshot("monthly", month_key)
+        if not rows and period.name != "prev-month":
+            _, prev_month = _prev_ny_keys()
+            rows = await treasury.latest_snapshot("monthly", prev_month)
+            if rows:
+                month_key = prev_month
         return ReportResult(
             title=f"🏆 Monthly top contributors ({month_key})",
             description=_top10_lines(rows),
@@ -153,12 +186,12 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
         )
 
     registry.register(Report(
-        "income-daily", "Daily income top-10 (current NY day)", income_daily,
-        periods=("today",),
+        "income-daily", "Daily income top-10 (today, or yesterday's final)", income_daily,
+        periods=("today", "yesterday"),
     ))
     registry.register(Report(
-        "income-monthly", "Monthly income top-10 (current NY month)", income_monthly,
-        periods=("month",),
+        "income-monthly", "Monthly income top-10 (this month, or last month's final)", income_monthly,
+        periods=("month", "prev-month"),
     ))
     registry.register(Report(
         "members", "Roster size, applications and member changes", members_report,
