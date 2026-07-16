@@ -1696,23 +1696,53 @@ class AdminCog(commands.Cog):
                 "The rotation list is empty. Add one with `!fra rotation add <location>`."
             )
             return
-        nxt = await self._rotation.next_entry()
-        next_id = nxt["id"] if nxt else None
-        lines = []
-        for r in rows:
-            mark = "▶️" if r["id"] == next_id else ("✅" if r["active"] else "⏸️")
-            where = r["address"] or r["location_text"] or "?"
-            started = r["last_started_at"][:10] if r["last_started_at"] else "never"
-            lines.append(
-                f"{mark} `#{r['id']:>3}` {r['kind']}/{r['mission_source']} — "
-                f"{where[:45]} — started ×{r['start_count']} ({started})"
-            )
-        auto = self.bot.cfg.automation.mission
-        embed = discord.Embed(
-            title="🔁 Mission rotation",
-            colour=discord.Colour.blurple(),
-            description="\n".join(lines)[:4096],
+        # The large (daily window) and event (weekly window) rotations run
+        # independently in the scheduler, so show them as two separate
+        # schedules — each with its OWN next-up marker.
+        sections = (
+            ("large", "🚨 Large missions — daily rotation"),
+            ("event", "🎪 Events — weekly rotation"),
         )
+        auto = self.bot.cfg.automation.mission
+        embed = discord.Embed(title="🔁 Mission rotation", colour=discord.Colour.blurple())
+        for kind, title in sections:
+            kind_rows = [r for r in rows if r["kind"] == kind]
+            if not kind_rows:
+                continue
+            nxt = await self._rotation.next_entry(kind=kind)
+            next_id = nxt["id"] if nxt else None
+            lines = []
+            for r in kind_rows:
+                mark = "▶️" if r["id"] == next_id else ("✅" if r["active"] else "⏸️")
+                where = r["address"] or r["location_text"] or "?"
+                started = r["last_started_at"][:10] if r["last_started_at"] else "never"
+                lines.append(
+                    f"{mark} `#{r['id']:>3}` {r['mission_source']} — "
+                    f"{where[:45]} — ×{r['start_count']} ({started})"
+                )
+            # Split long sections across 1024-char fields, nothing truncated.
+            chunk: list[str] = []
+            size = 0
+            part = 1
+            for line in lines:
+                if chunk and size + len(line) + 1 > 1024:
+                    label = title if part == 1 else f"{title} (cont. {part})"
+                    embed.add_field(name=label, value="\n".join(chunk), inline=False)
+                    chunk, size, part = [], 0, part + 1
+                chunk.append(line)
+                size += len(line) + 1
+            if chunk:
+                label = title if part == 1 else f"{title} (cont. {part})"
+                embed.add_field(name=label, value="\n".join(chunk), inline=False)
+        other = [r for r in rows if r["kind"] not in ("large", "event")]
+        if other:
+            embed.add_field(
+                name="Other",
+                value="\n".join(
+                    f"`#{r['id']:>3}` {r['kind']}/{r['mission_source']}" for r in other
+                )[:1024],
+                inline=False,
+            )
         embed.set_footer(
             text=(
                 f"▶️ next · ✅ active · ⏸️ paused · "
@@ -1721,6 +1751,33 @@ class AdminCog(commands.Cog):
             )
         )
         await ctx.send(embed=embed)
+
+    @rotation.command(name="copy", aliases=["copyevents", "copytolarge"])
+    async def rotation_copy(self, ctx: commands.Context) -> None:
+        """Copy every active EVENT location into the LARGE rotation.
+
+        Each copy becomes a daily large at the same spot (random mission
+        type per start). Locations that already have a large entry are
+        skipped, so re-running never duplicates."""
+        added, skipped = await self._rotation.copy_kind(
+            from_kind="event", to_kind="large",
+            created_by=ctx.author.display_name,
+        )
+        parts = []
+        if added:
+            parts.append(
+                f"🚨 Added {len(added)} large-rotation entr"
+                f"{'y' if len(added) == 1 else 'ies'}: "
+                + ", ".join(f"#{i}" for i in added)
+            )
+        if skipped:
+            parts.append(
+                f"➖ Skipped {len(skipped)} (already in the large rotation): "
+                + ", ".join(skipped[:8])[:600]
+            )
+        if not parts:
+            parts.append("No active event locations found to copy.")
+        await ctx.send("\n".join(parts))
 
     @rotation.command(name="remove", aliases=["rm", "delete"])
     async def rotation_remove(self, ctx: commands.Context, rotation_id: int) -> None:

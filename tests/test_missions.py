@@ -1548,3 +1548,51 @@ async def test_explicit_preset_type_is_kept(db, monkeypatch):
     assert await sched._process_rotation() == 1
     body = dict(client.posted_body)
     assert body["mission_position[mission_type_id]"] == "112"
+
+
+# -- copy event locations into the large rotation ----------------------------
+
+async def test_copy_kind_copies_events_to_large_once(db):
+    from fra_bot.db.repos import RotationRepo
+
+    repo = RotationRepo(db)
+    await repo.add(location_text="Los Angeles, CA", kind="event",
+                   mission_source="preset", latitude=34.05, longitude=-118.24,
+                   address="Los Angeles, CA, USA", active=1, created_by="admin")
+    await repo.add(location_text="Houma, LA", kind="event",
+                   mission_source="preset", active=1, created_by="admin")
+    paused = await repo.add(location_text="Glasgow", kind="event",
+                            mission_source="preset", active=0, created_by="admin")
+    # Meadow already exists as a large: same coords as LA? No — distinct.
+    await repo.add(location_text="Meadow Road", kind="large",
+                   mission_source="preset", active=1, created_by="admin")
+
+    added, skipped = await repo.copy_kind(from_kind="event", to_kind="large")
+    assert len(added) == 2 and skipped == []          # paused event not copied
+    rows = await repo.list_all()
+    larges = [r for r in rows if r["kind"] == "large"]
+    assert len(larges) == 3                            # Meadow + LA + Houma
+    la = next(r for r in larges if r["location_text"] == "Los Angeles, CA")
+    assert la["mission_source"] == "preset" and la["preset_type_id"] is None
+    assert la["latitude"] == 34.05                     # coords carried over
+    assert (await repo.get(paused))["kind"] == "event" # original untouched
+
+    # Idempotent: a second run copies nothing.
+    added2, skipped2 = await repo.copy_kind(from_kind="event", to_kind="large")
+    assert added2 == [] and len(skipped2) == 2
+
+
+async def test_copy_kind_skips_locations_already_large(db):
+    from fra_bot.db.repos import RotationRepo
+
+    repo = RotationRepo(db)
+    await repo.add(location_text="Kansas City, KS", kind="event",
+                   mission_source="preset", latitude=39.11, longitude=-94.63,
+                   active=1, created_by="admin")
+    # Same place already a large under a slightly different text but the
+    # same coordinates -> must be skipped.
+    await repo.add(location_text="KC Kansas", kind="large",
+                   mission_source="preset", latitude=39.11, longitude=-94.63,
+                   active=1, created_by="admin")
+    added, skipped = await repo.copy_kind(from_kind="event", to_kind="large")
+    assert added == [] and skipped == ["Kansas City, KS"]
