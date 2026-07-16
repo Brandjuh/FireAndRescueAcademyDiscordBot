@@ -370,3 +370,27 @@ async def test_watcher_ignores_other_authors_and_channels(db):
         guild, channel, title="hello world", body="Y",
     ))
     assert channel.sent == [] and other.sent == []
+
+
+async def test_own_start_outbox_stays_silent_while_watcher_active(db):
+    # The watcher pings EVERY start via the app announcement — the own-start
+    # outbox must not ping the same mission again (no double pings).
+    guild = FakeGuild([FakeRole(NOTIFY_ROLE_ID, "Notify-Event")])
+    channel = FakeChannel(guild)
+    cog = _watch_cog(db, guild=guild)          # watcher configured
+    cog.bot.channel_for = lambda name: channel
+
+    repo = EventPingsRepo(db)
+    await repo.add(kind="large", name="Own Start", address="Somewhere",
+                   latitude=1.0, longitude=2.0)
+    await cog._deliver_pending()
+    assert channel.sent == []                  # nothing pinged by the outbox
+    assert await repo.unposted() == []         # but recorded as handled
+
+    # Watcher off -> the outbox ping flows again.
+    cog.bot.cfg.discord.event_watch_channel_id = 0
+    cog.bot.geocoder = FakeGeocoderDetails(None)
+    await repo.add(kind="large", name="Own Start 2", address="Somewhere",
+                   latitude=1.0, longitude=2.0)
+    await cog._deliver_pending()
+    assert len(channel.sent) == 1
