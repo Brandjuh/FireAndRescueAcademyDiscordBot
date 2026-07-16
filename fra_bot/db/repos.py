@@ -1461,6 +1461,61 @@ class RotationRepo:
         async with self._db.conn.execute(query) as cur:
             return list(await cur.fetchall())
 
+    async def copy_kind(
+        self, *, from_kind: str, to_kind: str, created_by: str | None = None
+    ) -> tuple[list[int], list[str]]:
+        """Copy every ACTIVE ``from_kind`` entry's LOCATION to a new
+        ``to_kind`` preset entry (no preset type — the scheduler picks a
+        random one per start). Returns ``(new ids, skipped locations)``.
+
+        A location that already has a ``to_kind`` entry (same coordinates,
+        or the same normalized location text) is skipped, so the command is
+        idempotent — re-running it never duplicates."""
+        def _loc_keys(row_or_none, text, lat, lng) -> set:
+            keys = set()
+            if text:
+                keys.add(" ".join(str(text).casefold().split()))
+            if lat is not None and lng is not None:
+                keys.add((round(float(lat), 4), round(float(lng), 4)))
+            return keys
+
+        existing: set = set()
+        for row in await self.list_all():
+            if row["kind"] != to_kind:
+                continue
+            existing |= _loc_keys(
+                row, row["location_text"] or row["address"],
+                row["latitude"], row["longitude"],
+            )
+
+        added: list[int] = []
+        skipped: list[str] = []
+        for row in await self.list_all(active_only=True):
+            if row["kind"] != from_kind:
+                continue
+            where = row["location_text"] or row["address"] or "?"
+            keys = _loc_keys(
+                row, row["location_text"] or row["address"],
+                row["latitude"], row["longitude"],
+            )
+            if keys & existing:
+                skipped.append(where)
+                continue
+            new_id = await self.add(
+                location_text=row["location_text"],
+                kind=to_kind,
+                mission_source="preset",
+                preset_type_id=None,
+                latitude=row["latitude"],
+                longitude=row["longitude"],
+                address=row["address"],
+                active=1,
+                created_by=created_by or f"copy from {from_kind}",
+            )
+            added.append(new_id)
+            existing |= keys
+        return added, skipped
+
     async def next_entry(self, kind: str | None = None) -> aiosqlite.Row | None:
         """The active entry due to run next: least-recently started first,
         never-started (NULL last_started_at) ahead of all, ties by id.
