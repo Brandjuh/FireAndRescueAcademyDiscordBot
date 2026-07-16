@@ -278,9 +278,25 @@ class EventPingerCog(commands.Cog):
     async def _wait_ready(self) -> None:
         await self.bot.wait_until_ready()
 
+    def _watcher_active(self) -> bool:
+        """True when the announcement watcher is configured — it pings EVERY
+        start (this bot's included), so the own-start outbox must stay silent
+        or members would be pinged twice for the same mission."""
+        return bool(
+            int(getattr(self.bot.cfg.discord, "event_watch_channel_id", 0) or 0)
+            and int(getattr(self.bot.cfg.discord, "event_watch_app_id", 0) or 0)
+        )
+
     async def _deliver_pending(self) -> None:
         rows = await self.repo.unposted()
         if not rows:
+            return
+        if self._watcher_active():
+            # The watcher already pings this start via the MissionChief app's
+            # announcement — record ours as handled without sending. Turning
+            # the watcher off (channel id 0) brings these pings back.
+            for row in rows:
+                await self.repo.mark_posted(row["id"])
             return
         channel = self.bot.channel_for("event_pings")
         for row in rows:
