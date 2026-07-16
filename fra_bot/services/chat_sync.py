@@ -33,12 +33,19 @@ CHATS_PATH = "/alliance_chats"
 
 LAST_SEEN_KEY = "chat_bridge_last_seen_id"
 ECHOES_KEY = "chat_bridge_outgoing_echoes"
+OWN_ACCOUNT_KEY = "chat_bridge_own_account"
 
 #: Never post to the game chat faster than this (the reference bot's
 #: anti-spam spacing — separate from, and on top of, the global pacer).
 MIN_MC_POST_INTERVAL_SECONDS = 30.0
 #: Outgoing echoes older than this are forgotten.
 ECHO_TTL_SECONDS = 30 * 60
+
+
+def _norm_text(text: str) -> str:
+    import re
+
+    return re.sub(r"\s+", " ", str(text or "")).strip().casefold()
 
 
 class ChatSyncService:
@@ -74,34 +81,66 @@ class ChatSyncService:
     async def send_from_discord(self, username: str, body: str) -> str:
         """Relay a Discord message into the game chat; returns the exact
         text sent (for the echo memory). Enforces the reference bot's
-        30-second spacing between game-chat posts on top of the pacer."""
+        30-second spacing between game-chat posts on top of the pacer.
+
+        The echo is remembered BEFORE the POST (and taken back on
+        failure): the poll can fire in the moment between the game
+        recording the message and us writing the memory, which used to
+        bounce the member's own message back into Discord."""
         text = format_discord_message_for_mc(username, body)
-        async with self._post_lock:
-            wait = MIN_MC_POST_INTERVAL_SECONDS - (time.monotonic() - self._last_post_at)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            form = parse_chat_form(
-                await self.client.fetch_page(MAIN_PATH), self.client.url(MAIN_PATH)
-            )
-            if form.method != "post":
-                raise FetchError(
-                    form.action, message=f"unexpected chat form method {form.method!r}"
-                )
-            payload = build_chat_payload(form, text)
-            # client.url() resolves relative AND absolute form actions.
-            status, _, _ = await self.client.post_form(
-                form.action,
-                payload,
-                referer=self.client.url(MAIN_PATH),
-                ajax=True,
-                csrf_token=form.hidden_fields.get("authenticity_token"),
-            )
-            if status >= 400:
-                raise FetchError(form.action, status,
-                                 f"chat post rejected (HTTP {status})")
-            self._last_post_at = time.monotonic()
         await self.remember_echo(text)
+        try:
+            async with self._post_lock:
+                wait = MIN_MC_POST_INTERVAL_SECONDS - (
+                    time.monotonic() - self._last_post_at
+                )
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                form = parse_chat_form(
+                    await self.client.fetch_page(MAIN_PATH),
+                    self.client.url(MAIN_PATH),
+                )
+                if form.method != "post":
+                    raise FetchError(
+                        form.action,
+                        message=f"unexpected chat form method {form.method!r}",
+                    )
+                payload = build_chat_payload(form, text)
+                # client.url() resolves relative AND absolute form actions.
+                status, _, _ = await self.client.post_form(
+                    form.action,
+                    payload,
+                    referer=self.client.url(MAIN_PATH),
+                    ajax=True,
+                    csrf_token=form.hidden_fields.get("authenticity_token"),
+                )
+                if status >= 400:
+                    raise FetchError(form.action, status,
+                                     f"chat post rejected (HTTP {status})")
+                self._last_post_at = time.monotonic()
+        except BaseException:
+            # Nothing landed: a stale echo must not swallow a genuine
+            # future message with the same text.
+            await self.consume_echo(text)
+            raise
         return text
+
+    # -- own game account (never mirror our own chat posts) ----------------
+
+    async def own_account(self) -> str | None:
+        """The bot's own game-chat name, learned from the first echo match
+        (the author of a message WE relayed is by definition our account)."""
+        return await self.state.get(OWN_ACCOUNT_KEY)
+
+    async def learn_own_account(self, username: str) -> None:
+        name = _norm_text(username)
+        if name and await self.state.get(OWN_ACCOUNT_KEY) != name:
+            await self.state.set(OWN_ACCOUNT_KEY, name)
+            log.info("chat bridge: learned own game account: %s", username)
+
+    async def is_own_account(self, username: str) -> bool:
+        own = await self.own_account()
+        return bool(own) and _norm_text(username) == own
 
     # -- echo memory -------------------------------------------------------
 
@@ -127,10 +166,15 @@ class ChatSyncService:
 
     async def consume_echo(self, text: str) -> bool:
         """True (and forget one copy) when *text* is a message WE relayed
-        into the game — the poll must not mirror it back into Discord."""
+        into the game — the poll must not mirror it back into Discord.
+
+        Matching is NORMALIZED (whitespace collapsed, case folded): the
+        game may render the message slightly differently than we sent it,
+        and an exact-equality miss bounced the member's own message back."""
+        wanted = _norm_text(text)
         echoes = await self._load_echoes()
         for index, echo in enumerate(echoes):
-            if str(echo.get("message") or "") == text:
+            if _norm_text(str(echo.get("message") or "")) == wanted:
                 del echoes[index]
                 await self.state.set(ECHOES_KEY, json.dumps(echoes))
                 return True
