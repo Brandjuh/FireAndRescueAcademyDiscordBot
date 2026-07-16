@@ -190,6 +190,17 @@ async def test_own_relayed_message_is_not_mirrored_back(db):
     assert await cog.chat.last_seen() == 6941664
 
 
+async def test_reset_rebaselines_without_replaying_history(db):
+    client = FakeClient({"/alliance_chats": CHAT_HISTORY_HTML})
+    channel = FakeChannel()
+    cog = _cog(db, client, channel)
+    await cog.chat.set_last_seen(6941664)  # fully caught up
+    await cog.chat.reset_watermark()
+    result = await cog._sync_once()
+    assert result["posted"] == 0  # baseline pass: history never replays
+    assert await cog.chat.last_seen() == 6941664
+
+
 class FakeMessage:
     def __init__(self, channel, content, *, bot=False, name="Brandjuh"):
         self.author = SimpleNamespace(bot=bot, display_name=name)
