@@ -130,7 +130,7 @@ class MemberBrowseView(discord.ui.View):
             embed=dossier_embed(self._dossier), view=self
         )
 
-    @discord.ui.button(label="Profiel", style=discord.ButtonStyle.secondary, emoji="👤")
+    @discord.ui.button(label="Profile", style=discord.ButtonStyle.secondary, emoji="👤")
     async def show_profile(self, interaction, button) -> None:
         if not await self._guard(interaction):
             return
@@ -141,8 +141,8 @@ class MemberBrowseView(discord.ui.View):
         d = self._dossier
         if profile_cog is None or d.discord_id is None:
             embed = discord.Embed(
-                title=f"👤 Profiel — {d.name}",
-                description="Geen Discord-koppeling — geen profiel beschikbaar.",
+                title=f"👤 Profile — {d.name}",
+                description="No Discord link — no profile available.",
                 colour=discord.Colour.light_grey(),
             )
         else:
@@ -154,15 +154,15 @@ class MemberBrowseView(discord.ui.View):
                     user = None
             if user is None:
                 embed = discord.Embed(
-                    title=f"👤 Profiel — {d.name}",
-                    description="Discord-account niet bereikbaar.",
+                    title=f"👤 Profile — {d.name}",
+                    description="Discord account not reachable.",
                     colour=discord.Colour.light_grey(),
                 )
             else:
                 embed = await profile_cog.profile_embed(user)
         await interaction.edit_original_response(embed=embed, view=self)
 
-    @discord.ui.button(label="Tijdlijn", style=discord.ButtonStyle.secondary, emoji="📜")
+    @discord.ui.button(label="Timeline", style=discord.ButtonStyle.secondary, emoji="📜")
     async def show_timeline(self, interaction, button) -> None:
         if not await self._guard(interaction):
             return
@@ -179,7 +179,7 @@ class MemberBrowseView(discord.ui.View):
         )
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="Acties", style=discord.ButtonStyle.secondary, emoji="🤖")
+    @discord.ui.button(label="Actions", style=discord.ButtonStyle.secondary, emoji="🤖")
     async def show_actions(self, interaction, button) -> None:
         if not await self._guard(interaction):
             return
@@ -194,15 +194,15 @@ class MemberBrowseView(discord.ui.View):
             f"`{r['created_at'][:16]}` {r['action'].replace('_', ' ')}"
             + (f" — {r['detail'][:80]}" if r["detail"] else "")
             for r in rows
-        ] or ["*Nog geen bot-acties geregistreerd.*"]
+        ] or ["*No bot actions on record yet.*"]
         embed = discord.Embed(
-            title=f"🤖 Bot-acties — {d.name}",
+            title=f"🤖 Bot actions — {d.name}",
             description="\n".join(lines)[:4096],
             colour=discord.Colour.dark_teal(),
         )
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="Sancties", style=discord.ButtonStyle.secondary, emoji="⚖️")
+    @discord.ui.button(label="Sanctions", style=discord.ButtonStyle.secondary, emoji="⚖️")
     async def show_sanctions(self, interaction, button) -> None:
         if not await self._guard(interaction):
             return
@@ -221,9 +221,9 @@ class MemberBrowseView(discord.ui.View):
             f"{r['reason'][:60]}"
             + (" *(revoked)*" if r["status"] != "active" else "")
             for r in rows
-        ] or ["*Geen sancties geregistreerd.*"]
+        ] or ["*No sanctions on record.*"]
         embed = discord.Embed(
-            title=f"⚖️ Sancties — {d.name} (officiële waarschuwingen: {warnings}/3)",
+            title=f"⚖️ Sanctions — {d.name} (official warnings: {warnings}/3)",
             description="\n".join(lines)[:4096],
             colour=discord.Colour.orange(),
         )

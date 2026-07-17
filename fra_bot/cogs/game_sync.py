@@ -82,8 +82,8 @@ class GameSyncCog(commands.Cog):
         await self.bot.log_member_action(
             action="game_synced",
             detail=(
-                f"{payload.building_count} gebouwen, "
-                f"{payload.vehicle_count} voertuigen"
+                f"{payload.building_count} buildings, "
+                f"{payload.vehicle_count} vehicles"
             ),
             discord_user_id=discord_id,
             mc_user_id=payload.mc_user_id,
@@ -125,7 +125,7 @@ class GameSyncCog(commands.Cog):
     @commands.command(name="hotspots")
     @is_fra_admin()
     async def hotspots(self, ctx: commands.Context, grid_km: int = 11) -> None:
-        """Where the alliance's buildings cluster: `!hotspots [cel-km]`."""
+        """Where the alliance's buildings cluster: `!hotspots [cell-km]`."""
         grid = max(1, min(int(grid_km), 200)) / 111.0  # ~degrees per km
         member_coords: dict[int, list[tuple[float, float]]] = {}
         building_total = 0
@@ -159,12 +159,12 @@ class GameSyncCog(commands.Cog):
             by_type = {}
         summary = summarize_buildings(by_type)
         line = (
-            f"{row['building_count']} gebouwen · "
-            f"{row['vehicle_count']} voertuigen"
+            f"{row['building_count']} buildings · "
+            f"{row['vehicle_count']} vehicles"
         )
         if summary:
             line += f"\n{summary}"
-        return line + f"\n*gesynchroniseerd {str(row['synced_at'])[:16]}*"
+        return line + f"\n*synced {str(row['synced_at'])[:16]}*"
 
 
 async def setup(bot) -> None:

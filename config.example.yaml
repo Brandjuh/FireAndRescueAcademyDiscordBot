@@ -62,6 +62,8 @@ discord:
                           # userscript webhook (tools/fra-profile-sync.user.js):
                           # members' own buildings/vehicles land here as JSON,
                           # feeding /profile and !hotspots. 0 = off.
+                          # (Omitting the key falls back to the FRA intake
+                          # channel baked into config.py, like academy_panel.)
     admin_approvals: 0    # approve/deny embeds for requests needing a decision
     member_panel: 0       # member-management panel (dossier button)
     request_panel: 0      # training/building request panel
