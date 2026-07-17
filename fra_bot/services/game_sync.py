@@ -140,6 +140,25 @@ class Hotspot:
     place: str | None = None  # reverse-geocoded name, filled by the cog
 
 
+def top_building_types(
+    by_type_dicts: list[dict], top: int = 6
+) -> list[tuple[str, int]]:
+    """Alliance-wide building counts per type name, biggest first — the
+    members' per-type dicts summed, unknown types shown as "type N"."""
+    totals: dict[int, int] = {}
+    for by_type in by_type_dicts:
+        for type_id, count in by_type.items():
+            try:
+                totals[int(type_id)] = totals.get(int(type_id), 0) + int(count)
+            except (TypeError, ValueError):
+                continue
+    ranked = sorted(totals.items(), key=lambda item: -item[1])[:top]
+    return [
+        (BUILDING_TYPE_NAMES.get(type_id, f"type {type_id}"), count)
+        for type_id, count in ranked
+    ]
+
+
 #: Nominatim address keys that name the locality, most specific first.
 _LOCALITY_KEYS = ("city", "town", "village", "hamlet", "municipality", "county")
 
