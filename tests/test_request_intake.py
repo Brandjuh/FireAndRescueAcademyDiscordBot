@@ -6,6 +6,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import discord
 import pytest_asyncio
 
 from fra_bot.cogs.missions import MissionChooserView, MissionsCog
@@ -77,10 +78,14 @@ class FakeGeocoder:
 class FakeMissionService:
     def __init__(self):
         self.calls = []
+        self.saved_names: list[str] = []
 
     async def enqueue_discord(self, spec, **kwargs):
         self.calls.append((spec, kwargs))
         return 40 + len(self.calls)
+
+    async def saved_mission_names(self):
+        return list(self.saved_names)
 
 
 class FakeTrainingsService:
@@ -516,6 +521,59 @@ async def test_chooser_offers_presets_and_saved_missions_but_no_custom(db):
         assert labels == ["Big Fire Drill", "Dock Blaze"]
         # No cached list -> no saved select, the modal input still works.
         assert MissionChooserView(cog, "large", []).saved_select is None
+    finally:
+        cog.cog_unload()
+
+
+async def test_saved_names_cleaning_dedupes_strips_and_drops_empties(db):
+    # The game allows several saved missions under the SAME caption; a
+    # Discord select 400s on duplicate/empty values, which used to kill
+    # the chooser before it could acknowledge the button click.
+    from fra_bot.services.missions import MissionScheduler
+
+    assert MissionScheduler._clean_names(
+        ["Alpha ", "Alpha", "", "   ", "Beta", 7]
+    ) == ["Alpha", "Beta", "7"]
+
+
+async def test_chooser_select_survives_duplicate_and_empty_saved_names(db):
+    cog = _missions_cog(db, FakeMissionService())
+    try:
+        view = MissionChooserView(
+            cog, "large", ["Dup", "Dup ", "", "   ", "Real"]
+        )
+        assert view.saved_select is not None
+        assert [o.value for o in view.saved_select.options] == ["Dup", "Real"]
+        # Nothing usable left -> no select at all (typing still works).
+        assert MissionChooserView(cog, "large", ["", "  "]).saved_select is None
+    finally:
+        cog.cog_unload()
+
+
+async def test_large_chooser_falls_back_when_discord_refuses_the_view(db):
+    # Even if Discord refuses the chooser message (bad select data, API
+    # hiccup), the button must answer something — bare chooser, no list.
+    service = FakeMissionService()
+    service.saved_names = ["Dup", "Dup"]
+    cog = _missions_cog(db, service)
+    try:
+        interaction = FakeInteraction()
+        attempts = []
+
+        async def flaky_send(content=None, *, view=None, **kwargs):
+            attempts.append(view)
+            if len(attempts) == 1:
+                raise discord.HTTPException(
+                    SimpleNamespace(status=400, reason="Bad Request"),
+                    "Invalid Form Body",
+                )
+            interaction.sent.append(content)
+
+        interaction.response.send_message = flaky_send
+        await cog.open_chooser(interaction, "large")
+        assert len(attempts) == 2
+        assert attempts[1].saved_select is None       # bare retry
+        assert "couldn't be shown" in interaction.sent[0]
     finally:
         cog.cog_unload()
 
