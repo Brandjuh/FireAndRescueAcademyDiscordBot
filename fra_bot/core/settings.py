@@ -117,6 +117,8 @@ SETTINGS: tuple[Setting, ...] = (
             "Sanction announcements channel (0 = admin log)"),
     Setting("discord.channels.member_actions", "int", True,
             "Member-action feed channel (0 = feed off)"),
+    Setting("discord.channels.game_sync", "int", True,
+            "PRIVATE profile-sync webhook intake channel (0 = off)"),
     Setting("discord.channels.academy_panel", "int", True,
             "Academy-build panel channel (Fire/Police/Rescue/Coastal; 0 = off)"),
     Setting("discord.notify_event_role_id", "int", True,

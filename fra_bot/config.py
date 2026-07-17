@@ -95,6 +95,9 @@ class DiscordChannels:
     # Admin feed of every member's bot-side action; 0 = feed off
     # (actions still record for the per-member history).
     member_actions: int = 0
+    # PRIVATE intake channel for the profile-sync userscript webhook;
+    # 0 = game sync off.
+    game_sync: int = 0
 
 
 @dataclass(frozen=True)
@@ -499,6 +502,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 chat_bridge=int(channels.get("chat_bridge", 0)),
                 sanctions=int(channels.get("sanctions", 0)),
                 member_actions=int(channels.get("member_actions", 0)),
+                game_sync=int(channels.get("game_sync", 0)),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])

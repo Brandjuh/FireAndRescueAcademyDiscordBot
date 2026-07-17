@@ -1,0 +1,191 @@
+"""Game-data sync: userscript payloads → profiles + hotspots.
+
+Members run the FRA userscript (``tools/fra-profile-sync.user.js``) in
+their own browser; it reads THEIR ``/api/buildings`` and
+``/api/vehicles`` (data the bot's account can never see) and posts a
+compact JSON file to a Discord webhook in a private intake channel.
+This module validates those payloads and turns the collected building
+coordinates into alliance hotspots (where coverage clusters).
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+
+#: Payload marker + version the userscript sends.
+PAYLOAD_MARKER = "fra_profile_sync"
+MAX_COORDS = 3000
+MAX_TYPES = 200
+
+#: Building type ids we can name (same ids the bot uses elsewhere).
+#: Unknown ids render as "type <id>" — the game adds types over time.
+BUILDING_TYPE_NAMES = {
+    0: "fire station", 1: "dispatch center", 2: "hospital",
+    3: "rescue station", 4: "fire academy", 5: "police station",
+    6: "police academy", 7: "police academy", 9: "staging area",
+    10: "prison", 19: "rescue academy", 24: "coastal rescue school",
+}
+
+
+class SyncPayloadError(ValueError):
+    """The webhook message is not a valid profile-sync payload."""
+
+
+@dataclass(frozen=True)
+class SyncPayload:
+    mc_user_id: int
+    mc_name: str | None
+    building_count: int
+    vehicle_count: int
+    buildings_by_type: dict[str, int]
+    vehicles_by_type: dict[str, int]
+    coords: list[tuple[float, float]]
+
+    @property
+    def buildings_json(self) -> str:
+        return json.dumps({
+            "by_type": self.buildings_by_type,
+            "coords": [[lat, lng] for lat, lng in self.coords],
+        })
+
+    @property
+    def vehicles_json(self) -> str:
+        return json.dumps({"by_type": self.vehicles_by_type})
+
+
+def _counts(raw, *, what: str) -> tuple[int, dict[str, int]]:
+    if not isinstance(raw, dict):
+        raise SyncPayloadError(f"{what} section missing or not an object")
+    by_type_raw = raw.get("by_type") or {}
+    if not isinstance(by_type_raw, dict) or len(by_type_raw) > MAX_TYPES:
+        raise SyncPayloadError(f"{what}.by_type invalid")
+    by_type: dict[str, int] = {}
+    for key, value in by_type_raw.items():
+        try:
+            by_type[str(int(key))] = max(0, int(value))
+        except (TypeError, ValueError):
+            raise SyncPayloadError(f"{what}.by_type has a non-numeric entry")
+    try:
+        total = int(raw.get("total", sum(by_type.values())))
+    except (TypeError, ValueError):
+        raise SyncPayloadError(f"{what}.total not a number")
+    return max(0, total), by_type
+
+
+def parse_sync_payload(text: str) -> SyncPayload:
+    """Validate a raw webhook payload; raises SyncPayloadError."""
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise SyncPayloadError(f"not JSON: {exc}") from exc
+    if not isinstance(data, dict) or PAYLOAD_MARKER not in data:
+        raise SyncPayloadError("missing fra_profile_sync marker")
+    try:
+        mc_user_id = int(data.get("mc_user_id"))
+    except (TypeError, ValueError):
+        raise SyncPayloadError("mc_user_id missing or not a number")
+    if mc_user_id <= 0:
+        raise SyncPayloadError("mc_user_id must be positive")
+
+    building_count, buildings_by_type = _counts(
+        data.get("buildings"), what="buildings"
+    )
+    vehicle_count, vehicles_by_type = _counts(
+        data.get("vehicles"), what="vehicles"
+    )
+
+    coords_raw = (data.get("buildings") or {}).get("coords") or []
+    if not isinstance(coords_raw, list) or len(coords_raw) > MAX_COORDS:
+        raise SyncPayloadError("buildings.coords invalid or too large")
+    coords: list[tuple[float, float]] = []
+    for pair in coords_raw:
+        try:
+            lat, lng = float(pair[0]), float(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue  # one bad pair must not kill the sync
+        if -90 <= lat <= 90 and -180 <= lng <= 180:
+            coords.append((round(lat, 4), round(lng, 4)))
+
+    name = data.get("mc_name")
+    return SyncPayload(
+        mc_user_id=mc_user_id,
+        mc_name=str(name)[:80] if name else None,
+        building_count=building_count,
+        vehicle_count=vehicle_count,
+        buildings_by_type=buildings_by_type,
+        vehicles_by_type=vehicles_by_type,
+        coords=coords,
+    )
+
+
+def summarize_buildings(by_type: dict[str, int], *, top: int = 4) -> str:
+    """'30× fire station, 4× hospital, …' — named where we know the id."""
+    items = sorted(by_type.items(), key=lambda kv: -kv[1])[:top]
+    parts = []
+    for type_id, count in items:
+        name = BUILDING_TYPE_NAMES.get(int(type_id), f"type {type_id}")
+        parts.append(f"{count}× {name}")
+    return ", ".join(parts)
+
+
+# -- hotspots -----------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Hotspot:
+    latitude: float    # cell center
+    longitude: float
+    buildings: int
+    members: int
+
+
+def cluster_hotspots(
+    member_coords: dict[int, list[tuple[float, float]]],
+    *, grid: float = 0.1, top: int = 12,
+) -> list[Hotspot]:
+    """Grid-cluster every member's building coordinates into hotspots.
+
+    ``grid`` is the cell size in degrees (0.1° ≈ 11 km). Returns the top
+    cells by building count, with the number of DISTINCT members present
+    — a cell with 200 buildings from 8 members is an alliance hotspot; a
+    cell with 200 buildings from 1 member is one person's home town."""
+    cells: dict[tuple[int, int], dict] = {}
+    for mc_user_id, coords in member_coords.items():
+        for lat, lng in coords:
+            key = (int(lat // grid), int(lng // grid))
+            cell = cells.setdefault(key, {"n": 0, "members": set()})
+            cell["n"] += 1
+            cell["members"].add(mc_user_id)
+    spots = [
+        Hotspot(
+            latitude=round((key[0] + 0.5) * grid, 4),
+            longitude=round((key[1] + 0.5) * grid, 4),
+            buildings=cell["n"],
+            members=len(cell["members"]),
+        )
+        for key, cell in cells.items()
+    ]
+    spots.sort(key=lambda s: (-s.buildings, -s.members))
+    return spots[:top]
+
+
+def render_hotspots(
+    spots: list[Hotspot], *, member_total: int, building_total: int
+) -> str:
+    if not spots:
+        return (
+            "Nog geen spel-data gesynchroniseerd — leden installeren het "
+            "userscript (tools/fra-profile-sync.user.js) en klikken "
+            "'Sync naar FRA'."
+        )
+    lines = [
+        f"🔥 **Alliantie-hotspots** — {building_total} gebouwen van "
+        f"{member_total} gesynchroniseerde leden (cel ≈ 11 km):"
+    ]
+    for index, spot in enumerate(spots, 1):
+        lines.append(
+            f"{index}. **{spot.buildings} gebouwen** van {spot.members} "
+            f"lid/leden — [{spot.latitude:.2f}, {spot.longitude:.2f}]"
+            f"(<https://maps.google.com/?q={spot.latitude},{spot.longitude}>)"
+        )
+    return "\n".join(lines)[:1900]

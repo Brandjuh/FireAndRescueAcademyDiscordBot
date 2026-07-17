@@ -1961,6 +1961,56 @@ class MemberActionsRepo:
         )
 
 
+class GameSyncRepo:
+    """Userscript-reported game data (one row per MC account)."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def upsert(
+        self, *, mc_user_id: int, discord_user_id: int | None,
+        mc_name: str | None, building_count: int, vehicle_count: int,
+        buildings_json: str, vehicles_json: str,
+    ) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO game_sync
+                (mc_user_id, discord_user_id, mc_name, building_count,
+                 vehicle_count, buildings_json, vehicles_json, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(mc_user_id) DO UPDATE SET
+                discord_user_id = excluded.discord_user_id,
+                mc_name = excluded.mc_name,
+                building_count = excluded.building_count,
+                vehicle_count = excluded.vehicle_count,
+                buildings_json = excluded.buildings_json,
+                vehicles_json = excluded.vehicles_json,
+                synced_at = excluded.synced_at
+            """,
+            (mc_user_id, discord_user_id, mc_name, building_count,
+             vehicle_count, buildings_json, vehicles_json, utcnow_iso()),
+        )
+
+    async def get_by_mc(self, mc_user_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM game_sync WHERE mc_user_id = ?", (mc_user_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def get_by_discord(self, discord_user_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM game_sync WHERE discord_user_id = ?",
+            (discord_user_id,),
+        ) as cur:
+            return await cur.fetchone()
+
+    async def all_synced(self) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM game_sync ORDER BY mc_user_id"
+        ) as cur:
+            return list(await cur.fetchall())
+
+
 class FaqRepo:
     """Custom FAQ entries (reference bot: faqmanager). Soft-deleted rows
     stay for history but never surface in search or listings."""
