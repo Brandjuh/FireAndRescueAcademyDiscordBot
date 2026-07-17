@@ -386,6 +386,13 @@ class RequestsCog(commands.Cog):
             requester_mc_id=verdict.mc_user_id,
             payload=json.dumps(payload),
         )
+        await self.bot.log_member_action(
+            action="training_requested",
+            detail=f"{training} ×{count} (request #{rid})",
+            discord_user_id=interaction.user.id,
+            mc_user_id=verdict.mc_user_id,
+            actor_name=interaction.user.display_name,
+        )
         days = payload["trainings"][0]["duration"]
         classes = (
             "a **free class**" if count == 1
@@ -531,6 +538,14 @@ class RequestsCog(commands.Cog):
             requester_name=interaction.user.display_name,
             requester_mc_id=verdict.mc_user_id,
             payload=json.dumps(payload),
+        )
+        await self.bot.log_member_action(
+            action="building_requested",
+            detail=f"{building_type} at {location.address or 'pin'} "
+                   f"(request #{rid})",
+            discord_user_id=interaction.user.id,
+            mc_user_id=verdict.mc_user_id,
+            actor_name=interaction.user.display_name,
         )
         notes = []
         if self.bot.cfg.automation.dry_run:

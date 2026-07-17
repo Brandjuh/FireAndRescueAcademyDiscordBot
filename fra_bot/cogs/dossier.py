@@ -104,6 +104,128 @@ def dossier_embed(d: Dossier) -> discord.Embed:
     return embed
 
 
+class MemberBrowseView(discord.ui.View):
+    """Browse buttons under the ephemeral dossier: flip the same message
+    between the dossier, the member's profile, the merged audit timeline,
+    their bot-action history and the sanctions register."""
+
+    def __init__(self, cog: "DossierCog", dossier) -> None:
+        super().__init__(timeout=900)
+        self._cog = cog
+        self._dossier = dossier
+
+    async def _guard(self, interaction: discord.Interaction) -> bool:
+        if _staff_check(interaction.client, interaction.user):
+            return True
+        await interaction.response.send_message(
+            "You don't have permission to do this.", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="Dossier", style=discord.ButtonStyle.secondary, emoji="📇")
+    async def show_dossier(self, interaction, button) -> None:
+        if not await self._guard(interaction):
+            return
+        await interaction.response.edit_message(
+            embed=dossier_embed(self._dossier), view=self
+        )
+
+    @discord.ui.button(label="Profiel", style=discord.ButtonStyle.secondary, emoji="👤")
+    async def show_profile(self, interaction, button) -> None:
+        if not await self._guard(interaction):
+            return
+        profile_cog = interaction.client.get_cog("ProfileCog")
+        d = self._dossier
+        if profile_cog is None or d.discord_id is None:
+            embed = discord.Embed(
+                title=f"👤 Profiel — {d.name}",
+                description="Geen Discord-koppeling — geen profiel beschikbaar.",
+                colour=discord.Colour.light_grey(),
+            )
+        else:
+            user = interaction.client.get_user(int(d.discord_id))
+            if user is None:
+                try:
+                    user = await interaction.client.fetch_user(int(d.discord_id))
+                except discord.HTTPException:
+                    user = None
+            if user is None:
+                embed = discord.Embed(
+                    title=f"👤 Profiel — {d.name}",
+                    description="Discord-account niet bereikbaar.",
+                    colour=discord.Colour.light_grey(),
+                )
+            else:
+                embed = await profile_cog.profile_embed(user)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Tijdlijn", style=discord.ButtonStyle.secondary, emoji="📜")
+    async def show_timeline(self, interaction, button) -> None:
+        if not await self._guard(interaction):
+            return
+        from ..services.timeline import build_timeline, render_timeline
+
+        d = self._dossier
+        events = await build_timeline(
+            interaction.client.db, mc_user_id=d.mc_user_id,
+            name=d.name, discord_user_id=d.discord_id,
+        )
+        embed = discord.Embed(
+            description=render_timeline(d.name, events)[:4096],
+            colour=discord.Colour.dark_gold(),
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Acties", style=discord.ButtonStyle.secondary, emoji="🤖")
+    async def show_actions(self, interaction, button) -> None:
+        if not await self._guard(interaction):
+            return
+        from ..db.repos import MemberActionsRepo
+
+        d = self._dossier
+        rows = await MemberActionsRepo(interaction.client.db).for_member(
+            discord_user_id=d.discord_id, mc_user_id=d.mc_user_id,
+        )
+        lines = [
+            f"`{r['created_at'][:16]}` {r['action'].replace('_', ' ')}"
+            + (f" — {r['detail'][:80]}" if r["detail"] else "")
+            for r in rows
+        ] or ["*Nog geen bot-acties geregistreerd.*"]
+        embed = discord.Embed(
+            title=f"🤖 Bot-acties — {d.name}",
+            description="\n".join(lines)[:4096],
+            colour=discord.Colour.dark_teal(),
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Sancties", style=discord.ButtonStyle.secondary, emoji="⚖️")
+    async def show_sanctions(self, interaction, button) -> None:
+        if not await self._guard(interaction):
+            return
+        from ..db.repos import SanctionsRepo
+
+        d = self._dossier
+        repo = SanctionsRepo(interaction.client.db)
+        rows = await repo.for_member(
+            mc_user_id=d.mc_user_id, discord_user_id=d.discord_id, name=d.name,
+        )
+        warnings = await repo.official_warning_count(
+            mc_user_id=d.mc_user_id, discord_user_id=d.discord_id, name=d.name,
+        )
+        lines = [
+            f"`#{r['id']}` {r['created_at'][:10]} — {r['sanction_type']} — "
+            f"{r['reason'][:60]}"
+            + (" *(revoked)*" if r["status"] != "active" else "")
+            for r in rows
+        ] or ["*Geen sancties geregistreerd.*"]
+        embed = discord.Embed(
+            title=f"⚖️ Sancties — {d.name} (officiële waarschuwingen: {warnings}/3)",
+            description="\n".join(lines)[:4096],
+            colour=discord.Colour.orange(),
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
 class DossierSearchModal(discord.ui.Modal, title="Member lookup"):
     query = discord.ui.TextInput(
         label="Discord @mention/id, MC name or MC id",
@@ -198,7 +320,9 @@ class DossierCog(commands.Cog):
             )
             return
         await interaction.response.send_message(
-            embed=dossier_embed(dossier), ephemeral=True
+            embed=dossier_embed(dossier),
+            view=MemberBrowseView(self, dossier),
+            ephemeral=True,
         )
 
     # -- entry points -----------------------------------------------------------

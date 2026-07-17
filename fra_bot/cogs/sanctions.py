@@ -151,6 +151,13 @@ class SanctionsCog(commands.Cog):
         await self._announce(sanction_id, sanction_type, name, reason,
                              ctx.author.display_name, warnings)
         await self._notify_member(discord_id, name, sanction_type, reason)
+        await self.bot.log_member_action(
+            action="sanction_received",
+            detail=f"#{sanction_id} {sanction_type} — {reason[:120]} "
+                   f"(by {ctx.author.display_name})",
+            discord_user_id=discord_id, mc_user_id=mc_user_id,
+            actor_name=name,
+        )
         note = f" — official warning **{warnings}/3**" if warnings else ""
         unknown = "" if mc_user_id or discord_id else " (⚠️ not on the roster)"
         await ctx.send(
@@ -242,6 +249,14 @@ class SanctionsCog(commands.Cog):
         await self.bot.notify_admin(
             f"↩️ Sanction #{sanction_id} ({row['sanction_type']} for "
             f"**{row['mc_username']}**) revoked by {ctx.author.display_name}."
+        )
+        await self.bot.log_member_action(
+            action="sanction_revoked",
+            detail=f"#{sanction_id} {row['sanction_type']} "
+                   f"(by {ctx.author.display_name})",
+            discord_user_id=row["discord_user_id"],
+            mc_user_id=row["mc_user_id"],
+            actor_name=row["mc_username"],
         )
 
     # -- announcements ---------------------------------------------------------

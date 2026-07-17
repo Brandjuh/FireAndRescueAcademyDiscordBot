@@ -151,6 +151,13 @@ class MemberSyncCog(commands.Cog):
             )
             return
         if outcome.outcome in ("approved", "approved_from_logs"):
+            await self.bot.log_member_action(
+                action="verified",
+                detail=f"linked to MC {outcome.mc_user_id}",
+                discord_user_id=ctx.author.id,
+                mc_user_id=outcome.mc_user_id,
+                actor_name=ctx.author.display_name,
+            )
             await self._grant_role(ctx.author, reason="MemberSync auto verified")
             await ctx.send(
                 "✅ **Verified!** Your account has been linked and you've "

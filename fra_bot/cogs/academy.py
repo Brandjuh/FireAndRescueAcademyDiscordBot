@@ -114,6 +114,12 @@ class AcademyCog(commands.Cog):
                 discord_user_id=interaction.user.id,
                 channel_id=interaction.channel_id,
             )
+            await self.bot.log_member_action(
+                action="academy_build_clicked",
+                detail=f"{academy_kind} academy (request #{request_id})",
+                discord_user_id=interaction.user.id,
+                actor_name=interaction.user.display_name,
+            )
             # Build now, serialised against the retry poller via the shared
             # job lock so two clicks can't build at once.
             async with self.bot.job_lock("academy-builds"):

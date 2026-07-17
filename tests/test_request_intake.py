@@ -102,6 +102,9 @@ class FakeBot(SimpleNamespace):
         locks = self.__dict__.setdefault("_locks", {})
         return locks.setdefault(name, asyncio.Lock())
 
+    async def log_member_action(self, **kwargs):
+        self.__dict__.setdefault("logged_actions", []).append(kwargs)
+
 
 class FakeResponse:
     def __init__(self, sink):

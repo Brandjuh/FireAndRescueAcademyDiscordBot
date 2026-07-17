@@ -17,7 +17,13 @@ import discord
 from discord.ext import commands, tasks
 
 from ..core import log_routes
-from ..db.repos import ApplicationsRepo, LogsRepo, MembersRepo, StateRepo
+from ..db.repos import (
+    ApplicationsRepo,
+    LogsRepo,
+    MemberActionsRepo,
+    MembersRepo,
+    StateRepo,
+)
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.logs import ACTION_PATTERNS
 from .display import (
@@ -151,6 +157,7 @@ class NotificationsCog(commands.Cog):
                 self._publish_member_events,
                 self._publish_alliance_logs,
                 self._publish_log_routes,
+                self._publish_member_actions,
             ):
                 try:
                     await publisher()
@@ -269,6 +276,44 @@ class NotificationsCog(commands.Cog):
                 lambda r=row: self._apps.mark_posted(r["application_id"]),
                 label="application",
                 view=view,
+            )
+            if outcome == "retry":
+                return
+            await asyncio.sleep(_POST_PAUSE_SECONDS)
+
+    async def _publish_member_actions(self) -> None:
+        """The admin feed: every member's bot-side action, in order, to
+        the member_actions channel (0 = feed off; rows still record for
+        the per-member history)."""
+        channel_id = int(
+            getattr(self.bot.cfg.discord.channels, "member_actions", 0) or 0
+        )
+        channel = self.bot.get_channel(channel_id) if channel_id else None
+        repo = MemberActionsRepo(self.bot.db)
+        if channel is None:
+            # Feed off (or channel unreachable): suppress instead of
+            # queueing, or enabling the feed later would flood it with
+            # all history. The per-member view reads the rows regardless.
+            for row in await repo.pending_feed(limit=100):
+                await repo.mark_posted(row["id"])
+            return
+        for row in await repo.pending_feed():
+            who = row["actor_name"] or (
+                f"<@{row['discord_user_id']}>" if row["discord_user_id"] else "?"
+            )
+            embed = discord.Embed(
+                colour=discord.Colour.dark_teal(),
+                description=(
+                    f"**{who}** — {row['action'].replace('_', ' ')}"
+                    + (f"\n{row['detail']}" if row["detail"] else "")
+                )[:_DESC_LIMIT],
+                timestamp=dt.datetime.now(dt.timezone.utc),
+            )
+            embed.set_footer(text=f"Action #{row['id']}")
+            outcome = await self._send_or_skip(
+                channel, embed,
+                lambda r=row: repo.mark_posted(r["id"]),
+                label="member action",
             )
             if outcome == "retry":
                 return

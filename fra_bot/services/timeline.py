@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..db.database import Database
-from ..db.repos import LinksRepo, SanctionsRepo
+from ..db.repos import LinksRepo, MemberActionsRepo, SanctionsRepo
 
 #: Alliance-log action keys that belong in a PERSON's audit timeline
 #: (the reference set, plus this bot's more granular admin-role keys).
@@ -142,6 +142,18 @@ async def build_timeline(
             title=f"{row['sanction_type']}{suffix}",
             detail=f"#{row['id']} — {row['reason'][:100]}",
             source="sanctions",
+        ))
+
+    # Bot-side member actions (requests, profile edits, verify, clicks).
+    for row in await MemberActionsRepo(db).for_member(
+        discord_user_id=discord_user_id, mc_user_id=mc_user_id, limit=100,
+    ):
+        events.append(TimelineEvent(
+            at=row["created_at"],
+            icon="🤖",
+            title=row["action"].replace("_", " "),
+            detail=(row["detail"] or "")[:120],
+            source="bot",
         ))
 
     # Verified link.
