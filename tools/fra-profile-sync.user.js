@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FRA Profile Sync
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.1.0
+// @version      1.1.1
 // @description  Send your own MissionChief buildings and vehicles to the FRA Discord bot (profile + hotspots). NEVER sends passwords, cookies or sessions — only counts, types and building coordinates.
 // @match        https://www.missionchief.com/*
 // @grant        none
@@ -13,8 +13,9 @@
  * 1. Install Tampermonkey (Chrome/Edge) or Greasemonkey (Firefox).
  * 2. Create a new userscript and paste this file into it.
  * 3. Ask an admin for the WEBHOOK_URL and fill it in below.
- * 4. Open missionchief.com — a "Sync to FRA" button appears in the
- *    top-right corner. Click it, check the summary, confirm.
+ * 4. Open the missionchief.com MAIN page (the dashboard with the map)
+ *    — a "Sync to FRA" button appears there. Click it, check the
+ *    summary, confirm. The button only shows on the main page.
  *
  * WHAT GETS SENT? Only: your MC user id and name, your buildings
  * (counts per type + coordinates, rounded to ~100 m) and your
@@ -169,5 +170,9 @@
     }
   }
 
-  addButton();
+  // Only on the game's main page (the dashboard) — a sync button on
+  // every subpage is noise, and the APIs are reachable from anywhere.
+  if (window.location.pathname === "/") {
+    addButton();
+  }
 })();
