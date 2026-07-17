@@ -104,7 +104,10 @@ def page(title: str, body: str, *, active: str = "/",
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<style>{_CSS}</style></head><body>"
         "<header><span class='brand'>FIRE &amp; RESCUE ACADEMY</span>"
-        f"<nav>{nav}</nav></header>"
+        f"<nav>{nav}</nav>"
+        "<form class='inline' method='post' action='/logout' "
+        "style='margin-left:auto'>"
+        "<button class='small ghost'>Log out</button></form></header>"
         f"<main>{notice}<h1>{esc(title)}</h1>{body}</main>"
         # Double-click guard: the browser still submits the form once, but
         # the button greys out so a nervous second click can't enqueue a

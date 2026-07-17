@@ -352,10 +352,13 @@ class LoggingConfig:
 
 @dataclass(frozen=True)
 class WebConfig:
-    """The local web console. Binds to localhost by default — there is no
-    authentication yet, so only widen ``host`` on a trusted network."""
-    enabled: bool = False
-    host: str = "127.0.0.1"
+    """The operator web console. Listens on all interfaces by default so
+    the console is reachable at http://<pi-ip>:8462/ on the home network;
+    every page sits behind the operator password (``WEB_PASSWORD`` in
+    .env, or the generated one shown by ``!fra web``). Set ``host`` to
+    127.0.0.1 to go back to loopback-only."""
+    enabled: bool = True
+    host: str = "0.0.0.0"
     port: int = 8462
 
 
@@ -771,8 +774,8 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             backup_count=int(_get(raw, "logging", "backup_count", default=5)),
         ),
         web=WebConfig(
-            enabled=bool(_get(raw, "web", "enabled", default=False)),
-            host=str(_get(raw, "web", "host", default="127.0.0.1")),
+            enabled=bool(_get(raw, "web", "enabled", default=True)),
+            host=str(_get(raw, "web", "host", default="0.0.0.0")),
             port=int(_get(raw, "web", "port", default=8462)),
         ),
     )
