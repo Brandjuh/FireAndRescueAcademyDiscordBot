@@ -272,6 +272,18 @@ class FRABot(commands.Bot):
             except discord.HTTPException as exc:
                 log.warning("Slash-command sync failed: %s", exc)
 
+        # The local web console shares this process's DB handle and paced
+        # MC client — never run it as a second process against the DB.
+        if self.cfg.web.enabled:
+            from .web.server import WebConsole
+
+            self.web = WebConsole(self)
+            try:
+                await self.web.start()
+            except OSError as exc:  # port in use: the bot must still boot
+                log.error("web console failed to start: %s", exc)
+                self.web = None
+
     async def on_command_error(self, ctx, error) -> None:
         from discord.ext import commands as _commands
 
@@ -835,6 +847,8 @@ class FRABot(commands.Bot):
 
     async def close(self) -> None:
         log.info("Shutting down…")
+        if getattr(self, "web", None) is not None:
+            await self.web.stop()
         await self.presence.stop()
         await self.scheduler.stop()
         await self.geocoder.close()

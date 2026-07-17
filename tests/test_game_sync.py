@@ -13,6 +13,7 @@ from fra_bot.services.game_sync import (
     Hotspot,
     SyncPayloadError,
     cluster_hotspots,
+    merge_by_place,
     parse_sync_payload,
     place_name,
     render_hotspots,
@@ -164,6 +165,7 @@ async def test_cluster_hotspots_counts_buildings_and_members():
     }
     spots = cluster_hotspots(member_coords, grid=0.1)
     assert spots[0].buildings == 4 and spots[0].members == 2     # NYC cell wins
+    assert spots[0].member_ids == frozenset({1, 2})              # carried for merging
     assert spots[1].buildings == 1 and spots[1].members == 1
     text = render_hotspots(spots, member_total=2, building_total=5)
     assert "4 buildings" in text and "maps.google.com" in text
@@ -179,6 +181,36 @@ async def test_render_hotspots_prefers_place_names_over_coordinates():
     text = render_hotspots([named, bare], member_total=2, building_total=5)
     assert "**Jersey City, New Jersey**" in text
     assert "**[51.95, 4.45]**" in text     # nameless cell falls back to coords
+
+
+async def test_merge_by_place_collapses_one_metro():
+    nyc = "City of New York, New York"
+    spots = [
+        Hotspot(40.71, -74.01, 100, 3, place=nyc,
+                member_ids=frozenset({1, 2, 3})),
+        Hotspot(29.76, -95.37, 80, 2, place="Houston, Texas",
+                member_ids=frozenset({5, 6})),
+        Hotspot(40.80, -73.95, 60, 2, place=nyc,
+                member_ids=frozenset({2, 4})),
+        Hotspot(51.90, 4.40, 5, 1),                    # nameless: untouched
+    ]
+    merged = merge_by_place(spots)
+    assert len(merged) == 3
+    assert merged[0].place == nyc
+    assert merged[0].buildings == 160                  # 100 + 60
+    assert merged[0].members == 4                      # union {1,2,3,4}, not 3+2
+    assert 40.71 <= merged[0].latitude <= 40.80        # weighted centre
+    assert merged[1].place == "Houston, Texas"         # promoted up the list
+    assert merged[2].place is None
+
+
+async def test_merge_by_place_caps_the_list():
+    spots = [
+        Hotspot(10.0 + i, 10.0, 30 - i, 1, place=f"City {i}",
+                member_ids=frozenset({i}))
+        for i in range(20)
+    ]
+    assert len(merge_by_place(spots, top=12)) == 12
 
 
 async def test_named_spots_survive_a_broken_geocoder():

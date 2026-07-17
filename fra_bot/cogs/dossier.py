@@ -59,7 +59,7 @@ def dossier_embed(d: Dossier) -> discord.Embed:
         timestamp=dt.datetime.now(dt.timezone.utc),
         description=(
             f"{status}\n{verified}\n"
-            f"[MissionChief profile](https://www.missionchief.com/users/{d.mc_user_id})"
+            f"[MissionChief profile](https://www.missionchief.com/profile/{d.mc_user_id})"
         ),
     )
     embed.add_field(

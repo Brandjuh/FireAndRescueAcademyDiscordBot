@@ -7,6 +7,16 @@ database:
   # SQLite database file. Relative paths resolve against the working directory.
   path: data/fra_bot.sqlite3
 
+web:
+  # The local web console (dashboard, member management, settings) served
+  # from inside the bot process. There is NO authentication yet: keep host
+  # on 127.0.0.1 unless the network itself is trusted, and reach it from
+  # another machine via an SSH tunnel:
+  #   ssh -L 8462:127.0.0.1:8462 pi@<bot-host>   ->  http://localhost:8462/
+  enabled: false
+  host: 127.0.0.1
+  port: 8462
+
 missionchief:
   base_url: https://www.missionchief.com
   # Alliance id as it appears in /verband/mitglieder/<id>
