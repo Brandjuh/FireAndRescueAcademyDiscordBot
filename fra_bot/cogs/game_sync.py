@@ -125,13 +125,12 @@ class GameSyncCog(commands.Cog):
 
     # -- hotspots (admins) -----------------------------------------------------
 
-    @commands.command(name="hotspots")
-    @is_fra_admin()
-    async def hotspots(self, ctx: commands.Context, grid_km: int = 11) -> None:
-        """Where the alliance's buildings cluster: `!hotspots [cell-km]`."""
-        grid = max(1, min(int(grid_km), 200)) / 111.0  # ~degrees per km
+    async def _sync_stats(self):
+        """Aggregate every synced row: coordinates per member, totals and
+        the per-type building counts (for the infographic bar chart)."""
         member_coords: dict[int, list[tuple[float, float]]] = {}
-        building_total = 0
+        type_dicts: list[dict] = []
+        building_total = vehicle_total = 0
         for row in await self.repo.all_synced():
             try:
                 data = json.loads(row["buildings_json"] or "{}")
@@ -143,7 +142,18 @@ class GameSyncCog(commands.Cog):
                 if isinstance(pair, (list, tuple)) and len(pair) == 2
             ]
             member_coords[int(row["mc_user_id"])] = coords
+            if isinstance(data.get("by_type"), dict):
+                type_dicts.append(data["by_type"])
             building_total += int(row["building_count"] or 0)
+            vehicle_total += int(row["vehicle_count"] or 0)
+        return member_coords, type_dicts, building_total, vehicle_total
+
+    @commands.command(name="hotspots")
+    @is_fra_admin()
+    async def hotspots(self, ctx: commands.Context, grid_km: int = 11) -> None:
+        """Where the alliance's buildings cluster: `!hotspots [cell-km]`."""
+        grid = max(1, min(int(grid_km), 200)) / 111.0  # ~degrees per km
+        member_coords, _, building_total, _ = await self._sync_stats()
         # Naming (≤12 Nominatim lookups at 1 req/s, cached forever per
         # cell) and tile fetching can take ~15 s on a cold cache.
         async with ctx.typing():
@@ -159,6 +169,43 @@ class GameSyncCog(commands.Cog):
             )
         else:
             await ctx.send(text)
+
+    @commands.command(name="infographic")
+    @is_fra_admin()
+    async def infographic(self, ctx: commands.Context, grid_km: int = 11) -> None:
+        """The alliance snapshot card: `!infographic [cell-km]`."""
+        import datetime as dt
+
+        from ..services.game_sync import top_building_types
+        from ..services.infographic import AllianceSnapshot, render_infographic
+
+        grid = max(1, min(int(grid_km), 200)) / 111.0
+        member_coords, type_dicts, building_total, vehicle_total = (
+            await self._sync_stats()
+        )
+        if not member_coords:
+            await ctx.send(render_hotspots([], member_total=0, building_total=0))
+            return
+        async with ctx.typing():
+            spots = await self._named(cluster_hotspots(member_coords, grid=grid))
+            snapshot = AllianceSnapshot(
+                title="Fire & Rescue Academy",
+                date_label=dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y"),
+                members_synced=len(member_coords),
+                building_total=building_total,
+                vehicle_total=vehicle_total,
+                top_types=top_building_types(type_dicts),
+                spots=spots,
+                map_png=await self._map_image(spots),
+            )
+            card = render_infographic(snapshot)
+        if card is not None:
+            await ctx.send(file=discord.File(io.BytesIO(card), "alliance-snapshot.png"))
+        else:  # Pillow missing — at least give the text list
+            await ctx.send(render_hotspots(
+                spots, member_total=len(member_coords),
+                building_total=building_total,
+            ))
 
     async def _named(self, spots):
         """Each hotspot with its reverse-geocoded place name; the names are

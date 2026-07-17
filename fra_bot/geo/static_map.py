@@ -33,7 +33,7 @@ _LAT_CAP = 85.05112878  # Web Mercator singularity guard
 
 #: Hotspot marker: warm "heat" orange, drawn as a translucent bubble with
 #: a solid rim over a smooth radial glow (kepler.gl-style graduated circles).
-_MARKER_COLOUR = (255, 106, 61)
+_MARKER_COLOUR = (240, 82, 31)
 _BUBBLE_ALPHA = 72        # the basemap stays visible through the bubble
 _GLOW_PEAK_ALPHA = 95     # glow alpha at its centre, fading to 0
 _SS = 2                   # supersampling factor: markers render at 2x, then
