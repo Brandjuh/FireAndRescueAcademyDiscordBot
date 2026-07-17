@@ -174,18 +174,17 @@ def render_hotspots(
 ) -> str:
     if not spots:
         return (
-            "Nog geen spel-data gesynchroniseerd — leden installeren het "
-            "userscript (tools/fra-profile-sync.user.js) en klikken "
-            "'Sync naar FRA'."
+            "No game data synced yet — members install the userscript "
+            "(tools/fra-profile-sync.user.js) and click 'Sync to FRA'."
         )
     lines = [
-        f"🔥 **Alliantie-hotspots** — {building_total} gebouwen van "
-        f"{member_total} gesynchroniseerde leden (cel ≈ 11 km):"
+        f"🔥 **Alliance hotspots** — {building_total} buildings from "
+        f"{member_total} synced member(s):"
     ]
     for index, spot in enumerate(spots, 1):
         lines.append(
-            f"{index}. **{spot.buildings} gebouwen** van {spot.members} "
-            f"lid/leden — [{spot.latitude:.2f}, {spot.longitude:.2f}]"
+            f"{index}. **{spot.buildings} buildings** from {spot.members} "
+            f"member(s) — [{spot.latitude:.2f}, {spot.longitude:.2f}]"
             f"(<https://maps.google.com/?q={spot.latitude},{spot.longitude}>)"
         )
     return "\n".join(lines)[:1900]

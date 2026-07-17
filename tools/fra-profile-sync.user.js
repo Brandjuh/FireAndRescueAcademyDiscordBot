@@ -1,32 +1,32 @@
 // ==UserScript==
 // @name         FRA Profile Sync
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.0.0
-// @description  Stuur je eigen MissionChief-gebouwen en -voertuigen naar de FRA Discord-bot (profiel + hotspots). Verstuurt NOOIT wachtwoorden, cookies of sessies — alleen aantallen, types en gebouwcoördinaten.
+// @version      1.1.0
+// @description  Send your own MissionChief buildings and vehicles to the FRA Discord bot (profile + hotspots). NEVER sends passwords, cookies or sessions — only counts, types and building coordinates.
 // @match        https://www.missionchief.com/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
 
 /*
- * INSTALLATIE (leden):
- * 1. Installeer Tampermonkey (Chrome/Edge) of Greasemonkey (Firefox).
- * 2. Maak een nieuw userscript aan en plak dit bestand erin.
- * 3. Vraag de WEBHOOK_URL aan een admin en vul hem hieronder in.
- * 4. Open missionchief.com — rechtsboven verschijnt een knop
- *    "Sync naar FRA". Klik, controleer de samenvatting, bevestig.
+ * INSTALLATION (members):
+ * 1. Install Tampermonkey (Chrome/Edge) or Greasemonkey (Firefox).
+ * 2. Create a new userscript and paste this file into it.
+ * 3. Ask an admin for the WEBHOOK_URL and fill it in below.
+ * 4. Open missionchief.com — a "Sync to FRA" button appears in the
+ *    top-right corner. Click it, check the summary, confirm.
  *
- * WAT WORDT ER VERSTUURD? Alleen: je MC-gebruikers-id en -naam, je
- * gebouwen (aantallen per type + coördinaten, afgerond op ~100 m) en
- * je voertuigen (aantallen per type). Niets anders. Je ziet de
- * samenvatting vóór het versturen.
+ * WHAT GETS SENT? Only: your MC user id and name, your buildings
+ * (counts per type + coordinates, rounded to ~100 m) and your
+ * vehicles (counts per type). Nothing else. You see the summary
+ * before anything is sent.
  */
 
 (function () {
   "use strict";
 
-  // >>> Vul hier de webhook-URL in die je van een admin kreeg <<<
-  const WEBHOOK_URL = "PLAK-HIER-DE-WEBHOOK-URL";
+  // >>> Paste the webhook URL you received from an admin here <<<
+  const WEBHOOK_URL = "PASTE-THE-WEBHOOK-URL-HERE";
 
   const BASE = "https://www.missionchief.com";
 
@@ -74,7 +74,7 @@
 
   async function buildPayload() {
     const mcUserId = findUserId();
-    if (!mcUserId) throw new Error("Kon je MC-gebruikers-id niet vinden — open je dashboard en probeer opnieuw.");
+    if (!mcUserId) throw new Error("Could not find your MC user id — open your dashboard and try again.");
     const [buildings, vehicles] = await Promise.all([
       fetchJson("/api/buildings"),
       fetchJson("/api/vehicles"),
@@ -122,28 +122,28 @@
 
   async function run() {
     if (WEBHOOK_URL.indexOf("http") !== 0) {
-      alert("FRA Sync: vul eerst de WEBHOOK_URL in het script in (vraag een admin).");
+      alert("FRA Sync: fill in the WEBHOOK_URL in the script first (ask an admin).");
       return;
     }
     let payload;
     try {
       payload = await buildPayload();
     } catch (error) {
-      alert("FRA Sync mislukt: " + error.message);
+      alert("FRA Sync failed: " + error.message);
       return;
     }
     const summary =
-      "Dit wordt naar de FRA-bot gestuurd:\n\n" +
-      "MC-account: " + (payload.mc_name || "?") + " (" + payload.mc_user_id + ")\n" +
-      "Gebouwen: " + payload.buildings.total + " (met locaties)\n" +
-      "Voertuigen: " + payload.vehicles.total + "\n\n" +
-      "Geen wachtwoorden, cookies of sessies. Doorgaan?";
+      "This will be sent to the FRA bot:\n\n" +
+      "MC account: " + (payload.mc_name || "?") + " (" + payload.mc_user_id + ")\n" +
+      "Buildings: " + payload.buildings.total + " (with locations)\n" +
+      "Vehicles: " + payload.vehicles.total + "\n\n" +
+      "No passwords, cookies or sessions. Continue?";
     if (!window.confirm(summary)) return;
     try {
       await send(payload);
-      alert("✅ FRA Sync gelukt! Je profiel in Discord wordt zo bijgewerkt.");
+      alert("✅ FRA Sync complete! Your Discord profile will update shortly.");
     } catch (error) {
-      alert("FRA Sync versturen mislukt: " + error.message);
+      alert("FRA Sync send failed: " + error.message);
     }
   }
 
@@ -152,7 +152,7 @@
     const nav = document.querySelector(".navbar .nav, .navbar-right, #navbar-main-collapse");
     const button = document.createElement("a");
     button.id = "fra-sync-button";
-    button.textContent = "🔄 Sync naar FRA";
+    button.textContent = "🔄 Sync to FRA";
     button.href = "#";
     button.style.cssText =
       "display:inline-block;padding:6px 10px;margin:6px;background:#c0392b;" +

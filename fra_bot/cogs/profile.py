@@ -23,39 +23,39 @@ _BIRTHDAY_RE = re.compile(r"^(\d{1,2})-(\d{1,2})(?:-(\d{4}))?$")
 
 #: section key -> (title, [(field, label, style, placeholder), ...])
 SECTIONS: dict[str, tuple[str, list[tuple[str, str, discord.TextStyle, str]]]] = {
-    "tijd": ("Tijdzone & speeltijden", [
-        ("timezone", "Tijdzone", discord.TextStyle.short,
-         "bijv. Europe/Amsterdam, CET, UTC-5"),
-        ("playtimes", "Speeltijden", discord.TextStyle.short,
-         "bijv. doordeweeks 19:00-23:00, weekend overdag"),
+    "time": ("Timezone & playtimes", [
+        ("timezone", "Timezone", discord.TextStyle.short,
+         "e.g. America/New_York, EST, UTC-5"),
+        ("playtimes", "Playtimes", discord.TextStyle.short,
+         "e.g. weekdays 7-11 pm, weekends during the day"),
     ]),
-    "bio": ("Over mij", [
-        ("bio", "Over mij", discord.TextStyle.paragraph,
-         "Stel jezelf voor aan de alliantie."),
+    "bio": ("About me", [
+        ("bio", "About me", discord.TextStyle.paragraph,
+         "Introduce yourself to the alliance."),
     ]),
-    "specialismen": ("Specialismen", [
-        ("specialties", "Specialismen", discord.TextStyle.paragraph,
-         "bijv. brandweer, EMS, water rescue, missies plannen"),
+    "specialties": ("Specialties", [
+        ("specialties", "Specialties", discord.TextStyle.paragraph,
+         "e.g. fire, EMS, water rescue, mission planning"),
     ]),
-    "verjaardag": ("Verjaardag", [
-        ("birthday", "Verjaardag (DD-MM of DD-MM-JJJJ)",
-         discord.TextStyle.short, "bijv. 17-07 of 17-07-1990"),
+    "birthday": ("Birthday", [
+        ("birthday", "Birthday (DD-MM or DD-MM-YYYY)",
+         discord.TextStyle.short, "e.g. 17-07 or 17-07-1990"),
     ]),
-    "voertuigen": ("Voertuigen", [
-        ("vehicles", "Jouw wagenpark", discord.TextStyle.paragraph,
-         "bijv. 42 engines, 12 ladders, 8 ambulances — of je opstelling"),
+    "vehicles": ("Vehicles", [
+        ("vehicles", "Your fleet", discord.TextStyle.paragraph,
+         "e.g. 42 engines, 12 ladders, 8 ambulances — or your setup"),
     ]),
-    "gebouwen": ("Gebouwen", [
-        ("buildings", "Jouw gebouwen", discord.TextStyle.paragraph,
-         "bijv. 30 kazernes, 4 ziekenhuizen, 2 academies"),
+    "buildings": ("Buildings", [
+        ("buildings", "Your buildings", discord.TextStyle.paragraph,
+         "e.g. 30 fire stations, 4 hospitals, 2 academies"),
     ]),
 }
 
 _FIELD_LABELS = {
-    "timezone": "🕐 Tijdzone", "playtimes": "🎮 Speeltijden",
-    "bio": "💬 Over mij", "specialties": "⭐ Specialismen",
-    "birthday": "🎂 Verjaardag", "vehicles": "🚒 Voertuigen",
-    "buildings": "🏢 Gebouwen",
+    "timezone": "🕐 Timezone", "playtimes": "🎮 Playtimes",
+    "bio": "💬 About me", "specialties": "⭐ Specialties",
+    "birthday": "🎂 Birthday", "vehicles": "🚒 Vehicles",
+    "buildings": "🏢 Buildings",
 }
 
 
@@ -112,8 +112,8 @@ class SectionModal(discord.ui.Modal):
                 normalized = validate_birthday(value)
                 if normalized is None:
                     await interaction.response.send_message(
-                        "⚠️ Verjaardag niet opgeslagen — gebruik DD-MM of "
-                        "DD-MM-JJJJ (bijv. 17-07 of 17-07-1990).",
+                        "⚠️ Birthday not saved — use DD-MM or "
+                        "DD-MM-YYYY (e.g. 17-07 or 17-07-1990).",
                         ephemeral=True,
                     )
                     return
@@ -136,10 +136,10 @@ class SectionModal(discord.ui.Modal):
         )
         suffix = (
             "" if interaction.user.id == self._target.id
-            else f" (voor {self._target.display_name})"
+            else f" (for {self._target.display_name})"
         )
         await interaction.response.send_message(
-            f"✅ Profiel bijgewerkt: **{SECTIONS[self._section][0]}**"
+            f"✅ Profile updated: **{SECTIONS[self._section][0]}**"
             f"{suffix} ({changed}).",
             ephemeral=True,
         )
@@ -155,7 +155,7 @@ class ProfileCog(commands.Cog):
     async def profile_embed(self, user: discord.abc.User) -> discord.Embed:
         row = await self.profiles.get(user.id)
         embed = discord.Embed(
-            title=f"👤 Profiel — {user.display_name}",
+            title=f"👤 Profile — {user.display_name}",
             colour=discord.Colour.blurple(),
         )
         try:
@@ -176,7 +176,7 @@ class ProfileCog(commands.Cog):
                 if credits is not None:
                     stats.append(f"Credits: {credits:,}")
                 if rate is not None:
-                    stats.append(f"bijdrage: {rate:g}%")
+                    stats.append(f"contribution: {rate:g}%")
                 if stats:
                     parts.append(" · ".join(stats))
                 embed.add_field(
@@ -187,12 +187,12 @@ class ProfileCog(commands.Cog):
             else:
                 embed.add_field(
                     name="🎖️ MissionChief",
-                    value=f"gelinkt (id {link['mc_user_id']})", inline=False,
+                    value=f"linked (id {link['mc_user_id']})", inline=False,
                 )
         else:
             embed.add_field(
                 name="🎖️ MissionChief",
-                value="niet gelinkt — run `!verify`", inline=False,
+                value="not linked — run `!verify`", inline=False,
             )
         # Game data the member's own userscript reported (real counts, in
         # contrast to the self-written vehicles/buildings notes below).
@@ -210,14 +210,14 @@ class ProfileCog(commands.Cog):
             except ValueError:
                 by_type = {}
             value = (
-                f"{sync['building_count']} gebouwen · "
-                f"{sync['vehicle_count']} voertuigen"
+                f"{sync['building_count']} buildings · "
+                f"{sync['vehicle_count']} vehicles"
             )
             summary = summarize_buildings(by_type)
             if summary:
                 value += f"\n{summary}"
-            value += f"\n*gesynchroniseerd {str(sync['synced_at'])[:16]}*"
-            embed.add_field(name="🎮 Spel-data", value=value[:1024], inline=False)
+            value += f"\n*synced {str(sync['synced_at'])[:16]}*"
+            embed.add_field(name="🎮 Game data", value=value[:1024], inline=False)
         filled = 0
         if row is not None:
             # Discord caps the WHOLE embed at 6000 chars — seven fields of
@@ -243,55 +243,55 @@ class ProfileCog(commands.Cog):
                     name=label, value=text,
                     inline=field in ("timezone", "playtimes", "birthday"),
                 )
-            embed.set_footer(text=f"Laatst bijgewerkt: {row['updated_at'][:16]}")
+            embed.set_footer(text=f"Last updated: {row['updated_at'][:16]}")
         if filled == 0:
             embed.description = (
-                "*Nog geen profielinformatie — vul je profiel met "
+                "*No profile information yet — fill in your profile with "
                 "`/profile-edit`.*"
             )
         return embed
 
     # -- slash commands ------------------------------------------------------
 
-    @app_commands.command(name="profile", description="Bekijk een profiel")
-    @app_commands.describe(lid="Wiens profiel (leeg = dat van jou)")
+    @app_commands.command(name="profile", description="View a profile")
+    @app_commands.describe(member="Whose profile (empty = your own)")
     async def profile_view(
         self, interaction: discord.Interaction,
-        lid: discord.Member | None = None,
+        member: discord.Member | None = None,
     ) -> None:
-        target = lid or interaction.user
+        target = member or interaction.user
         embed = await self.profile_embed(target)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(
-        name="profile-edit", description="Bewerk je profiel (per sectie)"
+        name="profile-edit", description="Edit your profile (per section)"
     )
     @app_commands.describe(
-        sectie="Welke sectie wil je bewerken?",
-        lid="ALLEEN ADMINS: bewerk het profiel van dit lid",
+        section="Which section do you want to edit?",
+        member="ADMINS ONLY: edit this member's profile",
     )
-    @app_commands.choices(sectie=[
+    @app_commands.choices(section=[
         app_commands.Choice(name=title, value=key)
         for key, (title, _) in SECTIONS.items()
     ])
     async def profile_edit(
         self, interaction: discord.Interaction,
-        sectie: app_commands.Choice[str],
-        lid: discord.Member | None = None,
+        section: app_commands.Choice[str],
+        member: discord.Member | None = None,
     ) -> None:
         target = interaction.user
-        if lid is not None and lid.id != interaction.user.id:
+        if member is not None and member.id != interaction.user.id:
             if not _is_admin(self.bot, interaction.user):
                 await interaction.response.send_message(
-                    "Alleen admins kunnen andermans profiel bewerken.",
+                    "Only admins can edit another member's profile.",
                     ephemeral=True,
                 )
                 return
-            target = lid
+            target = member
         current_row = await self.profiles.get(target.id)
         current = dict(current_row) if current_row is not None else {}
         await interaction.response.send_modal(
-            SectionModal(self, target, sectie.value, current)
+            SectionModal(self, target, section.value, current)
         )
 
 

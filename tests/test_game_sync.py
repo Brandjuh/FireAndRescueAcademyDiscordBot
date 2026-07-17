@@ -164,7 +164,7 @@ async def test_cluster_hotspots_counts_buildings_and_members():
     assert spots[0].buildings == 4 and spots[0].members == 2     # NYC cell wins
     assert spots[1].buildings == 1 and spots[1].members == 1
     text = render_hotspots(spots, member_total=2, building_total=5)
-    assert "4 gebouwen" in text and "maps.google.com" in text
+    assert "4 buildings" in text and "maps.google.com" in text
 
 
 async def test_render_hotspots_empty_points_at_the_userscript():
