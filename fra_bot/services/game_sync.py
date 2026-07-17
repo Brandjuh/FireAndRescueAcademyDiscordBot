@@ -137,6 +137,25 @@ class Hotspot:
     longitude: float
     buildings: int
     members: int
+    place: str | None = None  # reverse-geocoded name, filled by the cog
+
+
+#: Nominatim address keys that name the locality, most specific first.
+_LOCALITY_KEYS = ("city", "town", "village", "hamlet", "municipality", "county")
+
+
+def place_name(details: dict | None) -> str | None:
+    """A short human place name ("Jersey City, New Jersey") from Nominatim
+    address details; None when there is nothing usable there (open sea)."""
+    if not isinstance(details, dict):
+        return None
+    locality = next(
+        (details[key] for key in _LOCALITY_KEYS if details.get(key)), None
+    )
+    region = details.get("state") or details.get("country")
+    if locality and region and locality != region:
+        return f"{locality}, {region}"
+    return locality or region
 
 
 def cluster_hotspots(
@@ -182,9 +201,11 @@ def render_hotspots(
         f"{member_total} synced member(s):"
     ]
     for index, spot in enumerate(spots, 1):
+        where = spot.place or f"[{spot.latitude:.2f}, {spot.longitude:.2f}]"
+        buildings = f"{spot.buildings} building" + ("s" if spot.buildings != 1 else "")
+        members = f"{spot.members} member" + ("s" if spot.members != 1 else "")
         lines.append(
-            f"{index}. **{spot.buildings} buildings** from {spot.members} "
-            f"member(s) — [{spot.latitude:.2f}, {spot.longitude:.2f}]"
-            f"(<https://maps.google.com/?q={spot.latitude},{spot.longitude}>)"
+            f"{index}. **{where}** — {buildings} · {members} · "
+            f"[map](<https://maps.google.com/?q={spot.latitude},{spot.longitude}>)"
         )
     return "\n".join(lines)[:1900]

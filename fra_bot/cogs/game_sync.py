@@ -13,8 +13,10 @@ where the alliance's buildings cluster, from all synced coordinates.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
+from dataclasses import replace
 
 import discord
 from discord.ext import commands
@@ -24,6 +26,7 @@ from ..services.game_sync import (
     SyncPayloadError,
     cluster_hotspots,
     parse_sync_payload,
+    place_name,
     render_hotspots,
     summarize_buildings,
 )
@@ -141,11 +144,50 @@ class GameSyncCog(commands.Cog):
             ]
             member_coords[int(row["mc_user_id"])] = coords
             building_total += int(row["building_count"] or 0)
-        spots = cluster_hotspots(member_coords, grid=grid)
-        await ctx.send(render_hotspots(
-            spots, member_total=len(member_coords),
-            building_total=building_total,
-        ))
+        # Naming (≤12 Nominatim lookups at 1 req/s, cached forever per
+        # cell) and tile fetching can take ~15 s on a cold cache.
+        async with ctx.typing():
+            spots = await self._named(cluster_hotspots(member_coords, grid=grid))
+            text = render_hotspots(
+                spots, member_total=len(member_coords),
+                building_total=building_total,
+            )
+            image = await self._map_image(spots)
+        if image is not None:
+            await ctx.send(
+                text, file=discord.File(io.BytesIO(image), "hotspots.png")
+            )
+        else:
+            await ctx.send(text)
+
+    async def _named(self, spots):
+        """Each hotspot with its reverse-geocoded place name; the names are
+        decoration, so a geocoder problem never breaks the command."""
+        named = []
+        for spot in spots:
+            place = None
+            try:
+                details = await self.bot.geocoder.reverse_details(
+                    spot.latitude, spot.longitude
+                )
+                place = place_name(details)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("hotspots: reverse geocode failed: %s", exc)
+            named.append(replace(spot, place=place))
+        return named
+
+    async def _map_image(self, spots) -> bytes | None:
+        if not spots:
+            return None
+        try:
+            from ..geo.static_map import render_map
+
+            return await render_map(
+                [(s.latitude, s.longitude, s.buildings) for s in spots]
+            )
+        except Exception:  # noqa: BLE001 — the map is optional decoration
+            log.warning("hotspots: map render failed", exc_info=True)
+            return None
 
     # -- profile section (used by the profile embed) ---------------------------
 

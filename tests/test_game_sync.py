@@ -10,9 +10,11 @@ from fra_bot.cogs.game_sync import GameSyncCog
 from fra_bot.db.database import Database
 from fra_bot.db.repos import GameSyncRepo, LinksRepo, MemberActionsRepo
 from fra_bot.services.game_sync import (
+    Hotspot,
     SyncPayloadError,
     cluster_hotspots,
     parse_sync_payload,
+    place_name,
     render_hotspots,
     summarize_buildings,
 )
@@ -169,3 +171,39 @@ async def test_cluster_hotspots_counts_buildings_and_members():
 
 async def test_render_hotspots_empty_points_at_the_userscript():
     assert "userscript" in render_hotspots([], member_total=0, building_total=0)
+
+
+async def test_render_hotspots_prefers_place_names_over_coordinates():
+    named = Hotspot(40.75, -74.05, 4, 2, place="Jersey City, New Jersey")
+    bare = Hotspot(51.95, 4.45, 1, 1)
+    text = render_hotspots([named, bare], member_total=2, building_total=5)
+    assert "**Jersey City, New Jersey**" in text
+    assert "**[51.95, 4.45]**" in text     # nameless cell falls back to coords
+
+
+async def test_named_spots_survive_a_broken_geocoder():
+    class FakeGeocoder:
+        async def reverse_details(self, lat, lng):
+            if lat > 45:
+                raise RuntimeError("nominatim down")
+            return {"city": "Jersey City", "state": "New Jersey"}
+
+    cog = GameSyncCog.__new__(GameSyncCog)
+    cog.bot = SimpleNamespace(geocoder=FakeGeocoder())
+    named = await cog._named([Hotspot(40.7, -74.0, 4, 2), Hotspot(51.9, 4.4, 1, 1)])
+    assert named[0].place == "Jersey City, New Jersey"
+    assert named[1].place is None    # geocoder error -> nameless, not a crash
+
+
+async def test_place_name_picks_locality_and_region():
+    assert place_name(
+        {"city": "Jersey City", "state": "New Jersey", "country": "United States"}
+    ) == "Jersey City, New Jersey"
+    # No city-level key: county carries, country backs up a missing state.
+    assert place_name({"county": "Bergen County", "country": "United States"}) \
+        == "Bergen County, United States"
+    assert place_name({"state": "Texas"}) == "Texas"
+    assert place_name({}) is None
+    assert place_name(None) is None
+    # Locality == region (city-states): no "Hamburg, Hamburg".
+    assert place_name({"city": "Hamburg", "state": "Hamburg"}) == "Hamburg"
