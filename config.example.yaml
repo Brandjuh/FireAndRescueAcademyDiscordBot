@@ -58,6 +58,10 @@ discord:
     member_actions: 0     # admin feed of every member's bot-side action
                           # (requests, verify, profile edits; 0 = feed off,
                           # actions still record for the per-member view)
+    game_sync: 0          # PRIVATE intake channel for the profile-sync
+                          # userscript webhook (tools/fra-profile-sync.user.js):
+                          # members' own buildings/vehicles land here as JSON,
+                          # feeding /profile and !hotspots. 0 = off.
     admin_approvals: 0    # approve/deny embeds for requests needing a decision
     member_panel: 0       # member-management panel (dossier button)
     request_panel: 0      # training/building request panel

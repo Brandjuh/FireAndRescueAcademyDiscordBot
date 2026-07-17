@@ -15,7 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ..db.repos import LinksRepo, MemberProfilesRepo, MembersRepo
+from ..db.repos import GameSyncRepo, LinksRepo, MemberProfilesRepo, MembersRepo
 
 log = logging.getLogger(__name__)
 
@@ -194,6 +194,30 @@ class ProfileCog(commands.Cog):
                 name="🎖️ MissionChief",
                 value="niet gelinkt — run `!verify`", inline=False,
             )
+        # Game data the member's own userscript reported (real counts, in
+        # contrast to the self-written vehicles/buildings notes below).
+        sync = await GameSyncRepo(self.bot.db).get_by_discord(user.id)
+        if sync is not None:
+            import json as _json
+
+            from ..services.game_sync import summarize_buildings
+
+            try:
+                by_type = (
+                    _json.loads(sync["buildings_json"] or "{}").get("by_type")
+                    or {}
+                )
+            except ValueError:
+                by_type = {}
+            value = (
+                f"{sync['building_count']} gebouwen · "
+                f"{sync['vehicle_count']} voertuigen"
+            )
+            summary = summarize_buildings(by_type)
+            if summary:
+                value += f"\n{summary}"
+            value += f"\n*gesynchroniseerd {str(sync['synced_at'])[:16]}*"
+            embed.add_field(name="🎮 Spel-data", value=value[:1024], inline=False)
         filled = 0
         if row is not None:
             # Discord caps the WHOLE embed at 6000 chars — seven fields of
