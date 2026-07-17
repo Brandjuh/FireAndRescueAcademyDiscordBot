@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 #: Don't read absurdly large attachments (a real payload is a few KB).
 MAX_ATTACHMENT_BYTES = 512 * 1024
 
+#: State cache for the LSSM vehicle id → name map (!fleet, !infographic).
+VEHICLE_NAMES_KEY = "game_sync:vehicle_names"
+VEHICLE_NAMES_MAX_AGE_DAYS = 7
+
 
 class GameSyncCog(commands.Cog):
     def __init__(self, bot) -> None:
@@ -127,9 +131,10 @@ class GameSyncCog(commands.Cog):
 
     async def _sync_stats(self):
         """Aggregate every synced row: coordinates per member, totals and
-        the per-type building counts (for the infographic bar chart)."""
+        the per-type building/vehicle counts (for the bar charts)."""
         member_coords: dict[int, list[tuple[float, float]]] = {}
-        type_dicts: list[dict] = []
+        building_dicts: list[dict] = []
+        vehicle_dicts: list[dict] = []
         building_total = vehicle_total = 0
         for row in await self.repo.all_synced():
             try:
@@ -143,17 +148,77 @@ class GameSyncCog(commands.Cog):
             ]
             member_coords[int(row["mc_user_id"])] = coords
             if isinstance(data.get("by_type"), dict):
-                type_dicts.append(data["by_type"])
+                building_dicts.append(data["by_type"])
+            try:
+                vehicles = json.loads(row["vehicles_json"] or "{}")
+            except ValueError:
+                vehicles = {}
+            if isinstance(vehicles.get("by_type"), dict):
+                vehicle_dicts.append(vehicles["by_type"])
             building_total += int(row["building_count"] or 0)
             vehicle_total += int(row["vehicle_count"] or 0)
-        return member_coords, type_dicts, building_total, vehicle_total
+        return (member_coords, building_dicts, vehicle_dicts,
+                building_total, vehicle_total)
+
+    async def _vehicle_names(self) -> dict[int, str]:
+        """The LSSM vehicle id → name map, state-cached for a week. Any
+        fetch problem falls back to the cache (however old), then to {} —
+        unknown ids render as "type N", so this can never break a command."""
+        import datetime as dt
+
+        from ..db.repos import StateRepo
+
+        state = StateRepo(self.bot.db)
+        cached: dict[int, str] = {}
+        fetched_at = None
+        raw = await state.get(VEHICLE_NAMES_KEY)
+        if raw:
+            try:
+                data = json.loads(raw)
+                cached = {
+                    int(k): str(v) for k, v in (data.get("names") or {}).items()
+                }
+                fetched_at = dt.datetime.fromisoformat(data["fetched_at"])
+            except (ValueError, KeyError, TypeError):
+                cached, fetched_at = {}, None
+        now = dt.datetime.now(dt.timezone.utc)
+        try:
+            fresh = (
+                cached and fetched_at is not None
+                and (now - fetched_at).days < VEHICLE_NAMES_MAX_AGE_DAYS
+            )
+        except TypeError:  # naive timestamp from an old write
+            fresh = False
+        if fresh:
+            return cached
+        try:
+            import aiohttp
+
+            from ..mc.vehicles_catalog import fetch_catalog
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as session:
+                catalog = await fetch_catalog(session)
+            names = {int(v["id"]): str(v["name"]) for v in catalog}
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "game sync: vehicle catalog unavailable (%s); using %d cached",
+                exc, len(cached),
+            )
+            return cached
+        await state.set(VEHICLE_NAMES_KEY, json.dumps({
+            "fetched_at": now.isoformat(),
+            "names": {str(k): v for k, v in names.items()},
+        }))
+        return names
 
     @commands.command(name="hotspots")
     @is_fra_admin()
     async def hotspots(self, ctx: commands.Context, grid_km: int = 11) -> None:
         """Where the alliance's buildings cluster: `!hotspots [cell-km]`."""
         grid = max(1, min(int(grid_km), 200)) / 111.0  # ~degrees per km
-        member_coords, _, building_total, _ = await self._sync_stats()
+        member_coords, _, _, building_total, _ = await self._sync_stats()
         # Naming (≤12 Nominatim lookups at 1 req/s, cached forever per
         # cell) and tile fetching can take ~15 s on a cold cache.
         async with ctx.typing():
@@ -176,13 +241,12 @@ class GameSyncCog(commands.Cog):
         """The alliance snapshot card: `!infographic [cell-km]`."""
         import datetime as dt
 
-        from ..services.game_sync import top_building_types
+        from ..services.game_sync import top_building_types, top_vehicle_types
         from ..services.infographic import AllianceSnapshot, render_infographic
 
         grid = max(1, min(int(grid_km), 200)) / 111.0
-        member_coords, type_dicts, building_total, vehicle_total = (
-            await self._sync_stats()
-        )
+        (member_coords, building_dicts, vehicle_dicts,
+         building_total, vehicle_total) = await self._sync_stats()
         if not member_coords:
             await ctx.send(render_hotspots([], member_total=0, building_total=0))
             return
@@ -194,7 +258,10 @@ class GameSyncCog(commands.Cog):
                 members_synced=len(member_coords),
                 building_total=building_total,
                 vehicle_total=vehicle_total,
-                top_types=top_building_types(type_dicts),
+                top_types=top_building_types(building_dicts),
+                top_vehicle_types=top_vehicle_types(
+                    vehicle_dicts, await self._vehicle_names()
+                ),
                 spots=spots,
                 map_png=await self._map_image(spots),
             )
@@ -206,6 +273,54 @@ class GameSyncCog(commands.Cog):
                 spots, member_total=len(member_coords),
                 building_total=building_total,
             ))
+
+    @commands.command(name="fleet")
+    @is_fra_admin()
+    async def fleet(self, ctx: commands.Context) -> None:
+        """The alliance fleet card: `!fleet`."""
+        import datetime as dt
+
+        from ..services.game_sync import top_vehicle_types
+        from ..services.infographic import render_fleet_card
+
+        member_coords, _, vehicle_dicts, _, vehicle_total = (
+            await self._sync_stats()
+        )
+        if not member_coords:
+            await ctx.send(render_hotspots([], member_total=0, building_total=0))
+            return
+        async with ctx.typing():
+            rows = top_vehicle_types(
+                vehicle_dicts, await self._vehicle_names(), top=10
+            )
+            type_ids = set()
+            for by_type in vehicle_dicts:
+                for key in by_type:
+                    try:
+                        type_ids.add(int(key))
+                    except (TypeError, ValueError):
+                        continue
+            card = render_fleet_card(
+                title="Fire & Rescue Academy",
+                date_label=dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y"),
+                members_synced=len(member_coords),
+                vehicle_total=vehicle_total,
+                type_count=len(type_ids),
+                top_vehicle_types=rows,
+            )
+        if card is not None:
+            await ctx.send(
+                file=discord.File(io.BytesIO(card), "alliance-fleet.png")
+            )
+        else:  # Pillow missing — at least give the numbers
+            lines = [
+                f"🚒 **Alliance fleet** — {vehicle_total:,} vehicles from "
+                f"{len(member_coords)} synced member(s):"
+            ] + [
+                f"{rank}. **{name.capitalize()}** — {count:,}"
+                for rank, (name, count) in enumerate(rows, 1)
+            ]
+            await ctx.send("\n".join(lines)[:1900])
 
     async def _named(self, spots):
         """Each hotspot with its reverse-geocoded place name; the names are

@@ -1,11 +1,10 @@
-"""The alliance snapshot infographic: one dark PNG card.
+"""The alliance snapshot / fleet infographic cards: dark PNG images.
 
-Composed for ``!infographic``: header, three stat tiles (synced
-members / buildings / vehicles), a single-hue bar chart of the top
-building types, the hotspot map and the top-hotspot list. Single
-accent colour, values direct-labeled, text in ink tones — and like the
-static map, a missing Pillow install degrades to None so the caller
-can fall back to text.
+Composed for ``!infographic`` (header, stat tiles, buildings-by-type
+bar chart, vehicles-by-type bar chart, hotspot map + top list) and
+``!fleet`` (vehicle-focused card). Single accent colour, values
+direct-labeled, text in ink tones — and like the static map, a missing
+Pillow install degrades to None so the callers can fall back to text.
 """
 
 from __future__ import annotations
@@ -41,6 +40,7 @@ class AllianceSnapshot:
     building_total: int
     vehicle_total: int
     top_types: list[tuple[str, int]] = field(default_factory=list)
+    top_vehicle_types: list[tuple[str, int]] = field(default_factory=list)
     spots: list[Hotspot] = field(default_factory=list)
     map_png: bytes | None = None
 
@@ -54,35 +54,20 @@ def _font(size: int):
         return ImageFont.load_default()
 
 
-def render_infographic(snapshot: AllianceSnapshot) -> bytes | None:
-    """The snapshot card as PNG bytes; None when Pillow is missing."""
-    try:
-        from PIL import Image, ImageDraw
-    except ImportError:
-        log.warning("infographic: Pillow not installed; skipping render")
-        return None
-
-    inner = _WIDTH - 2 * _PAD
-    image = Image.new("RGB", (_WIDTH, 2200), _BG)
-    draw = ImageDraw.Draw(image, "RGBA")
+def _header(draw, *, title: str, heading: str, date_label: str) -> int:
     y = _PAD
-
-    # -- header ------------------------------------------------------------
-    draw.text((_PAD, y), snapshot.title.upper(), font=_font(20), fill=_INK_MUTED)
-    draw.text((_WIDTH - _PAD, y), snapshot.date_label, font=_font(20),
+    draw.text((_PAD, y), title.upper(), font=_font(20), fill=_INK_MUTED)
+    draw.text((_WIDTH - _PAD, y), date_label, font=_font(20),
               fill=_INK_SOFT, anchor="ra")
     y += 34
-    draw.text((_PAD, y), "Alliance Game Snapshot", font=_font(44), fill=_INK)
-    y += 78
+    draw.text((_PAD, y), heading, font=_font(44), fill=_INK)
+    return y + 78
 
-    # -- stat tiles --------------------------------------------------------
-    tiles = [
-        ("MEMBERS SYNCED", snapshot.members_synced),
-        ("BUILDINGS", snapshot.building_total),
-        ("VEHICLES", snapshot.vehicle_total),
-    ]
+
+def _stat_tiles(draw, y: int, tiles: list[tuple[str, int]]) -> int:
+    inner = _WIDTH - 2 * _PAD
     tile_gap = 20
-    tile_width = (inner - 2 * tile_gap) // 3
+    tile_width = (inner - (len(tiles) - 1) * tile_gap) // len(tiles)
     tile_height = 140
     for column, (label, number) in enumerate(tiles):
         x = _PAD + column * (tile_width + tile_gap)
@@ -96,40 +81,76 @@ def render_infographic(snapshot: AllianceSnapshot) -> bytes | None:
                   font=_font(48), fill=_INK)
         draw.text((x + _PANEL_PAD, y + 92), label, font=_font(17),
                   fill=_INK_MUTED)
-    y += tile_height + 28
+    return y + tile_height + 28
 
-    # -- building types bar chart -----------------------------------------
-    if snapshot.top_types:
-        rows = snapshot.top_types
-        bar_height, bar_gap = 26, 20
-        panel_height = 2 * _PANEL_PAD + 40 + len(rows) * (bar_height + bar_gap)
+
+def _bar_panel(draw, y: int, title: str, rows: list[tuple[str, int]]) -> int:
+    """A rounded panel with one single-hue horizontal bar per row and the
+    value direct-labeled at the bar end; the new cursor y."""
+    if not rows:
+        return y
+    bar_height, bar_gap = 26, 20
+    panel_height = 2 * _PANEL_PAD + 40 + len(rows) * (bar_height + bar_gap)
+    draw.rounded_rectangle(
+        (_PAD, y, _WIDTH - _PAD, y + panel_height), radius=_RADIUS, fill=_PANEL
+    )
+    draw.text((_PAD + _PANEL_PAD, y + _PANEL_PAD), title,
+              font=_font(18), fill=_INK_MUTED)
+    label_font, value_font = _font(20), _font(20)
+    label_col = max(
+        int(draw.textlength(name.capitalize(), font=label_font))
+        for name, _ in rows
+    ) + 24
+    bar_x = _PAD + _PANEL_PAD + label_col
+    bar_room = (_WIDTH - _PAD - _PANEL_PAD) - bar_x - 90
+    heaviest = max(count for _, count in rows) or 1
+    row_y = y + _PANEL_PAD + 40
+    for name, count in rows:
+        middle = row_y + bar_height // 2
+        draw.text((_PAD + _PANEL_PAD, middle), name.capitalize(),
+                  font=label_font, fill=_INK_SOFT, anchor="lm")
+        bar = max(6, int(bar_room * count / heaviest))
         draw.rounded_rectangle(
-            (_PAD, y, _WIDTH - _PAD, y + panel_height), radius=_RADIUS, fill=_PANEL
+            (bar_x, row_y, bar_x + bar, row_y + bar_height),
+            radius=4, fill=_ACCENT,
         )
-        draw.text((_PAD + _PANEL_PAD, y + _PANEL_PAD), "BUILDINGS BY TYPE",
-                  font=_font(18), fill=_INK_MUTED)
-        label_font, value_font = _font(20), _font(20)
-        label_col = max(
-            int(draw.textlength(name.capitalize(), font=label_font))
-            for name, _ in rows
-        ) + 24
-        bar_x = _PAD + _PANEL_PAD + label_col
-        bar_room = (_WIDTH - _PAD - _PANEL_PAD) - bar_x - 90
-        heaviest = max(count for _, count in rows) or 1
-        row_y = y + _PANEL_PAD + 40
-        for name, count in rows:
-            middle = row_y + bar_height // 2
-            draw.text((_PAD + _PANEL_PAD, middle), name.capitalize(),
-                      font=label_font, fill=_INK_SOFT, anchor="lm")
-            bar = max(6, int(bar_room * count / heaviest))
-            draw.rounded_rectangle(
-                (bar_x, row_y, bar_x + bar, row_y + bar_height),
-                radius=4, fill=_ACCENT,
-            )
-            draw.text((bar_x + bar + 14, middle), f"{count:,}",
-                      font=value_font, fill=_INK, anchor="lm")
-            row_y += bar_height + bar_gap
-        y += panel_height + 28
+        draw.text((bar_x + bar + 14, middle), f"{count:,}",
+                  font=value_font, fill=_INK, anchor="lm")
+        row_y += bar_height + bar_gap
+    return y + panel_height + 28
+
+
+def _finish(image, draw, y: int, footer: str) -> bytes:
+    draw.text((_PAD, y + 4), footer, font=_font(16), fill=_INK_MUTED)
+    image = image.crop((0, 0, _WIDTH, y + 30 + _PAD - 20))
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+_FOOTER = "Data: members' own game sync (FRA profile sync)"
+
+
+def render_infographic(snapshot: AllianceSnapshot) -> bytes | None:
+    """The snapshot card as PNG bytes; None when Pillow is missing."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        log.warning("infographic: Pillow not installed; skipping render")
+        return None
+
+    inner = _WIDTH - 2 * _PAD
+    image = Image.new("RGB", (_WIDTH, 2800), _BG)
+    draw = ImageDraw.Draw(image, "RGBA")
+    y = _header(draw, title=snapshot.title, heading="Alliance Game Snapshot",
+                date_label=snapshot.date_label)
+    y = _stat_tiles(draw, y, [
+        ("MEMBERS SYNCED", snapshot.members_synced),
+        ("BUILDINGS", snapshot.building_total),
+        ("VEHICLES", snapshot.vehicle_total),
+    ])
+    y = _bar_panel(draw, y, "BUILDINGS BY TYPE", snapshot.top_types)
+    y = _bar_panel(draw, y, "VEHICLES BY TYPE", snapshot.top_vehicle_types)
 
     # -- hotspots: map + top list -----------------------------------------
     if snapshot.map_png or snapshot.spots:
@@ -181,12 +202,28 @@ def render_infographic(snapshot: AllianceSnapshot) -> bytes | None:
             row_y += 40
         y += panel_height + 28
 
-    # -- footer ------------------------------------------------------------
-    draw.text((_PAD, y + 4), "Data: members' own game sync (FRA profile sync)",
-              font=_font(16), fill=_INK_MUTED)
-    y += 30
+    return _finish(image, draw, y, _FOOTER)
 
-    image = image.crop((0, 0, _WIDTH, y + _PAD - 20))
-    out = io.BytesIO()
-    image.save(out, format="PNG")
-    return out.getvalue()
+
+def render_fleet_card(
+    *, title: str, date_label: str, members_synced: int, vehicle_total: int,
+    type_count: int, top_vehicle_types: list[tuple[str, int]],
+) -> bytes | None:
+    """The vehicle-focused card (``!fleet``); None when Pillow is missing."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        log.warning("fleet card: Pillow not installed; skipping render")
+        return None
+
+    image = Image.new("RGB", (_WIDTH, 1600), _BG)
+    draw = ImageDraw.Draw(image, "RGBA")
+    y = _header(draw, title=title, heading="Alliance Fleet",
+                date_label=date_label)
+    y = _stat_tiles(draw, y, [
+        ("VEHICLES", vehicle_total),
+        ("VEHICLE TYPES", type_count),
+        ("MEMBERS SYNCED", members_synced),
+    ])
+    y = _bar_panel(draw, y, "TOP VEHICLE TYPES", top_vehicle_types)
+    return _finish(image, draw, y, _FOOTER)
