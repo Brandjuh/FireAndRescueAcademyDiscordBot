@@ -21,6 +21,8 @@ not executed), dedup via ``board_posts``, and skipping our own posts.
 
 from __future__ import annotations
 
+import asyncio
+import datetime as dt
 import hashlib
 import json
 import logging
@@ -55,6 +57,10 @@ log = logging.getLogger(__name__)
 # waits (funds/cooldown) don't bump ``attempts``, so they wait as long as
 # needed and are not affected by this cap.
 MAX_ATTEMPTS = 12
+#: Backoff for transient MissionChief errors: 15m, 30m, ... capped at 2h,
+#: so the 12-attempt budget spans well over a day instead of ~1 hour.
+ERROR_RETRY_BASE_MINUTES = 15
+ERROR_RETRY_CAP_MINUTES = 120
 
 # A request is done with the board once it reaches one of these.
 _TERMINAL_STATUSES = frozenset({"done", "failed", "skipped"})
@@ -207,6 +213,12 @@ class BoardRequestService:
         return f"❌ {label}: could not create or edit the guide — {reason}"
 
     async def poll(self) -> None:
+        # Heartbeat BEFORE the enabled gate: it proves the scheduler still
+        # fires this job at all — the watchdog alerts when it goes stale.
+        await self.state.set(
+            f"heartbeat:board-{self.kind}",
+            dt.datetime.now(dt.timezone.utc).isoformat(),
+        )
         if not self.poll_enabled:
             return
         run_id = await self.runs.start(f"board_{self.kind}")
@@ -231,6 +243,15 @@ class BoardRequestService:
                 log.warning(
                     "%s: board scan of thread %s failed (%s) — still "
                     "executing the queue", self.kind, self.thread_id, exc,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # A scan BUG (parse regression, layout change) must not
+                # starve the queue either — Discord-sourced requests would
+                # sit pending forever while every poll aborts on the scan.
+                scan_error = f"scan bug: {exc}"
+                log.exception(
+                    "%s: board scan crashed — still executing the queue",
+                    self.kind,
                 )
 
             executed = await self._execute_ready()
@@ -341,14 +362,40 @@ class BoardRequestService:
             executed += 1
             try:
                 await self.execute_request(request, announce=first_attempt)
-            except MissionChiefError as exc:
-                # The action may or may not have landed; put it back to
-                # 'waiting' so it retries next poll rather than sitting in
-                # 'processing' (which the startup sweep would fail).
+            except asyncio.CancelledError:
+                # Shutdown/restart cancelled us mid-action (CancelledError
+                # is a BaseException — the handlers below never see it).
+                # Put the row back to 'waiting' NOW, while the DB is still
+                # open, or the startup sweep flags it terminally 'failed'
+                # on every '!fra update' that lands mid-processing.
                 await self.requests.set_status(
                     request["id"], "waiting",
-                    f"MissionChief error ({exc}); will retry",
+                    "interrupted by a bot restart; retrying automatically",
+                    bump_attempts=False, announce=False,
+                )
+                raise
+            except MissionChiefError as exc:
+                # The action may or may not have landed; put it back to
+                # 'waiting' so it retries rather than sitting in
+                # 'processing' (which the startup sweep would fail). The
+                # retry BACKS OFF with the attempt count: without it, a
+                # sustained outage (circuit storms, dead login) burned the
+                # whole MAX_ATTEMPTS budget in ~an hour of poll ticks and
+                # permanently failed member requests before one real try.
+                delay_minutes = min(
+                    ERROR_RETRY_CAP_MINUTES,
+                    ERROR_RETRY_BASE_MINUTES * ((request["attempts"] or 0) + 1),
+                )
+                retry_at = (
+                    dt.datetime.now(dt.timezone.utc)
+                    + dt.timedelta(minutes=delay_minutes)
+                ).isoformat()
+                await self.requests.set_status(
+                    request["id"], "waiting",
+                    f"MissionChief error ({exc}); retrying in "
+                    f"~{delay_minutes} min",
                     bump_attempts=True, announce=False,
+                    next_attempt_at=retry_at,
                 )
             except Exception:
                 log.exception(

@@ -123,6 +123,11 @@ class FRABot(commands.Bot):
         )
         # The 12h board tidy-up: removes handled request posts (live only).
         self.board_cleanup = BoardCleanupService(cfg, self.mc, self.db)
+        # The automation watchdog: detects stuck training/building requests,
+        # re-kicks the queue where safe and reports blocking reasons.
+        from .services.watchdog import AutomationWatchdog
+
+        self.watchdog = AutomationWatchdog(cfg, self.db, self)
         # Member tax (5% donation) warnings — the old bot's system, ported.
         from .services.tax_warnings import TaxWarningService
 
@@ -160,6 +165,18 @@ class FRABot(commands.Bot):
         orphans = await RunsRepo(self.db).close_orphans()
         if orphans:
             log.info("Marked %d interrupted scrape run(s) as failed", orphans)
+        # Re-apply the operator's `!fra set` overrides on top of config.yaml
+        # BEFORE anything reads cfg — including the startup sweeps below:
+        # their requeue-vs-flag decision keys off dry_run, and deciding it
+        # from the YAML value while an override says otherwise mislabels
+        # every interrupted request on every restart.
+        from .core.settings import apply_stored_overrides
+        from .db.repos import StateRepo
+
+        for line in await apply_stored_overrides(self.cfg, StateRepo(self.db)):
+            log.info("settings: %s", line)
+        self.mc.reconfigure_pacing(self.cfg.missionchief)
+
         from .db.repos import AutomationRepo, MissionsRepo
 
         # In dry-run nothing real can have half-run, so re-queue an interrupted
@@ -177,15 +194,6 @@ class FRABot(commands.Bot):
                 "%s %d scheduled mission(s) interrupted mid-start",
                 "Re-queued" if requeue else "Flagged", stranded_missions,
             )
-        # Re-apply the operator's `!fra set` overrides on top of config.yaml
-        # BEFORE anything schedules jobs or caches values. The pacer was
-        # built pre-DB, so rewire it in case pacing was overridden.
-        from .core.settings import apply_stored_overrides
-        from .db.repos import StateRepo
-
-        for line in await apply_stored_overrides(self.cfg, StateRepo(self.db)):
-            log.info("settings: %s", line)
-        self.mc.reconfigure_pacing(self.cfg.missionchief)
 
         # Scheduled reports: keep the YAML list as the reset point, then
         # apply the operator's `!fra reports` override on top.
@@ -437,6 +445,15 @@ class FRABot(commands.Bot):
             minutes=automation.building.interval,
             name="board-buildings",
             initial_delay_seconds=210.0,
+        )
+        # The watchdog is ALWAYS registered, whatever the switches say —
+        # its whole point is to speak up when the pipeline is silently
+        # blocked (switch off, dead job, wedged lock, rotten login).
+        sched.add_interval_job(
+            self._guarded(self.watchdog.run, "automation-watchdog"),
+            minutes=10,
+            name="automation-watchdog",
+            initial_delay_seconds=420.0,
         )
         # Academy panel builds queued because funds were low: drain + retry.
         # The buttons themselves work regardless of this switch (they build on

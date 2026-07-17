@@ -929,6 +929,31 @@ class AutomationRepo:
         ) as cur:
             return list(await cur.fetchall())
 
+    async def stuck_actionable(
+        self, kind: str, *, older_minutes: int
+    ) -> list[aiosqlite.Row]:
+        """Claimable rows that have sat untouched for ``older_minutes`` —
+        the watchdog's definition of "stuck": due but nothing moved them."""
+        import datetime as _dt
+
+        cutoff = (
+            _dt.datetime.now(_dt.timezone.utc)
+            - _dt.timedelta(minutes=older_minutes)
+        ).isoformat()
+        async with self._db.conn.execute(
+            """
+            SELECT * FROM automation_requests
+            WHERE kind = ? AND (
+                status = 'pending'
+                OR (status = 'waiting'
+                    AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+            ) AND updated_at <= ?
+            ORDER BY id ASC
+            """,
+            (kind, utcnow_iso(), cutoff),
+        ) as cur:
+            return list(await cur.fetchall())
+
     async def claim(self, request_id: int) -> bool:
         """Move a request pending/waiting -> processing atomically.
 

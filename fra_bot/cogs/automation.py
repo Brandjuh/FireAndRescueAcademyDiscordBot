@@ -206,6 +206,7 @@ class AutomationCog(commands.Cog):
         self.bot = bot
         self._requests = AutomationRepo(bot.db)
         self._lock = asyncio.Lock()
+        self._warned_no_admin_log = False
         # Approve/deny buttons resolve their request id from the custom_id,
         # so they keep working across restarts.
         bot.add_dynamic_items(ApproveButton, DenyButton)
@@ -227,9 +228,17 @@ class AutomationCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _publish(self) -> None:
+        # An unresolved admin_log channel must not black out the WHOLE
+        # outcome layer: the admin embeds are skipped, but requester DMs
+        # still go out and rows still drain (they used to queue forever,
+        # so members never heard about their request either).
         channel = self.bot.channel_for("admin_log")
-        if channel is None:
-            return
+        if channel is None and not self._warned_no_admin_log:
+            log.warning(
+                "automation publisher: admin_log channel unresolved — "
+                "outcomes reach requester DMs only"
+            )
+            self._warned_no_admin_log = True
         for row in await self._requests.pending_announcements():
             label = _KIND_LABEL.get(row["kind"], row["kind"])
             icon = _STATUS_ICON.get(row["status"], "•")
@@ -266,22 +275,26 @@ class AutomationCog(commands.Cog):
                 embed.add_field(name="Details", value=details[:_FIELD_LIMIT], inline=False)
             if self.bot.cfg.automation.dry_run:
                 embed.set_footer(text="DRY-RUN — no MissionChief action was taken")
-            try:
-                await channel.send(embed=embed)
-            except discord.HTTPException as exc:
-                status = getattr(exc, "status", None)
-                if status is not None and 400 <= status < 500:
-                    log.error("Dropping unpostable automation embed (HTTP %s): %s", status, exc)
-                    await self._requests.mark_posted(row["id"])
-                    continue
-                log.warning("Transient failure posting automation embed (HTTP %s)", status)
-                return  # retry the rest next tick, preserving order
-            await self._requests.mark_posted(row["id"])
-            if not self.bot.cfg.automation.dry_run:
+            if channel is not None:
                 try:
-                    await self._notify_requester(row)
-                except Exception:
-                    log.exception("requester DM for request %s failed", row["id"])
+                    await channel.send(embed=embed)
+                except discord.HTTPException as exc:
+                    status = getattr(exc, "status", None)
+                    if status is not None and 400 <= status < 500:
+                        log.error("Dropping unpostable automation embed (HTTP %s): %s", status, exc)
+                        await self._requests.mark_posted(row["id"])
+                        continue
+                    log.warning("Transient failure posting automation embed (HTTP %s)", status)
+                    return  # retry the rest next tick, preserving order
+            await self._requests.mark_posted(row["id"])
+            # The requester DM happens regardless of the admin channel AND
+            # in dry-run (clearly marked): a member whose request was
+            # simulated used to hear nothing at all and assume a real class.
+            try:
+                await self._notify_requester(row)
+            except Exception:
+                log.exception("requester DM for request %s failed", row["id"])
+            if not self.bot.cfg.automation.dry_run:
                 if row["status"] == "failed" and row["kind"] in ("training", "building"):
                     try:
                         await self._post_approval(row)
@@ -301,6 +314,11 @@ class AutomationCog(commands.Cog):
         )
         if not text:
             return
+        if self.bot.cfg.automation.dry_run:
+            text = (
+                "🧪 **Dry-run simulation** — the bot is in test mode, no "
+                "real action was taken in the game.\n" + text
+            )
         user = self.bot.get_user(int(user_id))
         try:
             if user is None:
