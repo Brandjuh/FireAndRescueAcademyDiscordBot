@@ -349,6 +349,21 @@ class MissionScheduler:
 
     # -- the game's Saved Missions list (for the Discord chooser) --------
 
+    @staticmethod
+    def _clean_names(names: list) -> list[str]:
+        """Stripped, non-empty, de-duplicated (order kept). The game lets
+        players save several missions under the SAME caption; a Discord
+        select refuses duplicate or empty option values with an HTTP 400,
+        which killed the chooser before it could acknowledge the click."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for name in names:
+            text = str(name).strip()
+            if text and text not in seen:
+                seen.add(text)
+                out.append(text)
+        return out
+
     async def _cache_saved_missions(self, html: str) -> None:
         """Cache the Saved Missions dropdown captions from a large-mission
         form page. Best effort; an empty parse never clobbers a known list
@@ -357,6 +372,7 @@ class MissionScheduler:
             names = [s.caption for s in parse_saved_missions(html)]
         except Exception:  # noqa: BLE001 — the cache must never break a start
             return
+        names = self._clean_names(names)
         if not names:
             return
         await self.state.set(SAVED_MISSIONS_STATE_KEY, json.dumps({
@@ -365,7 +381,8 @@ class MissionScheduler:
         }))
 
     async def saved_mission_names(self) -> list[str]:
-        """The cached Saved Missions captions (may lag the game a little)."""
+        """The cached Saved Missions captions (may lag the game a little).
+        Cleaned on read too — old caches predate the cleaning on write."""
         raw = await self.state.get(SAVED_MISSIONS_STATE_KEY)
         if not raw:
             return []
@@ -374,7 +391,7 @@ class MissionScheduler:
         except ValueError:
             return []
         names = data.get("names") if isinstance(data, dict) else None
-        return [str(n) for n in names] if isinstance(names, list) else []
+        return self._clean_names(names) if isinstance(names, list) else []
 
     async def refresh_saved_missions(self) -> list[str]:
         """Fetch the large-mission form and refresh the Saved Missions

@@ -273,14 +273,26 @@ class MissionChooserView(discord.ui.View):
                 row=1,
             )
             self.source_select.callback = self._pick_source
-            if saved_names:
+            # Discord 400s the whole message on duplicate/empty option
+            # values (identical captions can collide after the 100-char
+            # truncation) — build the list defensively, whatever the
+            # cache holds.
+            options: list[discord.SelectOption] = []
+            seen: set[str] = set()
+            for name in saved_names or ():
+                value = str(name).strip()[:100]
+                if not value or value in seen:
+                    continue
+                seen.add(value)
+                options.append(
+                    discord.SelectOption(label=value, value=value, emoji="💾")
+                )
+                if len(options) == 25:
+                    break
+            if options:
                 self.saved_select = discord.ui.Select(
                     placeholder="💾 Saved missions — pick one",
-                    options=[
-                        discord.SelectOption(label=str(name)[:100],
-                                             value=str(name)[:100], emoji="💾")
-                        for name in saved_names
-                    ][:25],
+                    options=options,
                     row=2,
                 )
                 self.saved_select.callback = self._pick_saved
@@ -426,9 +438,32 @@ class MissionsCog(commands.Cog):
             saved_names = await self.service.saved_mission_names()
             if not saved_names:
                 saved_names = await self.repo.previous_saved_names()
-        await interaction.response.send_message(
-            text, view=MissionChooserView(self, kind, saved_names), ephemeral=True,
-        )
+        try:
+            await interaction.response.send_message(
+                text, view=MissionChooserView(self, kind, saved_names),
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            # A refused chooser (e.g. a select Discord rejects) must never
+            # dead-end the button: retry bare — the mission name can always
+            # be typed in the modal, the saved list is only convenience.
+            log.exception(
+                "mission chooser refused (kind=%s, %d saved names); "
+                "retrying without the saved list", kind, len(saved_names),
+            )
+            fallback = (
+                text + "\n-# ⚠️ The saved-missions list couldn't be shown "
+                "— pick a preset, or type the mission name after Continue."
+            )
+            send = (
+                interaction.followup.send
+                if interaction.response.is_done()
+                else interaction.response.send_message
+            )
+            await send(
+                fallback, view=MissionChooserView(self, kind, None),
+                ephemeral=True,
+            )
 
     async def submit_request(
         self,
