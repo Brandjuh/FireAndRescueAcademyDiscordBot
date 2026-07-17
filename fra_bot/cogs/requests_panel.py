@@ -326,6 +326,7 @@ class RequestsCog(commands.Cog):
         self.requests = AutomationRepo(bot.db)
         self.reminders = RemindersRepo(bot.db)
         self._lock = asyncio.Lock()
+        self._kick_tasks: set[asyncio.Task] = set()
         self.reminder_loop.start()
 
     def cog_unload(self) -> None:
@@ -425,13 +426,30 @@ class RequestsCog(commands.Cog):
         failure is retried by the normal poll — the request row is already
         committed."""
         async def _run() -> None:
+            lock = self.bot.job_lock("board-trainings")
             try:
-                async with self.bot.job_lock("board-trainings"):
-                    await self.bot.trainings.execute_queue_now()
+                # Bounded wait: if a poll holds the lock for minutes, give
+                # up — the scheduled poll will process the row anyway. An
+                # unbounded acquire could wedge behind a dead holder.
+                await asyncio.wait_for(lock.acquire(), timeout=120.0)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "immediate training kick skipped: board-trainings lock "
+                    "busy >120s (the scheduled poll will pick the row up)"
+                )
+                return
+            try:
+                await self.bot.trainings.execute_queue_now()
             except Exception:
                 log.exception("immediate training execution failed")
+            finally:
+                lock.release()
 
-        asyncio.get_running_loop().create_task(_run())
+        # Strong reference: an unreferenced task can be garbage-collected
+        # mid-flight, silently dropping the immediate first attempt.
+        task = asyncio.get_running_loop().create_task(_run())
+        self._kick_tasks.add(task)
+        task.add_done_callback(self._kick_tasks.discard)
 
     async def submit_building(
         self, interaction: discord.Interaction, link: str

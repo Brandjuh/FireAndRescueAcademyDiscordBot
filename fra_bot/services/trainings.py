@@ -622,7 +622,11 @@ class TrainingsService(BoardRequestService):
     async def execute_request(self, request, *, announce: bool) -> None:
         payload = json.loads(request["payload"] or "{}")
 
-        if "pending_trainings" in payload:
+        # TRUTHY check on purpose: a terminal attempt used to leave
+        # "pending_trainings": [] behind, and the key-presence check then
+        # turned every admin Approve-retry into a guaranteed no-op (zero
+        # courses -> "skipped: only ambiguous names found").
+        if payload.get("pending_trainings"):
             # Retry: only the trainings (and copy counts) still marked busy.
             match_counts = [
                 (
@@ -771,9 +775,16 @@ class TrainingsService(BoardRequestService):
             detail = "only ambiguous names found"
 
         # Preserve Discord flags (discord_user_id/remind/channel_id) across
-        # retries — the payload is rewritten every attempt.
+        # retries — the payload is rewritten every attempt. pending_trainings
+        # is only stored while there IS partial progress: an empty list on a
+        # terminal write would shadow the original course list on a later
+        # admin re-queue.
         merged = dict(payload)
-        merged.update({"results": results, "pending_trainings": pending})
+        merged["results"] = results
+        if pending:
+            merged["pending_trainings"] = pending
+        else:
+            merged.pop("pending_trainings", None)
         await self.requests.set_status(
             request_id,
             status,
@@ -906,17 +917,24 @@ class TrainingsService(BoardRequestService):
             # per building below) — an empty list means the API and the
             # alliance list both came back without one, i.e. detection broke
             # or the alliance really has no academy of this discipline.
-            log.warning(
-                "training: no %s academy found via /api/buildings or the "
-                "alliance building list", match.discipline,
+            # A ROTTED SESSION is the classic cause: some pages serve the
+            # login form at HTTP 200, which parses as an empty list — name
+            # it, so the retry detail (and the watchdog) show the real
+            # problem instead of an eternal "no academy found".
+            reason = (
+                f"no {match.discipline} academy could be found "
+                "(detection failed, or none is built)"
             )
-            return {
-                "status": "busy",
-                "reason": (
-                    f"no {match.discipline} academy could be found "
-                    "(detection failed, or none is built)"
-                ),
-            }
+            try:
+                if not await self.client.verify_session():
+                    reason = (
+                        "MissionChief session/login problem while listing "
+                        "academies — will retry after re-login"
+                    )
+            except Exception:  # noqa: BLE001 — the check is best-effort
+                pass
+            log.warning("training: %s", reason)
+            return {"status": "busy", "reason": reason}
 
         last_reason = "no suitable academy"
         busy = False
