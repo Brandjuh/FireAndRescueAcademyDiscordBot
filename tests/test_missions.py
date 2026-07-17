@@ -363,13 +363,74 @@ async def test_cooldown_queues_as_waiting(db):
     assert row["next_attempt_at"] is not None
 
 
-async def test_coin_form_refused(db):
+async def test_coin_form_waits_on_the_window_ladder(db):
+    # The free button not being available (form would spend coins) is a
+    # WAIT — 5 minutes first, then 30 — never a permanent failure: the
+    # planned request must start once the button appears.
+    import datetime as dt
+
     sched = _scheduler(_cfg(dry_run=False), FakeClient(_COIN), db)
     mid = await _enqueue(sched)
     await sched._advance()
     row = await sched.missions.get(mid)
-    assert row["status"] == "failed"
-    assert "coins" in row["status_detail"]
+    assert row["status"] == "waiting"
+    assert "not available yet" in row["status_detail"]
+    first = dt.datetime.fromisoformat(row["next_attempt_at"])
+    wait_min = (first - dt.datetime.now(dt.timezone.utc)).total_seconds() / 60
+    assert 3 <= wait_min <= 6  # first recheck ~5 minutes out
+
+    # Second refusal: the 30-minute step.
+    await sched.missions.set_status(
+        mid, "waiting", "again", next_attempt_at=None,
+    )
+    await sched._advance()
+    row = await sched.missions.get(mid)
+    second = dt.datetime.fromisoformat(row["next_attempt_at"])
+    wait_min = (second - dt.datetime.now(dt.timezone.utc)).total_seconds() / 60
+    assert 25 <= wait_min <= 33
+
+    # The moment the button appears, the PLANNED request starts.
+    await sched.missions.set_status(mid, "waiting", "due", next_attempt_at=None)
+    sched.client = FakeClient(_ELIGIBLE)
+    await sched._advance()
+    assert (await sched.missions.get(mid))["status"] == "done"
+
+
+async def test_rotation_keeps_turn_when_free_button_missing(db):
+    # A closed window must never DROP a rotation entry from the schedule
+    # (it used to be deactivated, letting the next entry jump the list).
+    sched = _scheduler(_cfg(dry_run=False), FakeClient(_COIN), db)
+    rid = await sched.rotation.add(
+        location_text="Planned City", created_by="admin", kind="large"
+    )
+    await sched._advance()
+    row = await sched.rotation.get(rid)
+    assert row["active"] == 1                    # still on the schedule
+    assert row["last_started_at"] is None        # turn kept
+
+    sched.client = FakeClient(_ELIGIBLE)
+    await sched._advance()                       # button appeared
+    assert (await sched.rotation.get(rid))["last_started_at"] is not None
+
+
+async def test_queue_head_blocks_younger_same_kind_requests(db):
+    # Strict list order: while the oldest large request waits for its
+    # window, a younger large request must NOT take it.
+    import datetime as dt
+
+    sched = _scheduler(_cfg(dry_run=False), FakeClient(_ELIGIBLE), db)
+    head = await _enqueue(sched, kind="large")
+    await sched.missions.claim(head)
+    await sched.missions.set_status(
+        head, "waiting", "window closed",
+        next_attempt_at=(
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=2)
+        ).isoformat(),
+    )
+    younger = await _enqueue(sched, kind="large")
+    await sched._advance()
+    assert (await sched.missions.get(younger))["status"] == "pending"
+    assert (await sched.missions.get(head))["status"] == "waiting"
 
 
 async def test_live_preset_verified_done(db):
@@ -1204,18 +1265,19 @@ async def test_closed_cooldown_checks_one_form_per_kind(db):
     assert len(form_fetches) == 1                       # one answer serves all
 
 
-async def test_transient_rechecks_are_bounded(db):
-    """Transient failures (form unreadable) don't share a cooldown, so each
-    item retries individually — but bounded, so one poll can't walk the
-    whole queue."""
-    from fra_bot.services.missions import _MAX_RECHECKS_PER_POLL
+async def test_only_the_kind_head_is_examined_per_poll(db):
+    """Strict list order: one poll only ever examines the HEAD of each
+    kind's queue — younger siblings are untouched (they used to be walked
+    under a recheck budget, and could even jump a parked head)."""
     client = FakeClient("<html><body>maintenance</body></html>")
     sched = _scheduler(_cfg(dry_run=True), client, db)
-    for i in range(_MAX_RECHECKS_PER_POLL + 3):
-        await _enqueue(sched, location_text=f"Spot {i}")
+    ids = [await _enqueue(sched, location_text=f"Spot {i}") for i in range(8)]
     await sched._advance()
     form_fetches = [p for p in client.fetched if "tlat" in p]
-    assert len(form_fetches) == _MAX_RECHECKS_PER_POLL
+    assert len(form_fetches) == 1                     # only the head
+    assert (await sched.missions.get(ids[0]))["status"] == "waiting"
+    for younger in ids[1:]:
+        assert (await sched.missions.get(younger))["status"] == "pending"
 
 
 async def test_queued_events_dont_starve_large_in_same_poll(db):
@@ -1437,11 +1499,12 @@ async def test_backoff_blocks_further_post_attempts(db):
     await sched._advance()                                 # refused → backoff
     assert client.post_calls == 1
     m2 = await _enqueue(sched)
-    await sched._advance()                                 # backoff: no POST
+    await sched._advance()                                 # head parked: no POST
     assert client.post_calls == 1
+    # Strict list order: the younger request is not even examined while
+    # the head waits out the backoff — it can never jump the list.
     row = await sched.missions.get(m2)
-    assert row["status"] == "waiting"
-    assert "busy" in row["status_detail"]
+    assert row["status"] == "pending"
 
 
 async def test_confirmed_start_arms_backoff_for_next_kind(db):

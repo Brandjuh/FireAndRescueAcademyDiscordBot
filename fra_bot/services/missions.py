@@ -113,6 +113,20 @@ _KIND_LABELS = {
 SCHEDULE_MARKER = "[FRA] 📅 Scheduled locations"
 
 
+def _window_ladder(attempts: int) -> str:
+    """Recheck time when the timestamps said the free window should be
+    open but the FREE start button is not on the form yet (the game lags,
+    or the previous mission is still winding down). The button is the
+    reference of truth, so recheck on a short ladder — 5 minutes first,
+    then 30 — and start the PLANNED item the moment it appears. Never
+    fail it, never let something else jump the list."""
+    minutes = 5 if attempts <= 0 else 30
+    return (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(minutes=minutes)
+    ).isoformat(timespec="seconds")
+
+
 def _transient_backoff(attempts: int) -> str:
     """Retry time for transient failures (unreadable form, HTTP error,
     geocode hiccup): grows with the attempt count, capped at the re-verify
@@ -780,6 +794,15 @@ class MissionScheduler:
     async def _process_queue(self) -> int:
         rechecks = 0
         blocked_kinds: set[str] = set()
+        # Strict list order per kind: only the OLDEST open request of a
+        # kind may take that kind's window. A younger sibling used to be
+        # able to start while the head sat parked waiting out its recheck
+        # — jumping the list and scrambling the schedule.
+        heads: dict[str, int] = {}
+        for kind in _KIND_LABELS:
+            head = await self.missions.open_for_kind(kind, limit=1)
+            if head:
+                heads[kind] = head[0]["id"]
         for mission in await self.missions.claimable():
             if mission["attempts"] >= MAX_ATTEMPTS:
                 if await self.missions.claim(mission["id"]):
@@ -789,6 +812,8 @@ class MissionScheduler:
                     )
                     await self._schedule_cleanup(mission["id"])
                 continue
+            if heads.get(mission["kind"]) != mission["id"]:
+                continue  # not this kind's head: keep the list order
             # The cooldown is per KIND and alliance-wide: once one event
             # answered "window closed", checking the other queued events is
             # pointless this poll — skip straight to the large items (and
@@ -959,7 +984,18 @@ class MissionScheduler:
             )
             return
         if outcome.state == "refused":
-            await self.missions.set_status(mid, "failed", outcome.detail)
+            # The free button is not available even though the timestamps
+            # said the window should be open. That is a WAIT on the window
+            # ladder (5 min, then 30), not a failure — permanently failing
+            # here retired scheduled requests over a lagging game page.
+            # MAX_ATTEMPTS still bounds a request that never becomes free.
+            await self.missions.set_status(
+                mid, "waiting",
+                f"{outcome.detail}; free start not available yet — "
+                "rechecking on the window ladder",
+                next_attempt_at=_window_ladder(mission["attempts"]),
+                bump_attempts=True, announce=False,
+            )
             return
         if outcome.state == "not_found":
             await self.missions.set_status(mid, "failed", outcome.detail)
@@ -1156,8 +1192,14 @@ class MissionScheduler:
             await self.rotation.deactivate_with_note(entry["id"], outcome.detail)
             return 0
         if outcome.state == "refused":
-            await self.rotation.deactivate_with_note(
-                entry["id"], "paused — form would spend coins"
+            # The free button is not there yet (game lagging, previous
+            # mission winding down). Deactivating here used to DROP the
+            # entry from the schedule and let the next one jump the list.
+            # The entry keeps its turn; the next polls re-check until the
+            # button appears, then the PLANNED entry starts.
+            log.info(
+                "rotation entry %s: free start not available yet — "
+                "keeping its turn", entry["id"],
             )
             return 0
         # started / dry_run both consume the entry's turn.
