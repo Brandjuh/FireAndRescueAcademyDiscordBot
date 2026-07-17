@@ -351,6 +351,15 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class WebConfig:
+    """The local web console. Binds to localhost by default — there is no
+    authentication yet, so only widen ``host`` on a trusted network."""
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8462
+
+
+@dataclass(frozen=True)
 class Config:
     database: DatabaseConfig
     missionchief: MissionChiefConfig
@@ -360,6 +369,7 @@ class Config:
     reports: ReportsConfig
     geocoding: GeocodingConfig
     logging: LoggingConfig
+    web: WebConfig = field(default_factory=WebConfig)
 
 
 def _require_env(name: str) -> str:
@@ -759,5 +769,10 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             path=Path(_get(raw, "logging", "path", default="logs/fra_bot.log")),
             max_bytes=int(_get(raw, "logging", "max_bytes", default=5 * 1024 * 1024)),
             backup_count=int(_get(raw, "logging", "backup_count", default=5)),
+        ),
+        web=WebConfig(
+            enabled=bool(_get(raw, "web", "enabled", default=False)),
+            host=str(_get(raw, "web", "host", default="127.0.0.1")),
+            port=int(_get(raw, "web", "port", default=8462)),
         ),
     )
