@@ -544,6 +544,18 @@ class MissionsCog(commands.Cog):
             discord_user_id=interaction.user.id,
             channel_id=interaction.channel_id,
         )
+        await self.bot.log_member_action(
+            action=(
+                "event_requested" if spec.kind == "event"
+                else "mission_requested"
+            ),
+            detail=f"{spec.describe()} at {spec.location_text} "
+                   f"(request #{mission_id})"
+                   + (" — recurring" if spec.recurring else ""),
+            discord_user_id=interaction.user.id,
+            mc_user_id=verdict.mc_user_id,
+            actor_name=interaction.user.display_name,
+        )
         note = "" if self.bot.cfg.automation.mission.enabled else (
             "\n_The mission scheduler is currently off, so this will wait until "
             "an admin enables it._"

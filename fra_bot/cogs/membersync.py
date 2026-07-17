@@ -151,6 +151,13 @@ class MemberSyncCog(commands.Cog):
             )
             return
         if outcome.outcome in ("approved", "approved_from_logs"):
+            await self.bot.log_member_action(
+                action="verified",
+                detail=f"linked to MC {outcome.mc_user_id}",
+                discord_user_id=ctx.author.id,
+                mc_user_id=outcome.mc_user_id,
+                actor_name=ctx.author.display_name,
+            )
             await self._grant_role(ctx.author, reason="MemberSync auto verified")
             await ctx.send(
                 "✅ **Verified!** Your account has been linked and you've "
@@ -210,6 +217,12 @@ class MemberSyncCog(commands.Cog):
     ) -> None:
         """Manually link a Discord member to an MC account and verify them."""
         await self.service.approve_manual(member.id, mc_id, ctx.author.id)
+        await self.bot.log_member_action(
+            action="verified",
+            detail=f"manually linked to MC {mc_id} by {ctx.author.display_name}",
+            discord_user_id=member.id, mc_user_id=mc_id,
+            actor_name=member.display_name,
+        )
         await self._grant_role(member, reason=f"MemberSync manual link by {ctx.author}")
         await self._dm(
             member,
@@ -275,6 +288,12 @@ class MemberSyncCog(commands.Cog):
                 continue
             await self.service.approve_manual(
                 discord_id, roster_row["mc_user_id"], reviewer_id=ctx.author.id
+            )
+            await self.bot.log_member_action(
+                action="verified",
+                detail=f"backfill link to MC {roster_row['mc_user_id']} (!verifyall)",
+                discord_user_id=discord_id, mc_user_id=roster_row["mc_user_id"],
+                actor_name=member.display_name,
             )
             await self._grant_role(member, reason="MemberSync backfill (!verifyall)")
             linked += 1

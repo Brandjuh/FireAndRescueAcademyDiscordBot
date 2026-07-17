@@ -1857,6 +1857,110 @@ class LinksRepo:
         )
 
 
+#: The profile sections a member manages themselves (column names).
+PROFILE_FIELDS = (
+    "timezone", "playtimes", "bio", "specialties", "birthday",
+    "vehicles", "buildings",
+)
+
+
+class MemberProfilesRepo:
+    """Self-managed member profiles (one row per Discord account)."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def get(self, discord_user_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM member_profiles WHERE discord_user_id = ?",
+            (discord_user_id,),
+        ) as cur:
+            return await cur.fetchone()
+
+    async def set_fields(self, discord_user_id: int, **fields: str | None) -> None:
+        """Upsert the given profile fields; empty strings clear a field."""
+        unknown = set(fields) - set(PROFILE_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown profile fields: {sorted(unknown)}")
+        if not fields:
+            return
+        now = utcnow_iso()
+        cleaned = {k: (v.strip() if isinstance(v, str) else v) or None
+                   for k, v in fields.items()}
+        columns = ", ".join(cleaned)
+        placeholders = ", ".join("?" for _ in cleaned)
+        updates = ", ".join(f"{k} = excluded.{k}" for k in cleaned)
+        await self._db.execute(
+            f"INSERT INTO member_profiles (discord_user_id, {columns}, "
+            "created_at, updated_at) "
+            f"VALUES (?, {placeholders}, ?, ?) "
+            "ON CONFLICT(discord_user_id) DO UPDATE SET "
+            f"{updates}, updated_at = excluded.updated_at",
+            (discord_user_id, *cleaned.values(), now, now),
+        )
+
+
+class MemberActionsRepo:
+    """Central log of every bot-side member action (the admin feed and
+    the per-member action history read from here)."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def log(
+        self, *, discord_user_id: int | None, mc_user_id: int | None,
+        actor_name: str | None, action: str, detail: str | None = None,
+    ) -> int:
+        return await self._db.execute_returning_id(
+            "INSERT INTO member_actions (discord_user_id, mc_user_id, "
+            "actor_name, action, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (discord_user_id, mc_user_id, actor_name, action,
+             detail, utcnow_iso()),
+        )
+
+    async def for_member(
+        self, *, discord_user_id: int | None = None,
+        mc_user_id: int | None = None, name: str | None = None,
+        limit: int = 25,
+    ) -> list[aiosqlite.Row]:
+        """A member's actions matched on ANY known handle. The name clause
+        matters for targets without any id (e.g. a sanction against a
+        departed, never-linked member) — id-only matching would hide those
+        rows from every per-member view forever."""
+        clauses, params = [], []
+        if discord_user_id is not None:
+            clauses.append("discord_user_id = ?")
+            params.append(discord_user_id)
+        if mc_user_id is not None:
+            clauses.append("mc_user_id = ?")
+            params.append(mc_user_id)
+        if name:
+            clauses.append("actor_name = ? COLLATE NOCASE")
+            params.append(name)
+        if not clauses:
+            return []
+        async with self._db.conn.execute(
+            f"SELECT * FROM member_actions WHERE {' OR '.join(clauses)} "
+            "ORDER BY id DESC LIMIT ?",
+            (*params, limit),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def pending_feed(self, limit: int = 20) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM member_actions WHERE posted_at IS NULL "
+            "ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def mark_posted(self, action_id: int) -> None:
+        await self._db.execute(
+            "UPDATE member_actions SET posted_at = ? WHERE id = ?",
+            (utcnow_iso(), action_id),
+        )
+
+
 class FaqRepo:
     """Custom FAQ entries (reference bot: faqmanager). Soft-deleted rows
     stay for history but never surface in search or listings."""

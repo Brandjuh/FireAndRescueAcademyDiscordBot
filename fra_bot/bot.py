@@ -207,6 +207,7 @@ class FRABot(commands.Bot):
         from .cogs.chat_bridge import ChatBridgeCog
         from .cogs.sanctions import SanctionsCog
         from .cogs.faq import FaqCog
+        from .cogs.profile import ProfileCog
         from .cogs.timeline import TimelineCog
         from .cogs.dossier import DossierCog, DossierPanelView
         from .cogs.eventpinger import EventPingerCog
@@ -238,6 +239,7 @@ class FRABot(commands.Bot):
         await self.add_cog(SanctionsCog(self))
         await self.add_cog(TimelineCog(self))
         await self.add_cog(FaqCog(self))
+        await self.add_cog(ProfileCog(self))
 
         # Persistent panels survive restarts; register their views.
         missions_cog = self.get_cog("MissionsCog")
@@ -810,6 +812,24 @@ class FRABot(commands.Bot):
             await channel.send(message[:1900])
         except discord.HTTPException as exc:
             log.warning("Could not post to admin channel: %s", exc)
+
+    async def log_member_action(
+        self, *, action: str, detail: str | None = None,
+        discord_user_id: int | None = None, mc_user_id: int | None = None,
+        actor_name: str | None = None,
+    ) -> None:
+        """Record a member's bot-side action in the central member-action
+        log (per-member history + the admin feed). MUST never break the
+        action it accompanies — failures are logged and swallowed."""
+        from .db.repos import MemberActionsRepo
+
+        try:
+            await MemberActionsRepo(self.db).log(
+                discord_user_id=discord_user_id, mc_user_id=mc_user_id,
+                actor_name=actor_name, action=action, detail=detail,
+            )
+        except Exception:  # noqa: BLE001 — bookkeeping must not break actions
+            log.exception("member action log failed (%s)", action)
 
     async def close(self) -> None:
         log.info("Shutting down…")

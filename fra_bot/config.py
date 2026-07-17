@@ -92,6 +92,9 @@ class DiscordChannels:
     chat_bridge: int = 0
     # Public sanction announcements; 0 = fall back to admin_log.
     sanctions: int = 0
+    # Admin feed of every member's bot-side action; 0 = feed off
+    # (actions still record for the per-member history).
+    member_actions: int = 0
 
 
 @dataclass(frozen=True)
@@ -495,6 +498,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 chat_bridge=int(channels.get("chat_bridge", 0)),
                 sanctions=int(channels.get("sanctions", 0)),
+                member_actions=int(channels.get("member_actions", 0)),
             ),
             admin_role_ids=tuple(
                 int(r) for r in (_get(raw, "discord", "admin_role_ids", default=[]) or [])

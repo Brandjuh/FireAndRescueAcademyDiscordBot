@@ -55,6 +55,9 @@ discord:
     member_events: 0      # joins / leaves / role & contribution changes
     alliance_logs: 0      # mirrored MissionChief alliance log feed
     reports: 0            # daily / monthly income reports
+    member_actions: 0     # admin feed of every member's bot-side action
+                          # (requests, verify, profile edits; 0 = feed off,
+                          # actions still record for the per-member view)
     admin_approvals: 0    # approve/deny embeds for requests needing a decision
     member_panel: 0       # member-management panel (dossier button)
     request_panel: 0      # training/building request panel
