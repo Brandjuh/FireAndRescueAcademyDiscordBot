@@ -31,11 +31,34 @@ _MAX_ZOOM = 11   # city level; higher would need more tiles for no benefit
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 _LAT_CAP = 85.05112878  # Web Mercator singularity guard
 
-#: Hotspot marker: warm "heat" orange with a soft two-step glow.
-_MARKER_FILL = (255, 106, 61, 235)
-_MARKER_GLOW_OUTER = (255, 106, 61, 26)
-_MARKER_GLOW_INNER = (255, 106, 61, 52)
-_MARKER_RING = (255, 255, 255, 230)
+#: Hotspot marker: warm "heat" orange, drawn as a translucent bubble with
+#: a solid rim over a smooth radial glow (kepler.gl-style graduated circles).
+_MARKER_COLOUR = (255, 106, 61)
+_BUBBLE_ALPHA = 72        # the basemap stays visible through the bubble
+_GLOW_PEAK_ALPHA = 95     # glow alpha at its centre, fading to 0
+_SS = 2                   # supersampling factor: markers render at 2x, then
+                          # downscale with Lanczos for anti-aliased edges
+
+_glow_sprite_cache = None
+
+
+def _glow_sprite():
+    """A cached greyscale radial-falloff sprite (quadratic ease-out), the
+    alpha mask for marker glows — a real gradient, not stepped rings."""
+    global _glow_sprite_cache
+    if _glow_sprite_cache is None:
+        from PIL import Image
+
+        size = 128
+        sprite = Image.new("L", (size, size), 0)
+        pixels = sprite.load()
+        centre = (size - 1) / 2
+        for j in range(size):
+            for i in range(size):
+                distance = math.hypot(i - centre, j - centre) / centre
+                pixels[i, j] = int(max(0.0, 1.0 - distance) ** 2 * 255)
+        _glow_sprite_cache = sprite
+    return _glow_sprite_cache
 
 
 @dataclass(frozen=True)
@@ -168,9 +191,13 @@ async def render_map(
     if image is None:
         return None
 
-    draw = ImageDraw.Draw(image, "RGBA")
+    # Markers render on a supersampled transparent overlay, then downscale
+    # onto the map — ImageDraw has no anti-aliasing of its own, and jagged
+    # circle edges are what makes a map look dated.
+    overlay = Image.new("RGBA", (width * _SS, height * _SS), (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
     try:
-        font = ImageFont.load_default(size=15)
+        font = ImageFont.load_default(size=14 * _SS)
     except TypeError:  # Pillow < 10.1 has no size parameter
         font = ImageFont.load_default()
     heaviest = max(weight for _, _, weight in points) or 1
@@ -178,24 +205,37 @@ async def render_map(
     # cells overlap, marker 1 must end up ON TOP of marker 2, not under it.
     markers = list(enumerate(zip(pixels, points), 1))
     for index, ((px, py), (_, _, weight)) in reversed(markers):
-        x = px - left
-        y = py - top
-        radius = 11 + 11 * math.sqrt(weight / heaviest)
-        for factor, glow_fill in ((1.9, _MARKER_GLOW_OUTER), (1.45, _MARKER_GLOW_INNER)):
-            glow = radius * factor
-            draw.ellipse((x - glow, y - glow, x + glow, y + glow), fill=glow_fill)
-        draw.ellipse(
-            (x - radius, y - radius, x + radius, y + radius),
-            fill=_MARKER_FILL, outline=_MARKER_RING, width=2,
+        x = (px - left) * _SS
+        y = (py - top) * _SS
+        radius = (12.0 + 14.0 * math.sqrt(weight / heaviest)) * _SS
+        glow_radius = int(radius * 2.1)
+        sprite = _glow_sprite().resize((glow_radius * 2, glow_radius * 2))
+        glow = Image.new("RGBA", sprite.size, _MARKER_COLOUR + (0,))
+        glow.putalpha(sprite.point(lambda v: v * _GLOW_PEAK_ALPHA // 255))
+        overlay.alpha_composite(
+            glow, (int(x - glow_radius), int(y - glow_radius))
         )
-        draw.text((x, y), str(index), font=font, fill=(255, 255, 255, 255),
-                  anchor="mm")
+        odraw.ellipse(
+            (x - radius, y - radius, x + radius, y + radius),
+            fill=_MARKER_COLOUR + (_BUBBLE_ALPHA,),
+            outline=_MARKER_COLOUR + (255,), width=2 * _SS,
+        )
+        shadow = 1.5 * _SS  # soft shadow keeps the number readable anywhere
+        odraw.text((x + shadow, y + shadow), str(index), font=font,
+                   fill=(0, 0, 0, 140), anchor="mm")
+        odraw.text((x, y), str(index), font=font,
+                   fill=(255, 255, 255, 255), anchor="mm")
+    overlay = overlay.resize((width, height), Image.LANCZOS)
+    image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
     # Attribution is required by the OSM/CARTO tile policies.
+    draw = ImageDraw.Draw(image, "RGBA")
     box_width = 16 + 6 * len(style.attribution)
-    draw.rectangle(
-        (width - box_width, height - 18, width, height), fill=style.attribution_bg
+    draw.rounded_rectangle(
+        (width - box_width - 6, height - 22, width - 6, height - 6),
+        radius=8, fill=style.attribution_bg,
     )
-    draw.text((width - box_width + 4, height - 16), style.attribution,
+    draw.text((width - box_width - 1, height - 19), style.attribution,
               fill=style.attribution_fg)
 
     out = io.BytesIO()
