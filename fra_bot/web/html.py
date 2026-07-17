@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import html as html_mod
 
-NAV = (
+#: Mutable on purpose: server.build_app appends each discovered
+#: handlers_<domain> module's NAV_ENTRY here.
+NAV: list[tuple[str, str]] = [
     ("/", "Dashboard"),
     ("/members", "Members"),
     ("/settings", "Settings"),
-)
+]
 
 _CSS = """
 :root { --bg:#17181d; --panel:#23242b; --panel2:#2b2c34; --ink:#ececf1;

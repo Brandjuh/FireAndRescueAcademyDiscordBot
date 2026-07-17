@@ -35,7 +35,42 @@ def build_app(bot) -> web.Application:
         web.get("/images/infographic.png", handlers.infographic_png),
         web.get("/images/fleet.png", handlers.fleet_png),
     ])
+    _register_domain_modules(app)
     return app
+
+
+def _register_domain_modules(app: web.Application) -> None:
+    """Auto-register every ``handlers_<domain>`` module in this package:
+    its ``ROUTES`` list joins the app, its optional ``NAV_ENTRY``
+    ``(path, label)`` joins the shared nav. One broken module is skipped
+    (and logged) rather than taking the whole console down — its own
+    tests catch the breakage."""
+    import importlib
+    import pkgutil
+
+    from . import __path__ as pkg_path
+    from .html import NAV
+
+    nav = list(NAV)
+    for module_info in sorted(pkgutil.iter_modules(pkg_path),
+                              key=lambda m: m.name):
+        if not module_info.name.startswith("handlers_"):
+            continue
+        try:
+            module = importlib.import_module(
+                f".{module_info.name}", package=__package__
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("web console: module %s failed to load",
+                        module_info.name, exc_info=True)
+            continue
+        app.add_routes(getattr(module, "ROUTES", []))
+        entry = getattr(module, "NAV_ENTRY", None)
+        if entry and tuple(entry) not in nav:
+            nav.append(tuple(entry))
+    # html.page() reads NAV at render time; settings stays last.
+    nav.sort(key=lambda item: item[0] == "/settings")
+    NAV[:] = nav
 
 
 class WebConsole:
