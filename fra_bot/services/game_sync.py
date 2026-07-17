@@ -140,11 +140,11 @@ class Hotspot:
     place: str | None = None  # reverse-geocoded name, filled by the cog
 
 
-def top_building_types(
-    by_type_dicts: list[dict], top: int = 6
+def _top_types(
+    by_type_dicts: list[dict], names: dict[int, str], top: int
 ) -> list[tuple[str, int]]:
-    """Alliance-wide building counts per type name, biggest first — the
-    members' per-type dicts summed, unknown types shown as "type N"."""
+    """The members' per-type dicts summed and ranked, ids resolved through
+    ``names`` with "type N" as fallback, garbage keys skipped."""
     totals: dict[int, int] = {}
     for by_type in by_type_dicts:
         for type_id, count in by_type.items():
@@ -154,9 +154,25 @@ def top_building_types(
                 continue
     ranked = sorted(totals.items(), key=lambda item: -item[1])[:top]
     return [
-        (BUILDING_TYPE_NAMES.get(type_id, f"type {type_id}"), count)
+        (names.get(type_id, f"type {type_id}"), count)
         for type_id, count in ranked
     ]
+
+
+def top_building_types(
+    by_type_dicts: list[dict], top: int = 6
+) -> list[tuple[str, int]]:
+    """Alliance-wide building counts per type name, biggest first."""
+    return _top_types(by_type_dicts, BUILDING_TYPE_NAMES, top)
+
+
+def top_vehicle_types(
+    by_type_dicts: list[dict], names: dict[int, str], top: int = 6
+) -> list[tuple[str, int]]:
+    """Alliance-wide vehicle counts per type name, biggest first. ``names``
+    is the LSSM id → name map (see the cog's cached fetch); an id the
+    catalog doesn't know degrades to "type N"."""
+    return _top_types(by_type_dicts, names, top)
 
 
 #: Nominatim address keys that name the locality, most specific first.

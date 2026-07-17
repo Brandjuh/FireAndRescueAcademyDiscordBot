@@ -4,8 +4,16 @@ import io
 
 import pytest
 
-from fra_bot.services.game_sync import Hotspot, top_building_types
-from fra_bot.services.infographic import AllianceSnapshot, render_infographic
+from fra_bot.services.game_sync import (
+    Hotspot,
+    top_building_types,
+    top_vehicle_types,
+)
+from fra_bot.services.infographic import (
+    AllianceSnapshot,
+    render_fleet_card,
+    render_infographic,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -54,6 +62,43 @@ def test_render_infographic_produces_a_png_card():
     image = Image.open(io.BytesIO(png))
     assert image.width == 1080
     assert image.height > 800          # header + tiles + chart + map + list
+
+
+def test_top_vehicle_types_resolves_names_with_fallback():
+    names = {30: "Type 1 fire engine", 2: "Platform truck"}
+    types = top_vehicle_types([{"30": 12, "2": 4}, {"30": 8, "99": 1}], names)
+    assert types[0] == ("Type 1 fire engine", 20)
+    assert ("Platform truck", 4) in types
+    assert ("type 99", 1) in types             # unknown id degrades, not fatal
+
+
+def test_vehicle_panel_grows_the_infographic():
+    without = render_infographic(_snapshot())
+    with_vehicles = render_infographic(_snapshot(
+        top_vehicle_types=[("type 1 fire engine", 300), ("ambulance", 120)],
+    ))
+    from PIL import Image
+
+    assert Image.open(io.BytesIO(with_vehicles)).height > \
+        Image.open(io.BytesIO(without)).height
+
+
+def test_render_fleet_card_produces_a_png():
+    from PIL import Image
+
+    png = render_fleet_card(
+        title="Fire & Rescue Academy", date_label="17 Jul 2026",
+        members_synced=12, vehicle_total=2450, type_count=38,
+        top_vehicle_types=[("type 1 fire engine", 402), ("ambulance", 118)],
+    )
+    assert png is not None
+    image = Image.open(io.BytesIO(png))
+    assert image.width == 1080 and image.height > 400
+    # Empty rows still render (tiles-only card).
+    assert render_fleet_card(
+        title="FRA", date_label="17 Jul 2026", members_synced=0,
+        vehicle_total=0, type_count=0, top_vehicle_types=[],
+    ) is not None
 
 
 def test_render_infographic_survives_minimal_data():

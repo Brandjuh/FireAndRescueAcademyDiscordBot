@@ -195,6 +195,35 @@ async def test_named_spots_survive_a_broken_geocoder():
     assert named[1].place is None    # geocoder error -> nameless, not a crash
 
 
+async def test_vehicle_names_cache_survives_a_broken_catalog(db, monkeypatch):
+    import fra_bot.cogs.game_sync as gs_cog
+    from fra_bot.db.repos import StateRepo
+
+    cog = GameSyncCog.__new__(GameSyncCog)
+    cog.bot = SimpleNamespace(db=db)
+
+    async def fake_catalog(session):
+        return [{"id": 30, "name": "Type 1 fire engine"}]
+
+    monkeypatch.setattr(
+        "fra_bot.mc.vehicles_catalog.fetch_catalog", fake_catalog
+    )
+    assert await cog._vehicle_names() == {30: "Type 1 fire engine"}
+
+    # Age the cache past the refresh window, then break the fetch: the
+    # stale cache must still answer instead of raising or returning {}.
+    state = StateRepo(db)
+    data = json.loads(await state.get(gs_cog.VEHICLE_NAMES_KEY))
+    data["fetched_at"] = "2020-01-01T00:00:00+00:00"
+    await state.set(gs_cog.VEHICLE_NAMES_KEY, json.dumps(data))
+
+    async def broken(session):
+        raise RuntimeError("github down")
+
+    monkeypatch.setattr("fra_bot.mc.vehicles_catalog.fetch_catalog", broken)
+    assert await cog._vehicle_names() == {30: "Type 1 fire engine"}
+
+
 async def test_place_name_picks_locality_and_region():
     assert place_name(
         {"city": "Jersey City", "state": "New Jersey", "country": "United States"}
