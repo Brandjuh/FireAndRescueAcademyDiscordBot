@@ -1920,8 +1920,13 @@ class MemberActionsRepo:
 
     async def for_member(
         self, *, discord_user_id: int | None = None,
-        mc_user_id: int | None = None, limit: int = 25,
+        mc_user_id: int | None = None, name: str | None = None,
+        limit: int = 25,
     ) -> list[aiosqlite.Row]:
+        """A member's actions matched on ANY known handle. The name clause
+        matters for targets without any id (e.g. a sanction against a
+        departed, never-linked member) — id-only matching would hide those
+        rows from every per-member view forever."""
         clauses, params = [], []
         if discord_user_id is not None:
             clauses.append("discord_user_id = ?")
@@ -1929,6 +1934,9 @@ class MemberActionsRepo:
         if mc_user_id is not None:
             clauses.append("mc_user_id = ?")
             params.append(mc_user_id)
+        if name:
+            clauses.append("actor_name = ? COLLATE NOCASE")
+            params.append(name)
         if not clauses:
             return []
         async with self._db.conn.execute(

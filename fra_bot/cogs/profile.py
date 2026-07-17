@@ -121,11 +121,18 @@ class SectionModal(discord.ui.Modal):
             values[field] = value
         await self._cog.profiles.set_fields(self._target.id, **values)
         changed = ", ".join(field for field, _ in self._inputs)
+        # The action files under the TARGET (their history, their feed
+        # line); an admin editing someone else's profile is named in the
+        # detail so neither surface reads as a self-edit.
+        by_admin = interaction.user.id != self._target.id
         await self._cog.bot.log_member_action(
             action="profile_updated",
-            detail=f"section: {SECTIONS[self._section][0]}",
+            detail=f"section: {SECTIONS[self._section][0]}" + (
+                f" (edited by {interaction.user.display_name})"
+                if by_admin else ""
+            ),
             discord_user_id=self._target.id,
-            actor_name=interaction.user.display_name,
+            actor_name=self._target.display_name,
         )
         suffix = (
             "" if interaction.user.id == self._target.id
@@ -189,14 +196,29 @@ class ProfileCog(commands.Cog):
             )
         filled = 0
         if row is not None:
+            # Discord caps the WHOLE embed at 6000 chars — seven fields of
+            # 1000 (the modal limit) would blow past it and 400 every view.
+            # Budget the remaining space across the filled fields.
+            budget = 5400 - sum(
+                len(str(part or ""))
+                for part in (embed.title, embed.description)
+            ) - sum(len(f.name or "") + len(f.value or "") for f in embed.fields)
             for field, label in _FIELD_LABELS.items():
                 value = row[field]
-                if value:
-                    filled += 1
-                    embed.add_field(
-                        name=label, value=str(value)[:1024],
-                        inline=field in ("timezone", "playtimes", "birthday"),
-                    )
+                if not value:
+                    continue
+                room = min(1024, budget - len(label))
+                if room <= 3:
+                    break  # embed is full; later sections are cut, not crashed
+                text = str(value)
+                if len(text) > room:
+                    text = text[: room - 1] + "…"
+                filled += 1
+                budget -= len(label) + len(text)
+                embed.add_field(
+                    name=label, value=text,
+                    inline=field in ("timezone", "playtimes", "birthday"),
+                )
             embed.set_footer(text=f"Laatst bijgewerkt: {row['updated_at'][:16]}")
         if filled == 0:
             embed.description = (

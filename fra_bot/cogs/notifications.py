@@ -288,14 +288,19 @@ class NotificationsCog(commands.Cog):
         channel_id = int(
             getattr(self.bot.cfg.discord.channels, "member_actions", 0) or 0
         )
-        channel = self.bot.get_channel(channel_id) if channel_id else None
         repo = MemberActionsRepo(self.bot.db)
-        if channel is None:
-            # Feed off (or channel unreachable): suppress instead of
-            # queueing, or enabling the feed later would flood it with
-            # all history. The per-member view reads the rows regardless.
+        if not channel_id:
+            # Feed OFF by config: suppress instead of queueing, or enabling
+            # the feed later would flood it with all history. The
+            # per-member view reads the rows regardless.
             for row in await repo.pending_feed(limit=100):
                 await repo.mark_posted(row["id"])
+            return
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            # Configured but momentarily unreachable (gateway re-identify,
+            # cache warm-up): KEEP the rows queued — suppressing here would
+            # silently discard feed entries.
             return
         for row in await repo.pending_feed():
             who = row["actor_name"] or (

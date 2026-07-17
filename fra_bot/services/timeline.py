@@ -144,10 +144,17 @@ async def build_timeline(
             source="sanctions",
         ))
 
-    # Bot-side member actions (requests, profile edits, verify, clicks).
+    # Bot-side member actions (requests, profile edits, clicks). Actions
+    # that MIRROR a richer source above (sanctions register, link
+    # approval) are skipped — they would show the same event twice and
+    # waste the event budget on duplicates.
+    _mirrored = {"sanction_received", "sanction_revoked", "verified"}
     for row in await MemberActionsRepo(db).for_member(
-        discord_user_id=discord_user_id, mc_user_id=mc_user_id, limit=100,
+        discord_user_id=discord_user_id, mc_user_id=mc_user_id,
+        name=name, limit=100,
     ):
+        if row["action"] in _mirrored:
+            continue
         events.append(TimelineEvent(
             at=row["created_at"],
             icon="🤖",

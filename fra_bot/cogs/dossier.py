@@ -134,6 +134,9 @@ class MemberBrowseView(discord.ui.View):
     async def show_profile(self, interaction, button) -> None:
         if not await self._guard(interaction):
             return
+        # fetch_user is a REST call: acknowledge BEFORE it, or a slow
+        # rate-limit bucket blows the 3-second component-ack window.
+        await interaction.response.defer()
         profile_cog = interaction.client.get_cog("ProfileCog")
         d = self._dossier
         if profile_cog is None or d.discord_id is None:
@@ -157,7 +160,7 @@ class MemberBrowseView(discord.ui.View):
                 )
             else:
                 embed = await profile_cog.profile_embed(user)
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="Tijdlijn", style=discord.ButtonStyle.secondary, emoji="📜")
     async def show_timeline(self, interaction, button) -> None:
@@ -185,6 +188,7 @@ class MemberBrowseView(discord.ui.View):
         d = self._dossier
         rows = await MemberActionsRepo(interaction.client.db).for_member(
             discord_user_id=d.discord_id, mc_user_id=d.mc_user_id,
+            name=d.name,
         )
         lines = [
             f"`{r['created_at'][:16]}` {r['action'].replace('_', ' ')}"
