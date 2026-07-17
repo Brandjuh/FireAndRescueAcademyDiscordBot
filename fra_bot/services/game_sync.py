@@ -138,6 +138,9 @@ class Hotspot:
     buildings: int
     members: int
     place: str | None = None  # reverse-geocoded name, filled by the cog
+    #: The distinct MC ids behind ``members`` — carried so a place-level
+    #: merge can union them instead of double-counting.
+    member_ids: frozenset = frozenset()
 
 
 def _top_types(
@@ -216,11 +219,52 @@ def cluster_hotspots(
             longitude=round((key[1] + 0.5) * grid, 4),
             buildings=cell["n"],
             members=len(cell["members"]),
+            member_ids=frozenset(cell["members"]),
         )
         for key, cell in cells.items()
     ]
     spots.sort(key=lambda s: (-s.buildings, -s.members))
     return spots[:top]
+
+
+def merge_by_place(spots: list[Hotspot], *, top: int = 12) -> list[Hotspot]:
+    """Named cells that resolve to the SAME place collapse into one entry:
+    buildings summed, distinct members unioned, the centre weighted by
+    building count. One metro area (every 11 km cell of New York is its
+    own hotspot) can no longer crowd every other city out of the list.
+    Nameless cells pass through untouched. Feed this MORE cells than
+    ``top`` (the callers cluster twice as wide) so merging leaves a full
+    list."""
+    groups: dict[str, list[Hotspot]] = {}
+    out: list[Hotspot] = []
+    for spot in spots:
+        if spot.place:
+            groups.setdefault(spot.place, []).append(spot)
+        else:
+            out.append(spot)
+    for place, group in groups.items():
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        buildings = sum(s.buildings for s in group)
+        ids = frozenset().union(*(s.member_ids for s in group))
+        # Without carried ids (hand-built spots) the true distinct count
+        # is unknowable; the biggest cell is the honest lower bound.
+        members = len(ids) if ids else max(s.members for s in group)
+        out.append(Hotspot(
+            latitude=round(
+                sum(s.latitude * s.buildings for s in group) / buildings, 4
+            ),
+            longitude=round(
+                sum(s.longitude * s.buildings for s in group) / buildings, 4
+            ),
+            buildings=buildings,
+            members=members,
+            place=place,
+            member_ids=ids,
+        ))
+    out.sort(key=lambda s: (-s.buildings, -s.members))
+    return out[:top]
 
 
 def render_hotspots(

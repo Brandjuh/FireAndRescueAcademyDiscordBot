@@ -25,6 +25,7 @@ from ..db.repos import GameSyncRepo, LinksRepo
 from ..services.game_sync import (
     SyncPayloadError,
     cluster_hotspots,
+    merge_by_place,
     parse_sync_payload,
     place_name,
     render_hotspots,
@@ -219,10 +220,14 @@ class GameSyncCog(commands.Cog):
         """Where the alliance's buildings cluster: `!hotspots [cell-km]`."""
         grid = max(1, min(int(grid_km), 200)) / 111.0  # ~degrees per km
         member_coords, _, _, building_total, _ = await self._sync_stats()
-        # Naming (≤12 Nominatim lookups at 1 req/s, cached forever per
-        # cell) and tile fetching can take ~15 s on a cold cache.
+        # Naming (≤24 Nominatim lookups at 1 req/s, cached forever per
+        # cell) and tile fetching can take ~30 s on a cold cache. Cluster
+        # twice as wide as the list, then merge same-place cells so one
+        # metro area doesn't fill the whole top-12.
         async with ctx.typing():
-            spots = await self._named(cluster_hotspots(member_coords, grid=grid))
+            spots = merge_by_place(await self._named(
+                cluster_hotspots(member_coords, grid=grid, top=24)
+            ))
             text = render_hotspots(
                 spots, member_total=len(member_coords),
                 building_total=building_total,
@@ -251,7 +256,9 @@ class GameSyncCog(commands.Cog):
             await ctx.send(render_hotspots([], member_total=0, building_total=0))
             return
         async with ctx.typing():
-            spots = await self._named(cluster_hotspots(member_coords, grid=grid))
+            spots = merge_by_place(await self._named(
+                cluster_hotspots(member_coords, grid=grid, top=24)
+            ))
             snapshot = AllianceSnapshot(
                 title="Fire & Rescue Academy",
                 date_label=dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y"),

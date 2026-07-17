@@ -473,6 +473,7 @@ async def infographic_png(request: web.Request) -> web.Response:
 
     from ..services.game_sync import (
         cluster_hotspots,
+        merge_by_place,
         top_building_types,
         top_vehicle_types,
     )
@@ -481,7 +482,9 @@ async def infographic_png(request: web.Request) -> web.Response:
     cog = await _game_sync_cog(request)
     (member_coords, building_dicts, vehicle_dicts,
      building_total, vehicle_total) = await cog._sync_stats()
-    spots = await cog._named(cluster_hotspots(member_coords))
+    spots = merge_by_place(await cog._named(
+        cluster_hotspots(member_coords, top=24)
+    ))
     card = render_infographic(AllianceSnapshot(
         title="Fire & Rescue Academy",
         date_label=dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y"),
