@@ -8,13 +8,13 @@ database:
   path: data/fra_bot.sqlite3
 
 web:
-  # The local web console (dashboard, member management, settings) served
-  # from inside the bot process. There is NO authentication yet: keep host
-  # on 127.0.0.1 unless the network itself is trusted, and reach it from
-  # another machine via an SSH tunnel:
-  #   ssh -L 8462:127.0.0.1:8462 pi@<bot-host>   ->  http://localhost:8462/
-  enabled: false
-  host: 127.0.0.1
+  # The operator web console (dashboard, member management, settings)
+  # served from inside the bot process: http://<pi-ip>:8462/ on the home
+  # network. Every page requires the operator password — WEB_PASSWORD in
+  # .env, or the generated one shown by `!fra web` in Discord. Set host
+  # to 127.0.0.1 to restrict the console to the Pi itself again.
+  enabled: true
+  host: 0.0.0.0
   port: 8462
 
 missionchief:

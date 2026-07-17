@@ -568,6 +568,43 @@ class AdminCog(commands.Cog):
         log.info("Self-update applied (%s); restarting", result.summary)
         await self._restart_process()
 
+    @fra.command(name="web")
+    async def web_info(self, ctx: commands.Context) -> None:
+        """Web console address + operator password (password via DM)."""
+        from ..web.server import lan_ip, resolve_password
+
+        cfg = self.bot.cfg.web
+        if not cfg.enabled:
+            await ctx.send(
+                "🌐 Web console is **off** — set `web.enabled: true` in "
+                "config.yaml and `!fra restart`."
+            )
+            return
+        address = lan_ip() or "127.0.0.1"
+        running = getattr(self.bot, "web", None) is not None
+        lines = [
+            f"🌐 Web console: **http://{address}:{cfg.port}/**"
+            + ("" if running else " *(starts after the next restart)*"),
+        ]
+        if cfg.host == "127.0.0.1":
+            lines.append(
+                "Bound to the Pi only (`web.host: 127.0.0.1`) — reach it "
+                f"with `ssh -L {cfg.port}:127.0.0.1:{cfg.port} <pi>`."
+            )
+        password = await resolve_password(self.bot.db)
+        # The password never lands in a channel — DM it, channel fallback
+        # self-destructs.
+        try:
+            await ctx.author.send(f"🔑 Web console password: `{password}`")
+            lines.append("The password is in your DM. 🔑")
+        except discord.HTTPException:
+            await ctx.send(
+                f"🔑 Password: `{password}` *(DMs closed — this message "
+                "deletes itself in 60s)*",
+                delete_after=60,
+            )
+        await ctx.send("\n".join(lines))
+
     @fra.command(name="restart")
     async def restart(self, ctx: commands.Context) -> None:
         """Restart the bot (reloads config.yaml / .env) without updating code."""
