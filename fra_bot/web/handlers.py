@@ -285,7 +285,7 @@ async def member_detail(request: web.Request) -> web.Response:
         f"<p>{status} {link_line} · MC id <code>{mc_user_id}</code> · "
         f"rank {esc(dossier.role or '—')} · credits {credits} · "
         f"contribution {rate} · "
-        f"<a href='https://www.missionchief.com/users/{mc_user_id}' "
+        f"<a href='https://www.missionchief.com/profile/{mc_user_id}' "
         "target='_blank'>game profile ↗</a></p>"
         "<div class='grid2'>"
         f"<div class='panel'><h2>Profile</h2>{profile_html}</div>"
@@ -454,7 +454,15 @@ async def post_settings(request: web.Request) -> web.Response:
         log.warning("web settings: post_apply failed for %s", key, exc_info=True)
     log.info("web settings: %s = %s (via %s)", key, rt.format_value(parsed),
              WEB_ACTOR)
-    _redirect("/settings", ok=f"{key} = {rt.format_value(parsed)}")
+    # Same safety messaging as !fra set: the operator must see when a
+    # change is restart-gated, and MUST see when the bot goes live.
+    message = f"{key} = {rt.format_value(parsed)}"
+    if not setting.live:
+        message += " — takes effect after a restart"
+    if setting.path == "automation.dry_run" and parsed is False:
+        message += (" — WARNING: dry-run is OFF, the bot will now perform "
+                    "REAL MissionChief actions")
+    _redirect("/settings", ok=message)
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +476,41 @@ async def _game_sync_cog(request: web.Request):
     return cog
 
 
+#: Rendered PNGs cached in memory: the dashboard embeds both images, so
+#: every landing-page load would otherwise re-geocode + re-download map
+#: tiles from third parties. The data only changes when a member syncs.
+_IMAGE_TTL_SECONDS = 600.0
+_image_cache: dict[str, tuple[float, bytes]] = {}
+_image_locks: dict[str, "asyncio.Lock"] = {}
+
+
+async def _cached_png(key: str, build) -> bytes | None:
+    import asyncio
+    import time
+
+    hit = _image_cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _IMAGE_TTL_SECONDS:
+        return hit[1]
+    lock = _image_locks.setdefault(key, asyncio.Lock())
+    async with lock:  # single-flight: parallel loads render once
+        hit = _image_cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < _IMAGE_TTL_SECONDS:
+            return hit[1]
+        png = await build()
+        if png is not None:
+            _image_cache[key] = (time.monotonic(), png)
+        return png
+
+
+def _png_response(png: bytes | None) -> web.Response:
+    if png is None:
+        raise web.HTTPNotFound(text="Renderer unavailable")
+    return web.Response(body=png, content_type="image/png",
+                        headers={"Cache-Control": "private, max-age=600"})
+
+
 async def infographic_png(request: web.Request) -> web.Response:
+    import asyncio
     import datetime as dt
 
     from ..services.game_sync import (
@@ -480,58 +522,64 @@ async def infographic_png(request: web.Request) -> web.Response:
     from ..services.infographic import AllianceSnapshot, render_infographic
 
     cog = await _game_sync_cog(request)
-    (member_coords, building_dicts, vehicle_dicts,
-     building_total, vehicle_total) = await cog._sync_stats()
-    spots = merge_by_place(await cog._named(
-        cluster_hotspots(member_coords, top=24)
-    ))
-    card = render_infographic(AllianceSnapshot(
-        title="Fire & Rescue Academy",
-        date_label=dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y"),
-        members_synced=len(member_coords),
-        building_total=building_total,
-        vehicle_total=vehicle_total,
-        top_types=top_building_types(building_dicts),
-        top_vehicle_types=top_vehicle_types(
-            vehicle_dicts, await cog._vehicle_names()
-        ),
-        spots=spots,
-        map_png=await cog._map_image(spots),
-    ))
-    if card is None:
-        raise web.HTTPNotFound(text="Renderer unavailable")
-    return web.Response(body=card, content_type="image/png",
-                        headers={"Cache-Control": "no-store"})
+
+    async def build() -> bytes | None:
+        (member_coords, building_dicts, vehicle_dicts,
+         building_total, vehicle_total) = await cog._sync_stats()
+        spots = merge_by_place(await cog._named(
+            cluster_hotspots(member_coords, top=24)
+        ))
+        snapshot = AllianceSnapshot(
+            title="Fire & Rescue Academy",
+            date_label=dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y"),
+            members_synced=len(member_coords),
+            building_total=building_total,
+            vehicle_total=vehicle_total,
+            top_types=top_building_types(building_dicts),
+            top_vehicle_types=top_vehicle_types(
+                vehicle_dicts, await cog._vehicle_names()
+            ),
+            spots=spots,
+            map_png=await cog._map_image(spots),
+        )
+        # Pillow work is CPU-bound: keep it off the bot's event loop.
+        return await asyncio.to_thread(render_infographic, snapshot)
+
+    return _png_response(await _cached_png("infographic", build))
 
 
 async def fleet_png(request: web.Request) -> web.Response:
+    import asyncio
     import datetime as dt
+    import functools
 
     from ..services.game_sync import top_vehicle_types
     from ..services.infographic import render_fleet_card
 
     cog = await _game_sync_cog(request)
-    member_coords, _, vehicle_dicts, _, vehicle_total = await cog._sync_stats()
-    type_ids = set()
-    for by_type in vehicle_dicts:
-        for key in by_type:
-            try:
-                type_ids.add(int(key))
-            except (TypeError, ValueError):
-                continue
-    card = render_fleet_card(
-        title="Fire & Rescue Academy",
-        date_label=dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y"),
-        members_synced=len(member_coords), vehicle_total=vehicle_total,
-        type_count=len(type_ids),
-        top_vehicle_types=top_vehicle_types(
-            vehicle_dicts, await cog._vehicle_names(), top=10
-        ),
-    )
-    if card is None:
-        raise web.HTTPNotFound(text="Renderer unavailable")
-    return web.Response(body=card, content_type="image/png",
-                        headers={"Cache-Control": "no-store"})
+
+    async def build() -> bytes | None:
+        (member_coords, _, vehicle_dicts,
+         _, vehicle_total) = await cog._sync_stats()
+        type_ids = set()
+        for by_type in vehicle_dicts:
+            for key in by_type:
+                try:
+                    type_ids.add(int(key))
+                except (TypeError, ValueError):
+                    continue
+        return await asyncio.to_thread(functools.partial(
+            render_fleet_card,
+            title="Fire & Rescue Academy",
+            date_label=dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y"),
+            members_synced=len(member_coords), vehicle_total=vehicle_total,
+            type_count=len(type_ids),
+            top_vehicle_types=top_vehicle_types(
+                vehicle_dicts, await cog._vehicle_names(), top=10
+            ),
+        ))
+
+    return _png_response(await _cached_png("fleet", build))
 
 
 async def health(request: web.Request) -> web.Response:

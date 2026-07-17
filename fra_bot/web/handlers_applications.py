@@ -170,41 +170,66 @@ async def applications_page(request: web.Request) -> web.Response:
     )
 
 
+#: Serializes decisions: two rapid clicks (or accept vs deny) must not
+#: both pass the pending check and fire the game action twice.
+_decide_lock: "asyncio.Lock | None" = None
+
+
 async def _decide(request: web.Request, action: str) -> web.Response:
+    import asyncio
+
+    global _decide_lock
+    if _decide_lock is None:
+        _decide_lock = asyncio.Lock()
     bot = _bot(request)
     application_id = int(request.match_info["app_id"])
-    row = await ApplicationsRepo(bot.db).get(application_id)
-    if row is None:
-        _redirect("/applications",
-                  err=f"Application #{application_id} is unknown.")
-    if row["resolved_at"]:
-        _redirect("/applications",
-                  err=f"Application #{application_id} was already handled.")
-    name = row["applicant_name"]
-    # Same gate as NotificationsCog.handle_application_action: the service
-    # itself never checks dry_run, so the caller must — dry-run reports the
-    # would-be action and touches neither the game nor the database.
-    if bot.cfg.automation.dry_run:
-        _redirect(
-            "/applications",
-            ok=f"[dry-run] would {action} {name} — no game action taken.",
-        )
-    service = getattr(bot, "applications_sync", None)
-    if service is None:
-        _redirect("/applications", err="Applications service is unavailable.")
-    try:
-        if action == "accept":
-            await service.accept(application_id)
-        else:
-            await service.deny(application_id)
-    except MissionChiefError as exc:
-        _redirect("/applications", err=f"Could not {action} {name}: {exc}")
+    async with _decide_lock:
+        # Check-then-act stays inside the lock: the row is re-read here so
+        # the second of two racing POSTs sees resolved_at and bails.
+        row = await ApplicationsRepo(bot.db).get(application_id)
+        if row is None:
+            _redirect("/applications",
+                      err=f"Application #{application_id} is unknown.")
+        if row["resolved_at"]:
+            _redirect("/applications",
+                      err=f"Application #{application_id} was already handled.")
+        name = row["applicant_name"]
+        # Same gate as NotificationsCog.handle_application_action: the
+        # service itself never checks dry_run, so the caller must —
+        # dry-run reports the would-be action and touches nothing.
+        if bot.cfg.automation.dry_run:
+            _redirect(
+                "/applications",
+                ok=f"[dry-run] would {action} {name} — no game action taken.",
+            )
+        service = getattr(bot, "applications_sync", None)
+        if service is None:
+            _redirect("/applications",
+                      err="Applications service is unavailable.")
+        try:
+            if action == "accept":
+                await service.accept(application_id)
+            else:
+                await service.deny(application_id)
+        except MissionChiefError as exc:
+            _redirect("/applications", err=f"Could not {action} {name}: {exc}")
     verb = "accepted" if action == "accept" else "denied"
     await bot.log_member_action(
         action=f"application_{verb}",
         detail=f"application #{application_id}: {name} (via {WEB_ACTOR})",
         mc_user_id=row["mc_user_id"], actor_name=name,
     )
+    # The Discord button flow announces who decided in the admin log —
+    # console decisions must be equally visible there.
+    notify = getattr(bot, "notify_admin", None)
+    if notify is not None:
+        try:
+            await notify(
+                f"📋 Application #{application_id} ({name}) {verb} "
+                f"via {WEB_ACTOR}."
+            )
+        except Exception:  # noqa: BLE001 — announcements are best-effort
+            log.warning("applications: admin notice failed", exc_info=True)
     _redirect("/applications", ok=f"{verb.capitalize()} {name}.")
 
 

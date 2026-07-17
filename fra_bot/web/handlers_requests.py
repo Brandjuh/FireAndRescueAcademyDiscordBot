@@ -48,7 +48,7 @@ from .html import badge, esc, page, tile
 log = logging.getLogger(__name__)
 
 _LIST_LIMIT = 200
-_KINDS = ("training", "building", "event")
+_KINDS = ("training", "building", "event", "academy")
 _STATUSES = ("pending", "waiting", "processing", "done", "failed", "skipped")
 _STATUS_BADGE = {"done": "ok", "failed": "off"}
 #: Same academies (and labels) as the Discord chooser, emoji-free.
@@ -218,7 +218,9 @@ async def requests_page(request: web.Request) -> web.Response:
         if updated != created:
             when += f"<br><span class='muted'>upd {esc(updated)}</span>"
         action = ""
-        if row["status"] in ("failed", "skipped"):
+        # Only real failures get a retry — the Discord flow never
+        # re-queues 'skipped' rows (intake rejections, dry-run simulations).
+        if row["status"] == "failed":
             action = (
                 "<form class='inline' method='post' "
                 f"action='/requests/{row['id']}/requeue'>"
@@ -408,6 +410,14 @@ async def post_requeue(request: web.Request) -> web.Response:
     row = await repo.get(request_id)
     if row is None:
         _redirect("/requests", err=f"Request #{request_id} not found.")
+    if row["status"] != "failed":
+        # 'skipped' rows are intake rejections or dry-run simulations —
+        # the Discord flow never re-queues those, so neither does the web.
+        _redirect(
+            "/requests",
+            err=f"Request #{request_id} is {row['status']} — only "
+                "failed requests can be re-queued.",
+        )
     data = _payload_data(row["payload"])
     # Like the Approve button: a fresh attempt is intentional, so the
     # verify-only flag is cleared before re-queueing.
@@ -415,8 +425,7 @@ async def post_requeue(request: web.Request) -> web.Response:
     if not await repo.requeue(request_id, payload=json.dumps(data)):
         _redirect(
             "/requests",
-            err=f"Request #{request_id} is {row['status']} — only "
-                "failed/skipped requests can be re-queued.",
+            err=f"Request #{request_id} could not be re-queued.",
         )
     await bot.log_member_action(
         action="request_requeued",

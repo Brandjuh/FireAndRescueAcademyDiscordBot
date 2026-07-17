@@ -105,7 +105,14 @@ def page(title: str, body: str, *, active: str = "/",
         f"<style>{_CSS}</style></head><body>"
         "<header><span class='brand'>FIRE &amp; RESCUE ACADEMY</span>"
         f"<nav>{nav}</nav></header>"
-        f"<main>{notice}<h1>{esc(title)}</h1>{body}</main></body></html>"
+        f"<main>{notice}<h1>{esc(title)}</h1>{body}</main>"
+        # Double-click guard: the browser still submits the form once, but
+        # the button greys out so a nervous second click can't enqueue a
+        # duplicate real action.
+        "<script>document.addEventListener('submit',function(e){"
+        "var b=e.target.querySelector('button');"
+        "if(b){setTimeout(function(){b.disabled=true;},0);}});"
+        "</script></body></html>"
     )
 
 

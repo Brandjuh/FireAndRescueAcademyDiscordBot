@@ -34,6 +34,18 @@ log = logging.getLogger(__name__)
 
 _LIST_LIMIT = 300
 
+#: reviewer_id sentinel for console-made links: 0 already means "auto"
+#: (migration 0008), real admins carry their Discord id — the console
+#: needs its own value so the audit trail shows who really decided.
+CONSOLE_REVIEWER_ID = -1
+
+
+def _reviewer_badge(reviewer_id) -> str:
+    reviewer_id = int(reviewer_id or 0)
+    if reviewer_id == CONSOLE_REVIEWER_ID:
+        return badge("console", "dim")
+    return badge("auto") if reviewer_id == 0 else badge("admin")
+
 _LINKS_SELECT = (
     "SELECT l.discord_id, l.mc_user_id, l.status, l.reviewer_id, "
     "l.created_at, m.name AS mc_name, m.is_active AS mc_active "
@@ -89,7 +101,7 @@ async def verification_page(request: web.Request) -> web.Response:
         f"<td><code>{int(row['discord_id'])}</code></td>"
         f"<td>{_member_cell(row)}</td>"
         f"<td><code>{int(row['mc_user_id'])}</code></td>"
-        f"<td>{badge('auto') if not row['reviewer_id'] else badge('admin')}</td>"
+        f"<td>{_reviewer_badge(row['reviewer_id'])}</td>"
         f"<td>{esc(str(row['created_at'])[:16])}</td>"
         f"<td>{_unlink_form(row['discord_id'])}</td>"
         "</tr>"
@@ -187,9 +199,11 @@ async def post_link(request: web.Request) -> web.Response:
     ) as cur:
         member = await cur.fetchone()
     # The exact repo path !link uses: approved upsert + queue removal.
-    # reviewer_id 0 mirrors the console's admin_discord_id=0 convention.
+    # reviewer_id 0 is the AUTO-verified sentinel (migration 0008); a
+    # console decision must stay distinguishable in the audit trail, so
+    # it gets its own sentinel.
     await MemberSyncService(bot.db).approve_manual(
-        discord_id, mc_user_id, reviewer_id=0
+        discord_id, mc_user_id, reviewer_id=CONSOLE_REVIEWER_ID
     )
     await bot.log_member_action(
         action="verified",

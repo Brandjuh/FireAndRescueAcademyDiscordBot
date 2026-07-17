@@ -17,8 +17,44 @@ from . import handlers
 log = logging.getLogger(__name__)
 
 
+#: Hostnames the console answers to. Combined with the same-origin POST
+#: check below this closes the two holes a localhost bind leaves open:
+#: DNS rebinding (attacker domain resolving to 127.0.0.1 — their Host
+#: header is the attacker domain) and cross-site form POSTs (any web
+#: page can auto-submit a form to 127.0.0.1 without a CORS preflight).
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _security_middleware(extra_host: str | None):
+    allowed = _LOCAL_HOSTS | ({extra_host} if extra_host else set())
+
+    @web.middleware
+    async def middleware(request: web.Request, handler):
+        if request.url.host not in allowed:
+            raise web.HTTPForbidden(text="Unknown Host")
+        if request.method not in ("GET", "HEAD"):
+            origin = request.headers.get("Origin")
+            if origin:
+                from yarl import URL
+
+                origin_url = URL(origin)
+                if (origin_url.host != request.url.host
+                        or origin_url.port != request.url.port):
+                    raise web.HTTPForbidden(text="Cross-origin POST refused")
+            else:
+                fetch_site = request.headers.get("Sec-Fetch-Site")
+                if fetch_site not in (None, "same-origin", "none"):
+                    raise web.HTTPForbidden(text="Cross-site POST refused")
+        return await handler(request)
+
+    return middleware
+
+
 def build_app(bot) -> web.Application:
-    app = web.Application()
+    web_cfg = getattr(bot.cfg, "web", None)
+    app = web.Application(middlewares=[
+        _security_middleware(getattr(web_cfg, "host", None)),
+    ])
     app["bot"] = bot
     app.add_routes([
         web.get("/", handlers.index),

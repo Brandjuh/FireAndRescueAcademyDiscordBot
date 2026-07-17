@@ -131,7 +131,7 @@ async def test_manual_link_matches_the_link_command_repo_path(client):
     links = LinksRepo(client.bot.db)
     row = await links.get_by_discord(777)
     assert row is not None and row["status"] == "approved"
-    assert row["mc_user_id"] == 202 and row["reviewer_id"] == 0
+    assert row["mc_user_id"] == 202 and row["reviewer_id"] == -1  # console sentinel, not the auto-verify 0
     assert await links.queue_get(777) is None
     action = client.bot.actions[0]
     assert action["action"] == "verified"
