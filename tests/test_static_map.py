@@ -46,19 +46,35 @@ async def test_render_map_returns_png_with_requested_size(monkeypatch):
 
     tile = _png_tile()
 
-    async def fake_fetch(session, zoom, x, y):
+    async def fake_fetch(session, template, zoom, x, y):
         return tile
 
     monkeypatch.setattr(sm, "_fetch_tile", fake_fetch)
     png = await sm.render_map([(40.7, -74.0, 10), (40.8, -74.1, 3)])
     assert png is not None
     image = Image.open(io.BytesIO(png))
-    assert image.size == (900, 600)
+    assert image.size == (1000, 667)
+
+
+async def test_render_map_falls_back_to_the_second_tile_style(monkeypatch):
+    tile = _png_tile()
+    asked = []
+
+    async def fake_fetch(session, template, zoom, x, y):
+        asked.append(template)
+        # Primary (CARTO) unreachable; classic OSM still answers.
+        return tile if "openstreetmap" in template else None
+
+    monkeypatch.setattr(sm, "_fetch_tile", fake_fetch)
+    png = await sm.render_map([(40.7, -74.0, 5)])
+    assert png is not None
+    assert any("cartocdn" in template for template in asked)      # tried first
+    assert any("openstreetmap" in template for template in asked)  # then fell back
 
 
 async def test_render_map_without_any_tile_returns_none(monkeypatch):
-    async def fake_fetch(session, zoom, x, y):
-        return None   # tile server unreachable
+    async def fake_fetch(session, template, zoom, x, y):
+        return None   # every tile server unreachable
 
     monkeypatch.setattr(sm, "_fetch_tile", fake_fetch)
     assert await sm.render_map([(40.7, -74.0, 5)]) is None
