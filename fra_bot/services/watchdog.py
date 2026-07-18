@@ -30,7 +30,7 @@ from ..db.repos import AutomationRepo, StateRepo
 log = logging.getLogger(__name__)
 
 #: A poll heartbeat older than max(3 * interval, this floor) is "dead".
-HEARTBEAT_FLOOR_MINUTES = 20
+HEARTBEAT_FLOOR_MINUTES = 15
 #: An actionable row untouched for this long counts as stuck.
 STUCK_AGE_MINUTES = 30
 #: Repeat a given alert at most once per this window.
@@ -102,13 +102,29 @@ class AutomationWatchdog:
             HEARTBEAT_FLOOR_MINUTES, 3 * self._interval_minutes(kind)
         )
         if heartbeat_age is not None and heartbeat_age > stale_after:
-            reasons.append((
-                f"heartbeat:{kind}",
-                f"the board-{kind} poll has not run for "
-                f"{heartbeat_age:.0f} min (interval "
-                f"{self._interval_minutes(kind)} min) — the job looks dead "
-                "or its lock is wedged; a restart clears it",
-            ))
+            # The fired-stamp (written by _guarded before its lock check)
+            # splits the diagnosis: fresh = the scheduler fires but the
+            # poll can't run (lock held: a very long poll or a wedged
+            # holder); stale/absent = the scheduler job itself is dead.
+            fired_age = self._age_minutes(
+                await self.state.get(f"heartbeat:fired:board-{kind}s"), now
+            )
+            if fired_age is not None and fired_age <= stale_after:
+                reasons.append((
+                    f"heartbeat-lock:{kind}",
+                    f"the board-{kind} poll has not completed for "
+                    f"{heartbeat_age:.0f} min although its job keeps "
+                    "firing — the job lock is held (a very long poll, or "
+                    "a wedged holder); if it persists, a restart clears it",
+                ))
+            else:
+                reasons.append((
+                    f"heartbeat:{kind}",
+                    f"the board-{kind} poll has not run for "
+                    f"{heartbeat_age:.0f} min (interval "
+                    f"{self._interval_minutes(kind)} min) — the scheduler "
+                    "job looks dead; a restart clears it",
+                ))
 
         # 2) Stuck actionable rows: pending/waiting, due, untouched.
         stuck = await self.requests.stuck_actionable(
