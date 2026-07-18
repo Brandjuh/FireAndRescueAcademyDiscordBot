@@ -20,6 +20,11 @@ from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
 
+#: Hard cap on a single job tick. Long legitimate work (member sweeps,
+#: backfills, the availability walk) is chunked and finishes well inside
+#: this; only a genuinely hung await ever reaches it.
+JOB_TICK_TIMEOUT_SECONDS = 3600.0
+
 JobFunc = Callable[[], Awaitable[None]]
 
 
@@ -110,7 +115,16 @@ class Scheduler:
 
     async def _invoke(self, func: JobFunc, name: str) -> None:
         try:
-            await func()
+            # Hard per-tick cap: a job that never returns (a hung fetch, a
+            # leaked pacer slot) used to block its OWN loop forever — the
+            # scheduler kept the other jobs running, so one poll silently
+            # died while everything else looked healthy.
+            await asyncio.wait_for(func(), timeout=JOB_TICK_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            log.error(
+                "Job %s tick killed after %.0f min — it was hung; the loop "
+                "continues", name, JOB_TICK_TIMEOUT_SECONDS / 60.0,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:

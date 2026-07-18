@@ -156,6 +156,25 @@ async def test_watchdog_blames_the_lock_when_the_job_keeps_firing(db):
     assert any("lock is held" in text for text in channel.sent)
 
 
+async def test_a_hung_job_tick_is_killed_and_the_loop_survives(monkeypatch):
+    # The 250-min incident: one tick hung forever and silently killed its
+    # own loop while every other job kept running. The tick cap ends it.
+    import fra_bot.core.scheduler as sched_mod
+
+    monkeypatch.setattr(sched_mod, "JOB_TICK_TIMEOUT_SECONDS", 0.05)
+    scheduler = sched_mod.Scheduler()
+    ran = []
+
+    async def hangs_then_runs():
+        ran.append(True)
+        if len(ran) == 1:
+            await asyncio.Event().wait()   # first tick hangs forever
+
+    await scheduler._invoke(hangs_then_runs, "job")   # killed by the cap
+    await scheduler._invoke(hangs_then_runs, "job")   # loop continues
+    assert len(ran) == 2
+
+
 async def test_mc_error_retry_backs_off_with_attempts(db):
     # The waiting row must carry a future next_attempt_at that grows with
     # the attempt count — no more burning 12 attempts in an hour's outage.
