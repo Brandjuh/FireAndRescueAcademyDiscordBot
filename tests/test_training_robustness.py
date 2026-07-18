@@ -140,6 +140,22 @@ async def test_watchdog_flags_a_stale_heartbeat(db):
     assert any("has not run" in text for text in channel.sent)
 
 
+async def test_watchdog_blames_the_lock_when_the_job_keeps_firing(db):
+    # Poll heartbeat stale but the fired-stamp fresh: the scheduler is
+    # alive, the LOCK is what's stuck — say so instead of "job dead".
+    state = StateRepo(db)
+    stale = (dt.datetime.now(dt.timezone.utc)
+             - dt.timedelta(hours=2)).isoformat()
+    await state.set("heartbeat:board-training", stale)
+    await state.set("heartbeat:fired:board-trainings",
+                    dt.datetime.now(dt.timezone.utc).isoformat())
+    channel = FakeChannel()
+    bot = FakeBot(pacer=SimpleNamespace(circuit_open=False),
+                  admin_channel=channel)
+    await AutomationWatchdog(_cfg(), db, bot).run()
+    assert any("lock is held" in text for text in channel.sent)
+
+
 async def test_mc_error_retry_backs_off_with_attempts(db):
     # The waiting row must carry a future next_attempt_at that grows with
     # the attempt count — no more burning 12 attempts in an hour's outage.

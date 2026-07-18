@@ -451,9 +451,9 @@ class FRABot(commands.Bot):
         # blocked (switch off, dead job, wedged lock, rotten login).
         sched.add_interval_job(
             self._guarded(self.watchdog.run, "automation-watchdog"),
-            minutes=10,
+            minutes=5,
             name="automation-watchdog",
-            initial_delay_seconds=420.0,
+            initial_delay_seconds=240.0,
         )
         # Academy panel builds queued because funds were low: drain + retry.
         # The buttons themselves work regardless of this switch (they build on
@@ -769,6 +769,17 @@ class FRABot(commands.Bot):
             from .core.pacing import CircuitOpenError
             from .mc.errors import MissionChiefError
 
+            # Fired-stamp BEFORE the lock check: the watchdog uses it to
+            # tell "scheduler stopped firing" apart from "the job fires
+            # but its lock has been held for ages" — the poll-side
+            # heartbeat alone can't distinguish those.
+            try:
+                await StateRepo(self.db).set(
+                    f"heartbeat:fired:{name}",
+                    dt.datetime.now(dt.timezone.utc).isoformat(),
+                )
+            except Exception:  # noqa: BLE001 — a stamp must never kill a job
+                pass
             lock = self.job_lock(name)
             if lock.locked():
                 log.info("Job %s already running; skipping this tick", name)
