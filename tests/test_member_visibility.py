@@ -117,3 +117,47 @@ async def test_reminder_with_closed_dms_is_dropped_not_shouted(db):
     await cog._send_due_reminders()
     assert channel_sends == []                # dropped, not redirected
     assert await RemindersRepo(db).due() == []   # and not retried forever
+
+
+async def test_reminder_falls_back_to_ingame_pm_when_dms_closed(db):
+    from fra_bot.cogs.requests_panel import RequestsCog
+    from fra_bot.db.repos import MembersRepo, RunsRepo
+
+    # Verified link 42 -> MC 555 (Benji), present in the roster.
+    await db.execute(
+        "INSERT INTO member_links (discord_id, mc_user_id, status, "
+        "created_at, updated_at) VALUES (42, 555, 'approved', 't', 't')"
+    )
+    run = await RunsRepo(db).start("members")
+    await MembersRepo(db).apply_roster(run, [{
+        "mc_user_id": 555, "name": "BenjiBean1128", "role": "Member",
+        "earned_credits": 1, "contribution_rate": 5.0,
+        "raw_member_since": "01/01/2025",
+    }], detect_changes=False)
+    await RemindersRepo(db).add(
+        discord_user_id=42, channel_id=7, training="HazMat",
+        due_at="2000-01-01T00:00:00+00:00",
+    )
+    pms = []
+
+    class FakeMirror:
+        async def send_new(self, recipient, subject, body):
+            pms.append((recipient, subject, body))
+            return {"ok": True, "detail": "sent", "thread": None}
+
+    class FakeBot(SimpleNamespace):
+        def get_channel(self, cid):
+            raise AssertionError("channel must never be used")
+
+        async def fetch_user(self, uid):
+            raise discord.HTTPException(
+                SimpleNamespace(status=403, reason="Forbidden"), "closed"
+            )
+
+    cog = RequestsCog.__new__(RequestsCog)
+    cog.bot = FakeBot(db=db, dm_mirror=FakeMirror())
+    cog.reminders = RemindersRepo(db)
+    await cog._send_due_reminders()
+    assert pms and pms[0][0] == "BenjiBean1128"
+    assert "HazMat" in pms[0][2]
+    assert await RemindersRepo(db).due() == []
