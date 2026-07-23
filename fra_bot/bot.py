@@ -93,6 +93,10 @@ class FRABot(commands.Bot):
         from .services.chat_sync import ChatSyncService
 
         self.chat_sync = ChatSyncService(self.mc, self.db)
+        # New-member welcome: greet joins in the game chat (on by default).
+        from .services.welcome import WelcomeService
+
+        self.welcome = WelcomeService(cfg, self.db, self.chat_sync)
         self.logs_sync = LogsSyncService(cfg, self.mc, self.db)
         self.treasury_sync = TreasurySyncService(cfg, self.mc, self.db)
 
@@ -375,6 +379,15 @@ class FRABot(commands.Bot):
             minutes=sync.members_interval,
             name="members",
             initial_delay_seconds=90.0,
+        )
+        # Greet freshly joined members in the game chat. ALWAYS registered;
+        # the automation.welcome.enabled switch is read live (a no-op tick
+        # while off), so `!fra set welcome.enabled on` needs no restart.
+        sched.add_interval_job(
+            self._guarded(self.welcome.run, "welcome"),
+            minutes=5,
+            name="welcome",
+            initial_delay_seconds=180.0,
         )
         sched.add_interval_job(
             self._guarded(self.logs_sync.run, "logs"),

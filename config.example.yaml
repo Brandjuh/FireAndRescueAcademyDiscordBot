@@ -136,6 +136,15 @@ automation:
     # ≥30 s apart. Relaying into the game honours dry_run.
     enabled: false
     interval_seconds: 30
+  welcome:
+    # Greet every new alliance member once in the game's alliance chat.
+    # The join is detected from the roster, so it fires however the member
+    # was accepted (auto-accept, admin in-game, or the Discord button).
+    # {name} is replaced by the member's game name. On by default; honours
+    # dry_run. Enabling it never greets the existing roster — only members
+    # who join afterwards.
+    enabled: true
+    message: "@{name} Welcome! Please check your DM for more information."
   sanctions:
     # Sanctions register (!sanction add/list/stats/revoke). The bot only
     # RECORDS and announces — it never kicks or bans anyone itself. With
