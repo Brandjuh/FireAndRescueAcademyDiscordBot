@@ -122,6 +122,9 @@ class TaxWarningService:
         self.client = client
         self.members = MembersRepo(db)
         self.warnings = TaxWarningsRepo(db)
+        from ..db.repos import MemberActionsRepo
+
+        self.actions = MemberActionsRepo(db)
         self.runs = RunsRepo(db)
         self.state = StateRepo(db)
         self._auto = cfg.automation.tax_warnings
@@ -260,6 +263,20 @@ class TaxWarningService:
             await self.warnings.record_warning(
                 member["mc_user_id"], str(member["name"]), count=level,
             )
+            # Also into the central member-action log, so the warning shows
+            # up in the member's dossier/timeline — the tax_warnings table
+            # alone is invisible there.
+            try:
+                await self.actions.log(
+                    discord_user_id=None,
+                    mc_user_id=int(member["mc_user_id"]),
+                    actor_name=str(member["name"]),
+                    action="tax_warning_sent",
+                    detail=f"tax warning {level} (contribution below the "
+                           f"{self._auto.min_rate:g}% minimum)",
+                )
+            except Exception:  # noqa: BLE001 — bookkeeping must not stop sends
+                log.exception("tax warning action log failed")
             if self.mirror is not None and conversation_id:
                 try:
                     await self.mirror(

@@ -47,6 +47,11 @@ PERSON_AUDIT_ACTION_KEYS = frozenset({
     "allowed_to_apply",
     "not_allowed_to_apply",
     "application_denied",
+    # Mission/event starts carry the starter's name in the alliance log —
+    # also the MANUAL ones done outside the bot, which admins explicitly
+    # want visible in a member's history.
+    "large_mission_started",
+    "alliance_event_started",
 })
 
 #: Never in a member timeline (reference exclusion — course completions

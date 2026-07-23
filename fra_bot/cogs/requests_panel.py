@@ -690,30 +690,21 @@ class RequestsCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _send_due_reminders(self) -> None:
+        # DM ONLY, by operator decree: a reminder is personal, and posting
+        # it in the request channel (the old fallback) pings the whole
+        # panel audience. Closed DMs mean the reminder is dropped (logged),
+        # never shouted into a channel.
         for row in await self.reminders.due():
             text = (
-                f"🔔 <@{row['discord_user_id']}> your **{row['training']}** "
-                "course should be finished now — time to collect your people!"
+                f"🔔 Your **{row['training']}** course should be finished "
+                "now — time to collect your people!"
             )
-            sent = False
-            channel = (
-                self.bot.get_channel(row["channel_id"]) if row["channel_id"] else None
-            )
-            if channel is not None:
-                try:
-                    await channel.send(text)
-                    sent = True
-                except discord.HTTPException as exc:
-                    log.warning("Reminder to channel %s failed: %s",
-                                row["channel_id"], exc)
-            if not sent:
-                try:
-                    user = await self.bot.fetch_user(row["discord_user_id"])
-                    await user.send(text)
-                    sent = True
-                except discord.HTTPException as exc:
-                    log.warning("Reminder DM to %s failed: %s",
-                                row["discord_user_id"], exc)
+            try:
+                user = await self.bot.fetch_user(row["discord_user_id"])
+                await user.send(text)
+            except discord.HTTPException as exc:
+                log.warning("Reminder DM to %s failed (dropped): %s",
+                            row["discord_user_id"], exc)
             # Mark posted either way — a permanently unreachable target must
             # not retry forever.
             await self.reminders.mark_posted(row["id"])
