@@ -273,6 +273,30 @@ class MembersRepo:
             (utcnow_iso(), event_id),
         )
 
+    async def pending_welcomes(self, limit: int = 10) -> list[aiosqlite.Row]:
+        """Joined events not yet welcomed in the game chat, whose member is
+        still active (someone who joined and left again is skipped). Oldest
+        first. Separate from posted_at — the Discord feed and the game-chat
+        welcome are independent."""
+        async with self._db.conn.execute(
+            """
+            SELECT e.* FROM member_events e
+            JOIN members m ON m.mc_user_id = e.mc_user_id
+            WHERE e.event_type = 'joined'
+              AND e.welcomed_at IS NULL
+              AND m.is_active = 1
+            ORDER BY e.id ASC LIMIT ?
+            """,
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def mark_welcomed(self, event_id: int) -> None:
+        await self._db.execute(
+            "UPDATE member_events SET welcomed_at = ? WHERE id = ?",
+            (utcnow_iso(), event_id),
+        )
+
     async def event_counts(
         self, start_iso: str | None, end_iso: str
     ) -> dict[str, int]:

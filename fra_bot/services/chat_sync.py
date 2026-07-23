@@ -87,7 +87,13 @@ class ChatSyncService:
         failure): the poll can fire in the moment between the game
         recording the message and us writing the memory, which used to
         bounce the member's own message back into Discord."""
-        text = format_discord_message_for_mc(username, body)
+        return await self.post_message(format_discord_message_for_mc(username, body))
+
+    async def post_message(self, text: str) -> str:
+        """Post arbitrary text into the game chat with the same echo memory
+        + 30-second spacing as the Discord relay. Used by the relay AND by
+        bot-initiated posts (e.g. the new-member welcome), so those never
+        bounce back into Discord either."""
         await self.remember_echo(text)
         try:
             async with self._post_lock:

@@ -289,6 +289,17 @@ class ApplicationsAutomationConfig:
 
 
 @dataclass(frozen=True)
+class WelcomeConfig:
+    """New-member welcome: posts a one-time greeting in the game's alliance
+    chat when a member joins (detected from the roster, so it catches every
+    join — auto-accept, admin in-game, or the Discord accept button).
+    ``{name}`` in the message is replaced by the member's game name. On by
+    default; honours the global ``dry_run`` switch."""
+    enabled: bool
+    message: str
+
+
+@dataclass(frozen=True)
 class AutomationConfig:
     dry_run: bool
     reply_to_board: bool
@@ -305,6 +316,12 @@ class AutomationConfig:
     applications: ApplicationsAutomationConfig
     chat: ChatBridgeConfig
     sanctions: SanctionsConfig
+    welcome: WelcomeConfig
+
+
+DEFAULT_WELCOME_MESSAGE = (
+    "@{name} Welcome! Please check your DM for more information."
+)
 
 
 @dataclass(frozen=True)
@@ -701,6 +718,15 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 interval_seconds=max(30, int(
                     _get(raw, "automation", "chat", "interval_seconds", default=30)
                 )),
+            ),
+            welcome=WelcomeConfig(
+                enabled=bool(
+                    _get(raw, "automation", "welcome", "enabled", default=True)
+                ),
+                message=str(
+                    _get(raw, "automation", "welcome", "message",
+                         default=DEFAULT_WELCOME_MESSAGE)
+                ) or DEFAULT_WELCOME_MESSAGE,
             ),
             sanctions=SanctionsConfig(
                 auto_action_enabled=bool(
