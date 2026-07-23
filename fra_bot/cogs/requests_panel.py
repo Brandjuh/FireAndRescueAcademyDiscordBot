@@ -690,10 +690,10 @@ class RequestsCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _send_due_reminders(self) -> None:
-        # DM ONLY, by operator decree: a reminder is personal, and posting
-        # it in the request channel (the old fallback) pings the whole
-        # panel audience. Closed DMs mean the reminder is dropped (logged),
-        # never shouted into a channel.
+        # DM first, by operator decree NEVER the request channel; when the
+        # member's Discord DMs are closed (server privacy settings), the
+        # reminder falls back to an in-game PM — same convention as the
+        # request-outcome DMs.
         for row in await self.reminders.due():
             text = (
                 f"🔔 Your **{row['training']}** course should be finished "
@@ -703,9 +703,40 @@ class RequestsCog(commands.Cog):
                 user = await self.bot.fetch_user(row["discord_user_id"])
                 await user.send(text)
             except discord.HTTPException as exc:
-                log.warning("Reminder DM to %s failed (dropped): %s",
+                log.warning("Reminder DM to %s failed (%s); trying in-game PM",
                             row["discord_user_id"], exc)
+                await self._reminder_ingame_fallback(row, text)
             # Mark posted either way — a permanently unreachable target must
             # not retry forever.
             await self.reminders.mark_posted(row["id"])
             await asyncio.sleep(1.0)
+
+    async def _reminder_ingame_fallback(self, row, text: str) -> None:
+        """Closed Discord DMs: deliver the reminder as an in-game PM via the
+        member's verified link. No link or PM failure -> dropped (logged) —
+        never posted in a channel."""
+        from ..db.repos import LinksRepo, MembersRepo
+
+        try:
+            link = await LinksRepo(self.bot.db).get_by_discord(
+                int(row["discord_user_id"])
+            )
+            if link is None or link["status"] != "approved":
+                log.warning("Reminder for %s dropped: DMs closed and no "
+                            "verified MC link", row["discord_user_id"])
+                return
+            roster = await MembersRepo(self.bot.db).active_members()
+            member = roster.get(int(link["mc_user_id"]))
+            if member is None:
+                log.warning("Reminder for %s dropped: MC %s not in roster",
+                            row["discord_user_id"], link["mc_user_id"])
+                return
+            plain = text.replace("**", "")
+            result = await self.bot.dm_mirror.send_new(
+                str(member["name"]), "Training reminder", plain
+            )
+            if not result.get("ok"):
+                log.warning("Reminder in-game PM to %s failed: %s",
+                            member["name"], result.get("detail"))
+        except Exception:  # noqa: BLE001 — a fallback must never wedge the loop
+            log.exception("Reminder in-game fallback failed")
