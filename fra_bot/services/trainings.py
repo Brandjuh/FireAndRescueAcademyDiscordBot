@@ -69,6 +69,10 @@ GUIDE_MARKER = "[FRA] 📋 How to request a TRAINING"
 #: State key holding the last availability walk: {"counts": {...}, "at": epoch}.
 #: Written by the hourly guide refresh; read by the Discord training chooser.
 AVAILABILITY_STATE_KEY = "training_availability"
+#: Hard budget for one availability walk inside the guide refresh: paced
+#: page fetches across every academy can otherwise outlive the poll tick,
+#: and the guide write (with its "Last updated" line) then never happens.
+AVAILABILITY_WALK_BUDGET_SECONDS = 20 * 60
 
 #: State key holding the live-harvested course lists per agency:
 #: {"courses": {discipline: {name: days}}, "at": epoch}. The academies'
@@ -268,10 +272,36 @@ class TrainingsService(BoardRequestService):
         availability + a last-updated line. Expensive (walks the academy
         pages) — only built once the guide throttle decided to write.
         ``quick`` skips the walk (used by the forced `!fra guides` sync so
-        the posts land fast); the hourly refresh fills the numbers in."""
+        the posts land fast); the hourly refresh fills the numbers in.
+
+        The walk is BOUNDED: with many academies (paced 4-9 s per page,
+        yielding to member work) it can outlive the whole poll tick, and
+        an unbounded walk kept the guide's "Last updated" line frozen for
+        days — the write step never ran. On timeout the guide refreshes
+        anyway, with the cached numbers and an honest note."""
+        import asyncio as _asyncio
+
         from ..mc.board import guide_updated_line
 
-        counts = None if quick else await self._collect_availability()
+        counts = None
+        from_cache_at: int | None = None
+        if not quick:
+            try:
+                counts = await _asyncio.wait_for(
+                    self._collect_availability(),
+                    timeout=AVAILABILITY_WALK_BUDGET_SECONDS,
+                )
+            except _asyncio.TimeoutError:
+                log.warning(
+                    "training availability walk exceeded %d min; the guide "
+                    "refreshes with cached numbers",
+                    AVAILABILITY_WALK_BUDGET_SECONDS // 60,
+                )
+            if counts is None:
+                cached = await self.cached_availability()
+                if cached is not None:
+                    counts = cached.get("counts")
+                    from_cache_at = cached.get("at")
         lines = [
             self.guide_body(),
             "",
@@ -285,6 +315,13 @@ class TrainingsService(BoardRequestService):
                 count = counts.get(key, 0)
                 unit = "class" if count == 1 else "classes"
                 lines.append(f"- {_AGENCY_TITLES[key]}: {count} {unit}")
+            if from_cache_at:
+                stamp = dt.datetime.fromtimestamp(
+                    int(from_cache_at), dt.timezone.utc
+                ).strftime("%Y-%m-%d %H:%M UTC")
+                lines.append(
+                    f"- (numbers from {stamp} — a live recount is under way)"
+                )
         return "\n".join(lines)
 
     # -- multi-post guide (overview + one post per agency) ----------------
