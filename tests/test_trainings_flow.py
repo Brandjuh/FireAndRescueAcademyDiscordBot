@@ -1109,3 +1109,30 @@ async def test_collect_availability_marks_formless_page_incomplete(db):
     assert counts is not None and counts["coastal"] == 0
     cached = await svc.cached_availability()
     assert cached["complete"]["coastal"] is False
+
+
+async def test_guide_refreshes_with_cached_numbers_when_the_walk_hangs(
+    db, monkeypatch
+):
+    # The frozen "Last updated" incident: an availability walk that outlives
+    # the tick kept the guide write from ever running. With the walk budget
+    # exceeded, the guide must still be built — cached numbers, honest note.
+    import asyncio
+    import json as _json
+
+    import fra_bot.services.trainings as tr
+
+    svc, _client = _service(db, dry_run=False)
+    await svc.state.set(tr.AVAILABILITY_STATE_KEY, _json.dumps({
+        "counts": {"fire": 3}, "complete": {"fire": True}, "at": 1752797640,
+    }))
+
+    async def hangs():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(svc, "_collect_availability", hangs)
+    monkeypatch.setattr(tr, "AVAILABILITY_WALK_BUDGET_SECONDS", 0.05)
+    content = await svc._overview_content(1753300000.0)
+    assert "Current academy availability" in content
+    assert "3 classes" in content
+    assert "a live recount is under way" in content
