@@ -18,6 +18,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import math
 import random
 from dataclasses import replace
 from zoneinfo import ZoneInfo
@@ -55,6 +56,17 @@ API_BUILDINGS_PATH = "/api/buildings"
 # The daily build creates ALLIANCE buildings, which live on their own API
 # endpoint — dedup must see both our personal and the alliance buildings.
 API_ALLIANCE_BUILDINGS_PATH = "/api/alliance_buildings"
+
+# Per-member request quota, over a trailing window. Enforced at the
+# Discord intake and (for board posts) at the executor; refused/rejected
+# rows never consume quota. The web console operator is exempt, like the
+# other member gates there.
+REQUEST_LIMIT_PER_MEMBER = 4
+REQUEST_LIMIT_WINDOW_HOURS = 24
+
+# Overpass proximity fallback: when the geocoded signals can't classify a
+# pin, an ACTIVE OSM hospital/prison within this radius settles the type.
+OSM_FALLBACK_RADIUS_M = 200.0
 
 # Daily auto-build tuning.
 AUTO_BUILD_TYPES = ("hospital", "prison")     # one of each, every day
@@ -148,6 +160,80 @@ def detect_building_type(
     return None
 
 
+async def resolve_building_type(location, overpass: OverpassClient) -> str | None:
+    """:func:`detect_building_type` plus an Overpass proximity fallback.
+
+    Reverse geocoding regularly returns a bare street address with no place
+    name or OSM type for a pin that IS a real hospital — mental-health and
+    children's hospitals hit this constantly (their OSM tags are often
+    ``healthcare=hospital`` on a way Nominatim doesn't surface). With both
+    signals empty the request used to be refused. When the text carries no
+    veto term (clinic/police/museum …), an ACTIVE OSM hospital or prison
+    within :data:`OSM_FALLBACK_RADIUS_M` of the pin settles the type; an
+    unreachable Overpass, nothing nearby, or both types nearby keeps the
+    refusal."""
+    detected = detect_building_type(
+        location.address, location.place_text, location.place_type
+    )
+    if detected is not None:
+        return detected
+    text = " ".join(
+        t for t in (location.place_text, location.address) if t
+    ).lower()
+    if _has_any(text, _INACTIVE_TERMS + _HOSPITAL_REJECT + _PRISON_REJECT):
+        return None  # an explicit look-alike/inactive hit stays refused
+    dlat = OSM_FALLBACK_RADIUS_M / 111_320.0
+    dlng = dlat / max(0.2, math.cos(math.radians(location.latitude)))
+    south = max(-90.0, location.latitude - dlat)
+    north = min(90.0, location.latitude + dlat)
+    west = max(-180.0, location.longitude - dlng)
+    east = min(180.0, location.longitude + dlng)
+    try:
+        data = await overpass.fetch(
+            build_candidate_query(south, west, north, east, "both")
+        )
+    except (OverpassError, ValueError) as exc:
+        log.warning(
+            "building type fallback: Overpass lookup at %.5f,%.5f failed (%s)",
+            location.latitude, location.longitude, exc,
+        )
+        return None
+    types = {c.building_type for c in parse_candidates(data)}
+    if len(types) == 1:
+        found = next(iter(types))
+        log.info(
+            "building type fallback: OSM shows a %s within %dm of %.5f,%.5f",
+            found, int(OSM_FALLBACK_RADIUS_M),
+            location.latitude, location.longitude,
+        )
+        return found
+    return None
+
+
+async def requests_in_window(
+    requests_repo,
+    *,
+    at: dt.datetime | None = None,
+    requester_mc_id: int | None = None,
+    discord_user_id: int | None = None,
+    requester_name: str | None = None,
+    before_id: int | None = None,
+) -> int:
+    """Non-refused building requests one person filed in the trailing
+    :data:`REQUEST_LIMIT_WINDOW_HOURS` window ending at ``at`` (default:
+    now). Compare against :data:`REQUEST_LIMIT_PER_MEMBER`."""
+    end = at or dt.datetime.now(dt.timezone.utc)
+    since = (end - dt.timedelta(hours=REQUEST_LIMIT_WINDOW_HOURS)).isoformat()
+    return await requests_repo.recent_request_count(
+        "building",
+        since_iso=since,
+        requester_mc_id=requester_mc_id,
+        discord_user_id=discord_user_id,
+        requester_name=requester_name,
+        before_id=before_id,
+    )
+
+
 GUIDE_MARKER = "[FRA] 📋 How to request a BUILDING"
 
 _TYPE_EMOJI = {"hospital": "🏥", "prison": "🔒"}
@@ -204,6 +290,8 @@ def _building_guide(min_funds: int) -> str:
         "doctors, police stations, courthouses and museums are refused.",
         f"- Nothing is built while alliance funds are below {min_funds:,} "
         "credits; the request waits until funds recover.",
+        f"- At most {REQUEST_LIMIT_PER_MEMBER} building requests per member "
+        f"per {REQUEST_LIMIT_WINDOW_HOURS} hours.",
         "- One link per post.",
         "",
         "[b]Examples[/b]",
@@ -259,6 +347,11 @@ class BuildingsService(BoardRequestService):
             )
         return cookies
 
+    async def resolve_building_type(self, location) -> str | None:
+        """Classify a geocoded pin, with the Overpass proximity fallback —
+        the one entry point every intake (board, Discord, testbuild) uses."""
+        return await resolve_building_type(location, self._overpass)
+
     async def parse_request(self, post: BoardPost) -> dict | None:
         links = find_maps_links(post.content)
         if not links:
@@ -281,6 +374,36 @@ class BuildingsService(BoardRequestService):
             )
             building_type = payload["building_type"]
         else:
+            # Per-member quota, for BOARD posts only: Discord requests were
+            # gated at intake (instant feedback), and web-console rows are
+            # the operator's own — exempt like the other member gates
+            # there. Keyed on this row's created_at/id, so a retry after a
+            # transient error can never flip the verdict.
+            if not self.is_discord_request(request):
+                made = await requests_in_window(
+                    self.requests,
+                    at=dt.datetime.fromisoformat(request["created_at"]),
+                    requester_mc_id=request["requester_mc_id"],
+                    requester_name=requester,
+                    before_id=request["id"],
+                )
+                if made >= REQUEST_LIMIT_PER_MEMBER:
+                    await self.requests.set_status(
+                        request["id"], "skipped",
+                        f"refused: request limit reached ({made} in the "
+                        f"last {REQUEST_LIMIT_WINDOW_HOURS}h, limit "
+                        f"{REQUEST_LIMIT_PER_MEMBER})",
+                    )
+                    await self.reply_for(request, _reply_error(
+                        requester,
+                        f"You already made {made} building requests in the "
+                        f"last {REQUEST_LIMIT_WINDOW_HOURS} hours. The limit "
+                        f"is {REQUEST_LIMIT_PER_MEMBER} per member per "
+                        f"{REQUEST_LIMIT_WINDOW_HOURS} hours — please try "
+                        "again later.",
+                    ))
+                    return
+
             try:
                 location = await self._geocoder.resolve_maps_link(payload.get("link"))
             except GeocodeError as exc:
@@ -295,9 +418,7 @@ class BuildingsService(BoardRequestService):
                 ))
                 return
 
-            building_type = detect_building_type(
-                location.address, location.place_text, location.place_type
-            )
+            building_type = await self.resolve_building_type(location)
             payload.update(
                 {
                     "latitude": location.latitude,
@@ -855,9 +976,7 @@ class BuildingsService(BoardRequestService):
             f"({location.latitude:.5f}, {location.longitude:.5f})"
         ]
         if building_type is None:
-            building_type = detect_building_type(
-                location.address, location.place_text, location.place_type
-            )
+            building_type = await self.resolve_building_type(location)
             if building_type is None:
                 lines.append(
                     "🚫 Refused — not a hospital or prison. Only those are auto-built. "

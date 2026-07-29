@@ -99,6 +99,26 @@ class FakeTrainingsService:
         return 1
 
 
+class FakeBuildingsService:
+    """Intake-time type resolver: the real detect logic with a canned
+    Overpass-fallback verdict instead of a network lookup."""
+
+    def __init__(self, fallback=None):
+        self.fallback = fallback
+        self.fallback_calls = 0
+
+    async def resolve_building_type(self, location):
+        from fra_bot.services.buildings import detect_building_type
+
+        detected = detect_building_type(
+            location.address, location.place_text, location.place_type
+        )
+        if detected is not None:
+            return detected
+        self.fallback_calls += 1
+        return self.fallback
+
+
 class FakeBot(SimpleNamespace):
     async def wait_until_ready(self):
         await asyncio.Event().wait()  # park the task loops forever
@@ -148,10 +168,11 @@ class FakeInteraction:
         self.followup = FakeFollowup(self.sent)
 
 
-def _requests_cog(db, geocoder=None):
+def _requests_cog(db, geocoder=None, buildings=None):
     bot = FakeBot(
         db=db, cfg=_cfg(), geocoder=geocoder or FakeGeocoder(),
         trainings=FakeTrainingsService(),
+        buildings=buildings or FakeBuildingsService(),
     )
     return RequestsCog(bot)
 
@@ -404,6 +425,57 @@ async def test_building_intake_rejects_non_maps_link_and_logs(db):
         assert row["status"] == "skipped"
         assert "not a Google Maps link" in row["status_detail"]
         assert "Rejected" in interaction.sent[0]
+    finally:
+        cog.cog_unload()
+
+
+async def test_building_intake_enforces_member_limit(db):
+    # 4 accepted requests fill the 24h quota; the 5th is rejected. An
+    # earlier REJECTED request (the cafe pin) must not consume quota.
+    await _seed_member(db, 42, "Alice", 10.0, discord_id=100)
+    geocoder = FakeGeocoder()
+    cog = _requests_cog(db, geocoder)
+    try:
+        geocoder.result = CAFE
+        await cog.submit_building(FakeInteraction(), LINK)  # rejected, free
+        geocoder.result = HOSPITAL
+        for _ in range(4):
+            interaction = FakeInteraction()
+            await cog.submit_building(interaction, LINK)
+            assert "accepted" in interaction.sent[0]
+        interaction = FakeInteraction()
+        await cog.submit_building(interaction, LINK)
+        assert "limit" in interaction.sent[0]
+        row = (await _all_requests(db))[-1]
+        assert row["status"] == "skipped"
+        assert "request limit reached (4" in row["status_detail"]
+        assert json.loads(row["payload"])[INTAKE_REJECTED_FLAG] is True
+        # The rejection itself doesn't consume quota either: still 4 counted.
+        assert len(await AutomationRepo(db).claimable("building")) == 4
+    finally:
+        cog.cog_unload()
+
+
+async def test_building_intake_uses_overpass_fallback(db):
+    # A pin whose reverse geocode is a bare street address (no place name,
+    # no OSM type) — the mental-health/children's-hospital case. The
+    # Overpass proximity fallback settles the type instead of refusing.
+    await _seed_member(db, 42, "Alice", 10.0, discord_id=100)
+    geocoder = FakeGeocoder()
+    geocoder.result = GeocodeResult(
+        latitude=42.96, longitude=-85.67,
+        address="200 Jefferson Ave, Grand Rapids", source="test",
+    )
+    buildings = FakeBuildingsService(fallback="hospital")
+    cog = _requests_cog(db, geocoder, buildings)
+    try:
+        interaction = FakeInteraction()
+        await cog.submit_building(interaction, LINK)
+        assert buildings.fallback_calls == 1
+        rows = await AutomationRepo(db).claimable("building")
+        assert len(rows) == 1
+        assert json.loads(rows[0]["payload"])["building_type"] == "hospital"
+        assert "hospital" in interaction.sent[0]
     finally:
         cog.cog_unload()
 

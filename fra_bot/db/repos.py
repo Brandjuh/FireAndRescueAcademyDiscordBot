@@ -936,6 +936,55 @@ class AutomationRepo:
             )
             return (True, rcur.lastrowid)
 
+    async def recent_request_count(
+        self,
+        kind: str,
+        *,
+        since_iso: str,
+        requester_mc_id: int | None = None,
+        discord_user_id: int | None = None,
+        requester_name: str | None = None,
+        before_id: int | None = None,
+    ) -> int:
+        """How many ``kind`` requests one person filed since ``since_iso`` —
+        the basis for per-member rate limits.
+
+        The person is matched on ANY of the given identifiers (MC id,
+        Discord id in the payload, name case-insensitively), so switching
+        the intake channel (Discord panel vs. board post) cannot dodge the
+        count. Rows that were refused/rejected don't count: an intake
+        rejection (payload flag) or an executor refusal (``skipped`` with a
+        ``refused:`` detail) never consumed a build, so it must not burn
+        quota. ``before_id`` bounds the count to rows created before a
+        specific row — an executor re-check stays deterministic no matter
+        when a retry runs."""
+        identity: list[str] = []
+        params: list = [kind, since_iso]
+        if requester_mc_id is not None:
+            identity.append("requester_mc_id = ?")
+            params.append(requester_mc_id)
+        if discord_user_id:
+            identity.append("json_extract(payload, '$.discord_user_id') = ?")
+            params.append(discord_user_id)
+        if requester_name:
+            identity.append("requester_name = ? COLLATE NOCASE")
+            params.append(requester_name)
+        if not identity:
+            return 0
+        sql = (
+            "SELECT COUNT(*) AS n FROM automation_requests "
+            "WHERE kind = ? AND created_at >= ? "
+            "AND COALESCE(json_extract(payload, '$.intake_rejected'), 0) = 0 "
+            "AND NOT (status = 'skipped' AND status_detail LIKE 'refused:%') "
+            f"AND ({' OR '.join(identity)})"
+        )
+        if before_id is not None:
+            sql += " AND id < ?"
+            params.append(before_id)
+        async with self._db.conn.execute(sql, params) as cur:
+            row = await cur.fetchone()
+        return int(row["n"] if row else 0)
+
     async def claimable(self, kind: str) -> list[aiosqlite.Row]:
         """Requests ready to execute: fresh 'pending' ones plus 'waiting'
         ones whose retry time is due."""
