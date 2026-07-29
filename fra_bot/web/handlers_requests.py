@@ -21,6 +21,9 @@ the original behaviour existed and why it does not apply here:
 * a non-maps link flashes an error instead of writing a ``skipped``
   audit row — those rows exist to announce *member* rejections in the
   admin log; echoing the operator's own typo there is just noise.
+* no per-member building-request quota — the limit throttles members,
+  and a console submission is the operator. The executor also skips the
+  quota for these rows (they carry the Discord-style thread id 0).
 
 Re-queueing reuses ``AutomationRepo.requeue`` — the exact transition
 behind the Discord Approve button — so only terminal (failed/skipped)

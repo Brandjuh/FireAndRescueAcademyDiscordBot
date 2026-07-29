@@ -37,7 +37,11 @@ from ..db.repos import AutomationRepo, RemindersRepo, StateRepo
 from ..geo.geocoder import GeocodeError
 from ..geo.maps_links import find_maps_links
 from ..mc.trainings_catalog import DISCIPLINES
-from ..services.buildings import detect_building_type
+from ..services.buildings import (
+    REQUEST_LIMIT_PER_MEMBER,
+    REQUEST_LIMIT_WINDOW_HOURS,
+    requests_in_window,
+)
 from ..services.intake import INTAKE_REJECTED_FLAG, contribution_gate
 from ..services.trainings import (
     AVAILABILITY_STATE_KEY,
@@ -491,6 +495,32 @@ class RequestsCog(commands.Cog):
             )
             return
 
+        # Per-member quota, checked on the member's full identity (MC id,
+        # Discord id, name) so the board channel can't be used to top up.
+        made = await requests_in_window(
+            self.requests,
+            requester_mc_id=verdict.mc_user_id,
+            discord_user_id=interaction.user.id,
+            requester_name=interaction.user.display_name,
+        )
+        if made >= REQUEST_LIMIT_PER_MEMBER:
+            await self._log_rejection(
+                interaction, "building", payload,
+                f"rejected at intake: request limit reached ({made} in the "
+                f"last {REQUEST_LIMIT_WINDOW_HOURS}h, limit "
+                f"{REQUEST_LIMIT_PER_MEMBER})",
+                verdict.mc_user_id,
+            )
+            await _send(
+                interaction,
+                f"❌ Your building request was not submitted — you already "
+                f"made {made} building requests in the last "
+                f"{REQUEST_LIMIT_WINDOW_HOURS} hours. The limit is "
+                f"{REQUEST_LIMIT_PER_MEMBER} per member per "
+                f"{REQUEST_LIMIT_WINDOW_HOURS} hours; please try again later.",
+            )
+            return
+
         # Location + type verdict RIGHT NOW, while the member is looking:
         # resolve the pin and detect hospital/prison before queueing. The
         # resolved coordinates travel in the payload, so the executor skips
@@ -528,9 +558,7 @@ class RequestsCog(commands.Cog):
             )
             return
 
-        building_type = detect_building_type(
-            location.address, location.place_text, location.place_type
-        )
+        building_type = await self.bot.buildings.resolve_building_type(location)
         payload.update({
             "latitude": location.latitude,
             "longitude": location.longitude,
