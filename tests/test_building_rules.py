@@ -74,7 +74,7 @@ BOTH_NEARBY = {"elements": [
 ]}
 
 
-def _cfg():
+def _cfg(min_contribution_rate=0.0):
     return SimpleNamespace(
         missionchief=SimpleNamespace(base_url="https://example.test",
                                      alliance_id=1),
@@ -84,15 +84,27 @@ def _cfg():
             reply_to_board=False,
             building=SimpleNamespace(
                 enabled=True, thread_id=777, min_alliance_funds=2_000_000,
-                min_contribution_rate=0.0, set_tax_percent=10,
+                min_contribution_rate=min_contribution_rate,
+                set_tax_percent=10,
             ),
         ),
     )
 
 
-def _service(db, geocoder_result=None, overpass=None):
+async def _seed_roster(db, mc_id, name, rate):
+    await db.execute(
+        "INSERT INTO members (mc_user_id, name, contribution_rate, is_active, "
+        "first_seen_at, last_seen_at) VALUES (?, ?, ?, 1, '2026-01-01', "
+        "'2026-07-01')",
+        (mc_id, name, rate),
+    )
+
+
+def _service(db, geocoder_result=None, overpass=None,
+             min_contribution_rate=0.0):
     svc = BuildingsService(
-        _cfg(), SimpleNamespace(), db, FakeGeocoder(geocoder_result)
+        _cfg(min_contribution_rate), SimpleNamespace(), db,
+        FakeGeocoder(geocoder_result),
     )
     svc._overpass = overpass or FakeOverpass()
     svc.replies = []
@@ -292,6 +304,72 @@ async def test_executor_resolves_bare_address_pin_via_overpass(db):
     assert row["status"] == "skipped"
     assert "resolved to hospital" in row["status_detail"]
     assert json.loads(row["payload"])["building_type"] == "hospital"
+
+
+async def test_board_building_gate_fails_closed(db):
+    # Board building posts never had a contribution gate at all; now they
+    # get the same fail-closed one as trainings/events/missions: an empty
+    # rate column on the roster is 0% (refused), an unknown requester
+    # waits for the next members sync, a healthy rate passes.
+    repo = AutomationRepo(db)
+    await _seed_roster(db, 42, "Alice", None)      # never set a donation
+    await _seed_roster(db, 43, "Saint", 10.0)
+    svc = _service(
+        db,
+        geocoder_result=_loc(
+            address="St Mary Hospital, 200 Jefferson Ave",
+            place_text="St Mary Hospital", place_type="hospital",
+        ),
+        min_contribution_rate=5.0,
+    )
+
+    rid = await _board_row(repo, post_id=1, name="Alice", mc_id=42,
+                           status="pending")
+    await svc.execute_request(await repo.get(rid), announce=True)
+    row = await repo.get(rid)
+    assert row["status"] == "skipped"
+    assert "contribution rate 0% is below the required 5%" in row["status_detail"]
+    assert any("minimum required for building requests" in r
+               for r in svc.replies)
+
+    rid = await _board_row(repo, post_id=2, name="Stranger", mc_id=777,
+                           status="pending")
+    await svc.execute_request(await repo.get(rid), announce=True)
+    row = await repo.get(rid)
+    assert row["status"] == "waiting"
+    assert "not on the stored roster" in row["status_detail"]
+
+    rid = await _board_row(repo, post_id=3, name="Saint", mc_id=43,
+                           status="pending")
+    await svc.execute_request(await repo.get(rid), announce=True)
+    row = await repo.get(rid)
+    assert row["status"] == "skipped"              # dry-run resolves
+    assert "resolved to hospital" in row["status_detail"]
+
+
+async def test_web_rows_stay_exempt_from_the_building_gate(db):
+    repo = AutomationRepo(db)
+    svc = _service(
+        db,
+        geocoder_result=_loc(
+            address="St Mary Hospital, 200 Jefferson Ave",
+            place_text="St Mary Hospital", place_type="hospital",
+        ),
+        min_contribution_rate=5.0,
+    )
+    rid = await _board_row(repo, post_id=0, name="Web console", mc_id=None,
+                           status="pending", thread_id=0)
+    await svc.execute_request(await repo.get(rid), announce=True)
+    row = await repo.get(rid)
+    assert row["status"] == "skipped"
+    assert "resolved to hospital" in row["status_detail"]
+
+
+async def test_building_guide_documents_the_contribution_minimum(db):
+    svc = _service(db, min_contribution_rate=5.0)
+    assert "contribution of at least 5%" in svc.guide_body()
+    # With the gate off the guide doesn't promise one.
+    assert "contribution" not in _service(db).guide_body()
 
 
 async def test_executor_still_refuses_when_osm_is_empty(db):

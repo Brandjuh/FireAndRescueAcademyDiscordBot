@@ -270,7 +270,7 @@ def _reply_error(requester: str | None, reason: str) -> str:
     )
 
 
-def _building_guide(min_funds: int) -> str:
+def _building_guide(min_funds: int, min_rate: float = 0.0) -> str:
     """The how-to-request post for the building board, structured like the
     old bot's request guides. Starts with :data:`GUIDE_MARKER` so it's never
     re-parsed as a request; the base appends a "last updated" line."""
@@ -292,6 +292,11 @@ def _building_guide(min_funds: int) -> str:
         "credits; the request waits until funds recover.",
         f"- At most {REQUEST_LIMIT_PER_MEMBER} building requests per member "
         f"per {REQUEST_LIMIT_WINDOW_HOURS} hours.",
+        *(
+            [f"- Requests require an alliance contribution of at least "
+             f"{min_rate:g}%."]
+            if min_rate > 0 else []
+        ),
         "- One link per post.",
         "",
         "[b]Examples[/b]",
@@ -333,7 +338,9 @@ class BuildingsService(BoardRequestService):
         return bool(self._auto.enabled)
 
     def guide_body(self) -> str:
-        return _building_guide(self._auto.min_alliance_funds)
+        return _building_guide(
+            self._auto.min_alliance_funds, self._auto.min_contribution_rate
+        )
 
     def _playwright_cookies(self) -> list[dict]:
         cookies = []
@@ -374,6 +381,57 @@ class BuildingsService(BoardRequestService):
             )
             building_type = payload["building_type"]
         else:
+            # Contribution gate, FAIL-CLOSED, same rules as the other
+            # board executors: an empty rate column on the roster is 0%
+            # (a never-set donation shows no rate at all), and a requester
+            # the hourly sync doesn't know yet WAITS instead of passing.
+            # Board rows and Discord rows with a linked MC account are
+            # gated; web-console rows (thread 0, no MC id) stay the
+            # operator's own.
+            minimum = self._auto.min_contribution_rate
+            gated = (
+                not self.is_discord_request(request)
+                or request["requester_mc_id"] is not None
+            )
+            if minimum > 0 and gated:
+                known, rate = await self.roster_contribution(
+                    request["requester_mc_id"]
+                )
+                if not known:
+                    retry_at = (
+                        dt.datetime.now(dt.timezone.utc)
+                        + dt.timedelta(minutes=30)
+                    ).isoformat()
+                    await self.requests.set_status(
+                        request["id"], "waiting",
+                        "requester is not on the stored roster yet — the "
+                        "contribution gate retries after the next members "
+                        "sync",
+                        bump_attempts=True, next_attempt_at=retry_at,
+                        announce=False,
+                    )
+                    if announce:
+                        await self.reply_for(request, _reply_error(
+                            requester,
+                            "Your building request is on hold until your "
+                            "alliance contribution can be verified (usually "
+                            "within the hour).",
+                        ))
+                    return
+                if rate < minimum:
+                    await self.requests.set_status(
+                        request["id"], "skipped",
+                        f"refused: contribution rate {rate:g}% is below the "
+                        f"required {minimum:g}%",
+                    )
+                    await self.reply_for(request, _reply_error(
+                        requester,
+                        f"Your alliance contribution is {rate:g}%; the "
+                        f"minimum required for building requests is "
+                        f"{minimum:g}%.",
+                    ))
+                    return
+
             # Per-member quota, for BOARD posts only: Discord requests were
             # gated at intake (instant feedback), and web-console rows are
             # the operator's own — exempt like the other member gates
