@@ -190,6 +190,7 @@ def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", alliance_json="[]"
     svc._auto = SimpleNamespace(
         daily_build_enabled=enabled, min_alliance_funds=min_funds,
         daily_build_time="03:00", thread_id=15304, set_tax_percent=0,
+        min_contribution_rate=0.0,
     )
 
     class _NullUpgrader:
