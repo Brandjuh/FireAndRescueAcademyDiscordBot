@@ -74,3 +74,51 @@ async def test_bulk_proceeds_when_no_interactive_waiting():
     with bulk_traffic():
         await pacer.wait_turn()                 # no gate to wait on
     assert pacer.backlog == 0
+
+
+async def test_interactive_preempts_a_bulk_waiter_mid_sleep():
+    """Sleeps happen OUTSIDE the pacing lock: a bulk request that is
+    already waiting out a delay must NOT block an interactive request
+    that arrives later — with the sleep inside the lock, the interactive
+    caller sat out the bulk sleeper's whole delay first (head-of-line
+    blocking, the recurring slow-poll-tick ingredient)."""
+    from fra_bot.core.pacing import bulk_traffic
+
+    pacer = HumanPacer(min_delay=0.25, max_delay=0.25, max_per_minute=1000)
+    await pacer.wait_turn()                       # arms the 0.25s gap
+    order = []
+
+    async def bulk_job():
+        with bulk_traffic():
+            await pacer.wait_turn()
+        order.append("bulk")
+
+    async def interactive_job():
+        await pacer.wait_turn()
+        order.append("interactive")
+
+    b = asyncio.create_task(bulk_job())
+    await asyncio.sleep(0.05)                     # bulk is mid-sleep now
+    p = asyncio.create_task(interactive_job())
+    await asyncio.wait_for(asyncio.gather(b, p), timeout=5.0)
+    assert order == ["interactive", "bulk"]
+
+
+async def test_circuit_opening_interrupts_a_sleeping_waiter():
+    """A circuit that opens while a request waits its turn must be seen
+    when the waiter re-checks — not sailed past because the check
+    happened before the sleep."""
+    import pytest
+
+    from fra_bot.core.pacing import CircuitOpenError
+
+    pacer = HumanPacer(
+        min_delay=0.3, max_delay=0.3, max_per_minute=1000,
+        failure_threshold=1, cooldown_seconds=60.0,
+    )
+    await pacer.wait_turn()                       # arms the 0.3s gap
+    task = asyncio.create_task(pacer.wait_turn())
+    await asyncio.sleep(0.05)                     # task is mid-sleep
+    pacer.record_failure()                        # breaker trips (threshold 1)
+    with pytest.raises(CircuitOpenError):
+        await asyncio.wait_for(task, timeout=5.0)

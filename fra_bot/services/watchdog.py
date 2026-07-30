@@ -31,6 +31,11 @@ log = logging.getLogger(__name__)
 
 #: A poll heartbeat older than max(3 * interval, this floor) is "dead".
 HEARTBEAT_FLOOR_MINUTES = 15
+#: Extra patience when the fired-stamp shows the scheduler is alive and
+#: only the job lock is busy: a legitimately long tick (queue execution
+#: with retries, browser builds) is NOT an incident. Alerting at the
+#: 15-minute floor made every long-but-healthy tick page the admin.
+LOCK_HELD_PATIENCE_MINUTES = 45
 #: An actionable row untouched for this long counts as stuck.
 STUCK_AGE_MINUTES = 30
 #: Repeat a given alert at most once per this window.
@@ -110,13 +115,20 @@ class AutomationWatchdog:
                 await self.state.get(f"heartbeat:fired:board-{kind}s"), now
             )
             if fired_age is not None and fired_age <= stale_after:
-                reasons.append((
-                    f"heartbeat-lock:{kind}",
-                    f"the board-{kind} poll has not completed for "
-                    f"{heartbeat_age:.0f} min although its job keeps "
-                    "firing — the job lock is held (a very long poll, or "
-                    "a wedged holder); if it persists, a restart clears it",
-                ))
+                # The scheduler is alive; the poll just can't get its
+                # lock. Long ticks are legitimate — only alert once this
+                # outlives the extra patience window.
+                if heartbeat_age > max(
+                    stale_after, LOCK_HELD_PATIENCE_MINUTES
+                ):
+                    reasons.append((
+                        f"heartbeat-lock:{kind}",
+                        f"the board-{kind} poll has not completed for "
+                        f"{heartbeat_age:.0f} min although its job keeps "
+                        "firing — the job lock is held (a very long poll, "
+                        "or a wedged holder); if it persists, a restart "
+                        "clears it",
+                    ))
             else:
                 reasons.append((
                     f"heartbeat:{kind}",
@@ -201,13 +213,27 @@ class AutomationWatchdog:
     async def _kick(self, kind: str) -> int | None:
         """Run the kind's queue under its job lock; None when the lock
         stayed busy (a poll may legitimately hold it for a while)."""
+        from .board_requests import EXECUTE_KICK_BUDGET_SECONDS
+
         lock = self.bot.job_lock(f"board-{kind}s")
         try:
             await asyncio.wait_for(lock.acquire(), timeout=180.0)
         except asyncio.TimeoutError:
             return None
         try:
-            return await self._service(kind).execute_queue_now()
+            # Bounded: this kick holds the poll's job lock — unbounded, a
+            # hung execution wedged it and every scheduled tick skipped.
+            return await asyncio.wait_for(
+                self._service(kind).execute_queue_now(),
+                timeout=EXECUTE_KICK_BUDGET_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "watchdog: %s queue kick stopped after %.0f min (lock "
+                "released; the scheduled poll resumes the queue)",
+                kind, EXECUTE_KICK_BUDGET_SECONDS / 60.0,
+            )
+            return 0
         except Exception:  # noqa: BLE001 — a failed kick is retried next tick
             log.exception("watchdog: %s queue kick failed", kind)
             return 0

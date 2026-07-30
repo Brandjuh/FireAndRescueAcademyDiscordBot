@@ -228,6 +228,42 @@ async def test_gate_rejects_low_contribution_with_numbers_and_retry_eta(db):
     assert f"<t:{verdict.retry_at}:R>" in verdict.rejection_text
     assert "try again" in verdict.rejection_text
 
+
+async def test_gate_treats_missing_rate_as_zero(db):
+    # A member who never set a donation shows NO rate on the roster at
+    # all — that IS 0%, not "unknown"; the gate used to wave those through.
+    await _seed_member(db, 42, "Alice", None, discord_id=100)
+    verdict = await contribution_gate(db, 100, 5.0)
+    assert not verdict.ok and verdict.reason == "low_contribution"
+    assert "0%" in verdict.rejection_text and "5%" in verdict.rejection_text
+
+
+async def test_immediate_training_kick_is_bounded(db, monkeypatch):
+    # The panel's instant kick holds the board-trainings job lock as a raw
+    # task OUTSIDE the scheduler's tick cap — a hung queue execution must
+    # be cut off so the lock is released and the polls keep running.
+    import fra_bot.cogs.requests_panel as rp
+
+    monkeypatch.setattr(rp, "EXECUTE_KICK_BUDGET_SECONDS", 0.05)
+
+    class HangingTrainings:
+        async def execute_queue_now(self):
+            await asyncio.Event().wait()
+
+    bot = FakeBot(
+        db=db, cfg=_cfg(), geocoder=FakeGeocoder(),
+        trainings=HangingTrainings(), buildings=FakeBuildingsService(),
+    )
+    cog = RequestsCog(bot)
+    try:
+        cog._kick_training_queue()
+        await asyncio.wait_for(
+            asyncio.gather(*list(cog._kick_tasks)), timeout=5.0
+        )
+        assert not bot.job_lock("board-trainings").locked()
+    finally:
+        cog.cog_unload()
+
 async def test_gate_passes_good_contribution(db):
     await _seed_member(db, 42, "Alice", 5.0, discord_id=100)
     verdict = await contribution_gate(db, 100, 5.0)

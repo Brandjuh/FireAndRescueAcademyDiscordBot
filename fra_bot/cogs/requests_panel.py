@@ -37,6 +37,7 @@ from ..db.repos import AutomationRepo, RemindersRepo, StateRepo
 from ..geo.geocoder import GeocodeError
 from ..geo.maps_links import find_maps_links
 from ..mc.trainings_catalog import DISCIPLINES
+from ..services.board_requests import EXECUTE_KICK_BUDGET_SECONDS
 from ..services.buildings import (
     REQUEST_LIMIT_PER_MEMBER,
     REQUEST_LIMIT_WINDOW_HOURS,
@@ -443,7 +444,19 @@ class RequestsCog(commands.Cog):
                 )
                 return
             try:
-                await self.bot.trainings.execute_queue_now()
+                # Bounded: this task holds the shared job lock OUTSIDE the
+                # scheduler's tick cap — unbounded, a hung execution wedged
+                # the lock and every scheduled poll skipped its tick.
+                await asyncio.wait_for(
+                    self.bot.trainings.execute_queue_now(),
+                    timeout=EXECUTE_KICK_BUDGET_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                log.warning(
+                    "immediate training kick stopped after %.0f min — the "
+                    "scheduled poll resumes the queue",
+                    EXECUTE_KICK_BUDGET_SECONDS / 60.0,
+                )
             except Exception:
                 log.exception("immediate training execution failed")
             finally:

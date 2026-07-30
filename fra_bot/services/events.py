@@ -78,19 +78,49 @@ class EventsService(BoardRequestService):
         requester = request["requester_name"]
 
         if not payload.get("latitude"):
-            # First attempt: gate on contribution rate, then geocode.
-            rate = await self.contribution_rate(request["requester_mc_id"])
-            if rate is not None and rate < self._auto.min_contribution_rate:
-                await self.requests.set_status(
-                    request["id"], "skipped",
-                    f"contribution {rate:g}% below {self._auto.min_contribution_rate:g}%",
+            # First attempt: gate on contribution rate (FAIL-CLOSED — an
+            # unknown rate waits for the roster instead of passing), then
+            # geocode.
+            minimum = self._auto.min_contribution_rate
+            gated = (
+                not self.is_discord_request(request)
+                or request["requester_mc_id"] is not None
+            )
+            if minimum > 0 and gated:
+                known, rate = await self.roster_contribution(
+                    request["requester_mc_id"]
                 )
-                await self.reply(
-                    f"@{requester}: event request not accepted — your alliance "
-                    f"contribution ({rate:g}%) is below "
-                    f"{self._auto.min_contribution_rate:g}%."
-                )
-                return
+                if not known:
+                    retry_at = (
+                        dt.datetime.now(dt.timezone.utc)
+                        + dt.timedelta(minutes=30)
+                    ).isoformat()
+                    await self.requests.set_status(
+                        request["id"], "waiting",
+                        "requester is not on the stored roster yet — the "
+                        "contribution gate retries after the next members "
+                        "sync",
+                        bump_attempts=True, next_attempt_at=retry_at,
+                        announce=False,
+                    )
+                    if announce:
+                        await self.reply(
+                            f"@{requester}: your event request is on hold "
+                            "until your alliance contribution can be "
+                            "verified (usually within the hour)."
+                        )
+                    return
+                if rate < minimum:
+                    await self.requests.set_status(
+                        request["id"], "skipped",
+                        f"contribution {rate:g}% below {minimum:g}%",
+                    )
+                    await self.reply(
+                        f"@{requester}: event request not accepted — your "
+                        f"alliance contribution ({rate:g}%) is below "
+                        f"{minimum:g}%."
+                    )
+                    return
             try:
                 resolved = await self._resolve(payload["location"])
             except GeocodeError as exc:

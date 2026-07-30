@@ -648,16 +648,19 @@ class FRABot(commands.Bot):
                 name="tax-warnings",
                 initial_delay_seconds=900.0,
             )
-        # Class-availability panel: hourly free-classroom counts. The walk
-        # reuses the trainings guide's cache when that already ran this
-        # hour, so the two consumers never double the game traffic.
-        if int(getattr(self.cfg.discord.channels, "class_panel", 0) or 0):
-            sched.add_interval_job(
-                self._guarded(self._class_availability_pass, "class-availability"),
-                minutes=60,
-                name="class-availability",
-                initial_delay_seconds=180.0,
-            )
+        # Hourly free-classroom walk. ALWAYS registered: this job is the
+        # ONLY place the availability cache and the live course catalog
+        # get refreshed — the board guide and the Discord chooser render
+        # from that cache, so the board-trainings poll tick never walks
+        # the academies itself (a walk inside the tick held the job lock
+        # for its whole bulk-paced duration and starved the poll). The
+        # Discord panel render part is skipped when no channel is set.
+        sched.add_interval_job(
+            self._guarded(self._class_availability_pass, "class-availability"),
+            minutes=60,
+            name="class-availability",
+            initial_delay_seconds=180.0,
+        )
         # Saved-missions list for the Discord mission chooser: one form
         # fetch per pass (also refreshed opportunistically on every large
         # mission start).

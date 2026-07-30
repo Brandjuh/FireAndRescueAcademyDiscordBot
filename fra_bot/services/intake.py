@@ -120,8 +120,11 @@ async def contribution_gate(
     row = (await MembersRepo(db).active_members()).get(mc_user_id)
     if row is None:
         return IntakeVerdict(True, None, mc_user_id, None, None, min_rate)
-    rate = row["contribution_rate"]
-    if rate is not None and rate < min_rate:
+    # An empty contribution column on the roster IS 0% (a never-set
+    # donation shows no rate at all) — treating it as unknown waved 0%
+    # contributors straight through the gate.
+    rate = float(row["contribution_rate"] or 0.0)
+    if rate < min_rate:
         retry_at = await _roster_refresh_eta(db, members_interval_minutes)
         return IntakeVerdict(
             False, "low_contribution", mc_user_id, row["name"], rate, min_rate,

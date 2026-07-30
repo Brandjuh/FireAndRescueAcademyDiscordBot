@@ -150,9 +150,7 @@ class HumanPacer:
             self._bulk_waiting += 1
         try:
             if bulk:
-                while self._priority_waiters:
-                    await self._no_priority.wait()
-                await self._wait_turn_inner()
+                await self._wait_turn_inner(bulk=True)
             else:
                 self._priority_waiters += 1
                 self._no_priority.clear()
@@ -167,27 +165,47 @@ class HumanPacer:
             if bulk:
                 self._bulk_waiting -= 1
 
-    async def _wait_turn_inner(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            if now < self._circuit_open_until:
-                raise CircuitOpenError(time.time() + (self._circuit_open_until - now))
+    async def _wait_turn_inner(self, *, bulk: bool = False) -> None:
+        """Claim the next send slot; sleeps happen OUTSIDE the lock.
 
-            # Sliding one-minute window cap.
-            while self._recent and self._recent[0] < now - 60.0:
-                self._recent.popleft()
-            wait_for_window = 0.0
-            if len(self._recent) >= self._max_per_minute:
-                wait_for_window = self._recent[0] + 60.0 - now
+        The lock is only held to look at (or claim) the slot bookkeeping —
+        never across a sleep. Sleeping INSIDE the lock made every queued
+        waiter (bulk included) a head-of-line blocker: an interactive
+        request that arrived behind a bulk sleeper waited out that
+        sleeper's whole delay before it could even look, and delays
+        stacked across the queue. Now everyone sleeps concurrently and
+        re-competes, bulk re-checks the priority gate on every attempt
+        (so board work truly preempts backfills mid-wait), and a circuit
+        that opens while a waiter sleeps is seen on its next attempt
+        instead of being sailed past."""
+        while True:
+            if bulk:
+                while self._priority_waiters:
+                    await self._no_priority.wait()
+            async with self._lock:
+                now = time.monotonic()
+                if now < self._circuit_open_until:
+                    raise CircuitOpenError(
+                        time.time() + (self._circuit_open_until - now)
+                    )
 
-            wait_for_jitter = max(0.0, self._next_allowed - now)
-            delay = max(wait_for_window, wait_for_jitter)
-            if delay > 0:
-                await asyncio.sleep(delay)
+                # Sliding one-minute window cap.
+                while self._recent and self._recent[0] < now - 60.0:
+                    self._recent.popleft()
+                wait_for_window = 0.0
+                if len(self._recent) >= self._max_per_minute:
+                    wait_for_window = self._recent[0] + 60.0 - now
 
-            sent_at = time.monotonic()
-            self._recent.append(sent_at)
-            self._next_allowed = sent_at + random.uniform(self._min_delay, self._max_delay)
+                wait_for_jitter = max(0.0, self._next_allowed - now)
+                delay = max(wait_for_window, wait_for_jitter)
+                if delay <= 0:
+                    sent_at = time.monotonic()
+                    self._recent.append(sent_at)
+                    self._next_allowed = sent_at + random.uniform(
+                        self._min_delay, self._max_delay
+                    )
+                    return
+            await asyncio.sleep(delay)
 
     def record_success(self) -> None:
         # Windowed breaker: a single success no longer wipes the failure
