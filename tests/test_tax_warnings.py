@@ -331,3 +331,132 @@ async def test_overview_lists_low_members(db):
     lines = await svc.overview()
     assert len(lines) == 1
     assert "Slacker" in lines[0] and "0/3" in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# Stale-roster gate, unconfirmed sends, kick verification
+# ---------------------------------------------------------------------------
+
+async def _record_members_run(db, *, hours_ago: float) -> None:
+    iso = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours_ago)
+    ).isoformat(timespec="seconds")
+    await db.execute(
+        "INSERT INTO scrape_runs (scraper, status, started_at, finished_at) "
+        "VALUES ('members', 'success', ?, ?)",
+        (iso, iso),
+    )
+
+
+async def test_stale_roster_skips_warnings_but_still_resolves(db, monkeypatch):
+    # A failing members sync freezes the stored rates; warning on them hits
+    # members who already fixed their donation days ago. Resolving stays
+    # allowed (it only STOPS warnings).
+    sent = []
+
+    async def fake_send(client, recipient, subject, body):
+        sent.append(recipient)
+        return True
+
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
+    await _add_member(db, 1, "Slacker", 1.0)
+    await _add_member(db, 2, "Fixed", 10.0)
+    await _record_members_run(db, hours_ago=26)
+    svc = TaxWarningService(_cfg(), FakeClient(), db)
+    await svc.warnings.record_warning(2, "Fixed", count=1)
+
+    lines = await svc.scan()
+    assert any("skipped" in line and "roster" in line for line in lines)
+    assert any("donation fixed" in line for line in lines)  # resolve still ran
+    assert sent == [] and await svc.warnings.get(1) is None
+
+    # A fresh successful sync re-enables the pass.
+    await _record_members_run(db, hours_ago=0)
+    lines = await svc.scan()
+    assert any("warning 1/3 sent to Slacker" in line for line in lines)
+    assert sent == ["Slacker"]
+
+
+async def test_unconfirmed_send_is_recorded_not_resent(db, monkeypatch):
+    # The game regularly delivers a PM without showing its success flash.
+    # Resending "until confirmed" gave members the same "no contribution
+    # set" warning several times — record it once and move on instead.
+    from fra_bot.mc.messages import UNCONFIRMED_PREFIX
+
+    calls = []
+
+    async def fake_send(client, recipient, subject, body):
+        calls.append(recipient)
+        return False, f"{UNCONFIRMED_PREFIX} (no success flash)", None
+
+    monkeypatch.setattr("fra_bot.mc.messages.send_new_message", fake_send)
+    await _add_member(db, 1, "Quiet", 1.0)
+    svc = TaxWarningService(_cfg(), FakeClient(), db)
+
+    lines = await svc.scan()
+    assert any("did not confirm" in line and "recorded" in line for line in lines)
+    state = await svc.warnings.get(1)
+    assert state["warning_count"] == 1                    # ladder advanced
+    assert await svc.state.get("taxwarn_send_attempts:1") is None
+    assert await svc.scan() == []                         # gap applies
+    assert len(calls) == 1                                # no duplicate PM
+
+
+async def test_kick_that_did_not_stick_is_reopened_and_retried(db):
+    # The kick route answers 200 even when the game silently refuses; only
+    # the roster proves a kick. Still listed hours later -> reopen + retry.
+    await _add_member(db, 1, "Stubborn", 1.0)             # still on the roster
+    svc = TaxWarningService(_cfg(auto_kick=True), FakeClient(), db)
+    await svc.warnings.record_warning(1, "Stubborn", count=MAX_WARNINGS)
+    await db.execute(
+        "UPDATE tax_warnings SET last_warning_at = ?, kicked_at = ? "
+        "WHERE mc_user_id = 1",
+        (_iso(8), _iso(0.2)),                             # "kicked" ~5h ago
+    )
+
+    lines = await svc.scan()
+    assert any("did NOT stick" in line for line in lines)
+    assert any("kicked after" in line for line in lines)  # retried right away
+    assert (await svc.warnings.get(1))["kicked_at"] is not None
+
+
+async def test_kick_verification_waits_for_the_roster(db):
+    await _add_member(db, 1, "JustKicked", 1.0)
+    svc = TaxWarningService(_cfg(auto_kick=True), FakeClient(), db)
+    await svc.warnings.record_warning(1, "JustKicked", count=MAX_WARNINGS)
+
+    # Kicked 30 minutes ago: the hourly roster can't have observed it yet.
+    await db.execute(
+        "UPDATE tax_warnings SET last_warning_at = ?, kicked_at = ? "
+        "WHERE mc_user_id = 1",
+        (_iso(8), _iso(0.5 / 24)),
+    )
+    assert not any("did NOT stick" in line for line in await svc.scan())
+
+    # Kicked 2h ago, but the roster last SAW them before the kick: no verdict.
+    await db.execute(
+        "UPDATE tax_warnings SET kicked_at = ? WHERE mc_user_id = 1",
+        (_iso(2 / 24),),
+    )
+    await db.execute(
+        "UPDATE members SET last_seen_at = ? WHERE mc_user_id = 1",
+        (_iso(3 / 24),),
+    )
+    assert not any("did NOT stick" in line for line in await svc.scan())
+    assert (await svc.warnings.get(1))["kicked_at"] is not None
+
+
+async def test_confirmed_kick_stays_closed(db):
+    # Member really gone from the roster: the kicked trail stays closed.
+    await _add_member(db, 1, "Gone", 1.0)
+    await db.execute("UPDATE members SET is_active = 0 WHERE mc_user_id = 1")
+    svc = TaxWarningService(_cfg(auto_kick=True), FakeClient(), db)
+    await svc.warnings.record_warning(1, "Gone", count=MAX_WARNINGS)
+    await db.execute(
+        "UPDATE tax_warnings SET kicked_at = ? WHERE mc_user_id = 1",
+        (_iso(0.5),),
+    )
+    assert await svc.scan() == []
+    assert (await svc.warnings.get(1))["kicked_at"] is not None

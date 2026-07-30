@@ -128,6 +128,21 @@ async def test_unconfirmed_send_reports_the_game_error():
     assert "could not be found" in detail
 
 
+async def test_rejection_and_unconfirmed_get_distinct_details():
+    """Callers must be able to tell 'the game refused this PM' (retry is
+    safe) apart from 'delivery just was not proven' (a retry would send the
+    member a duplicate) — the tax warnings key their behaviour off this."""
+    from fra_bot.mc.messages import UNCONFIRMED_PREFIX
+
+    rejected = FakeClient(post_status=200, post_html=REJECTED_HTML)
+    ok, detail, _ = await send_new_message(rejected, "X", "S", "B")
+    assert ok is False and not detail.startswith(UNCONFIRMED_PREFIX)
+
+    silent = FakeClient(post_status=200, post_html=COMPOSE_HTML)
+    ok, detail, _ = await send_new_message(silent, "X", "S", "B")
+    assert ok is False and detail.startswith(UNCONFIRMED_PREFIX)
+
+
 async def test_recipient_is_normalized_before_posting():
     client = FakeClient()
     await send_new_message(client, "  Tbonefire3 ", "S", "B")

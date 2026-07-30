@@ -15,6 +15,22 @@ Every scan (6-hourly) walks the freshly synced member roster:
   later dip starts over at warning 1. (The old bot never reset, which is
   why it kept warning members who had already fixed their tax.)
 
+Correctness guards (each one exists because its absence sent wrong PMs):
+
+* **stale-roster gate** — rates come from the hourly members sync; when
+  that sync has been failing, the stored rates are frozen and a member
+  who fixed their donation days ago still looks below-minimum. No
+  warning or kick fires while the last successful sync is too old.
+* **unconfirmed sends advance the ladder** — the game regularly answers
+  a delivered PM without its success flash; resending "until confirmed"
+  delivered the same warning multiple times to the same member. Only a
+  send the game explicitly REJECTED (error text / HTTP failure) is
+  retried.
+* **kicks are verified against the roster** — the kick route answers 200
+  even when the game silently refuses (missing alliance rights). A
+  member still being seen by the members sync well after their "kick"
+  gets the trail reopened instead of being considered gone forever.
+
 Honours the global ``dry_run``: reports what it would send, sends
 nothing. The member roster comes from the hourly members sync, so a fix
 in game is picked up within the hour.
@@ -29,15 +45,27 @@ from ..config import Config
 from ..db.database import Database, utcnow_iso
 from ..db.repos import MembersRepo, RunsRepo, StateRepo, TaxWarningsRepo
 from ..mc.client import MissionChiefClient
+from ..mc.messages import UNCONFIRMED_PREFIX
 
 log = logging.getLogger(__name__)
 
 MAX_WARNINGS = 3
-# In-game PM delivery isn't reliably confirmed by the game (it only errors on
-# a hard block), and some accounts are simply undeliverable (blocked / ghost).
-# Retry a warning that can't be confirmed a few times, then give up so the bot
-# doesn't retry it every pass forever and re-spam the admin channel.
+# Hard send failures (the game rejected the PM, or HTTP/network errors) are
+# retried a few times, then abandoned so the bot doesn't retry them every
+# pass forever and re-spam the admin channel. Unconfirmed-but-probably-
+# delivered sends are NOT retried at all — see the module docstring.
 MAX_SEND_ATTEMPTS = 3
+
+# Skip the warning/kick passes when the last successful members sync is
+# older than max(2 × sync interval, this floor) — acting on a frozen roster
+# warns members who already fixed their donation.
+ROSTER_STALE_MINUTES_FLOOR = 120.0
+
+# A kick only counts once the roster has had time to observe it: the member
+# must still be seen this long after the kick (plus a margin for a sync that
+# was mid-flight during the kick) before the trail is reopened.
+KICK_VERIFY_MIN_HOURS = 1.0
+KICK_VERIFY_MARGIN_HOURS = 0.5
 
 # The reference bot's in-game PM presets, verbatim.
 WARNING_PRESETS: dict[int, tuple[str, str]] = {
@@ -182,6 +210,28 @@ class TaxWarningService:
                     f"warning {row['warning_count']} — warnings reset"
                 )
 
+        # 1.5 Stale-roster gate: resolving above is safe on old data (it
+        #     only STOPS warnings), but warning or kicking on frozen rates
+        #     hits members who already fixed their donation. Skip the
+        #     acting passes until the members sync succeeds again.
+        age_minutes = await self._roster_age_minutes(now)
+        stale_after = max(
+            2.0 * float(getattr(getattr(self.cfg, "sync", None),
+                                "members_interval", 60) or 60),
+            ROSTER_STALE_MINUTES_FLOOR,
+        )
+        if age_minutes is not None and age_minutes > stale_after:
+            lines.append(
+                f"⏭️ warning pass skipped: the member roster is "
+                f"{age_minutes / 60.0:.1f}h old (is the members sync "
+                "failing?) — nobody is warned or kicked on outdated "
+                "donation rates"
+            )
+            return lines
+
+        # 1.6 Verify that earlier kicks actually stuck.
+        lines.extend(await self._verify_kicks(roster, now))
+
         # 2. Warn who is due, worst rate first, capped per run.
         sent = 0
         for member in sorted(
@@ -239,9 +289,15 @@ class TaxWarningService:
                 self.client, str(member["name"]), subject,
                 body.format(username=member["name"]),
             )
-            if not ok:
-                # The game rarely confirms delivery (it only errors on a hard
-                # block), and some accounts are undeliverable. Count the try;
+            # "Unconfirmed" = the POST landed and the game showed NO error,
+            # it just didn't prove the delivery. Those PMs almost always DID
+            # arrive — resending "until confirmed" is exactly how members got
+            # the same "no contribution set" warning several times over.
+            # Record it and move on; only explicit rejections are retried.
+            unconfirmed = not ok and detail.startswith(UNCONFIRMED_PREFIX)
+            if not ok and not unconfirmed:
+                # The game rejected the PM (recipient not found, blocked) or
+                # the request itself failed — nothing arrived. Count the try;
                 # after MAX_SEND_ATTEMPTS, give up instead of retrying forever.
                 attempts += 1
                 await self.state.set(attempts_key, str(attempts))
@@ -254,7 +310,7 @@ class TaxWarningService:
                     )
                 else:
                     lines.append(
-                        f"⚠️ {member['name']}: warning {level} not confirmed "
+                        f"⚠️ {member['name']}: warning {level} rejected "
                         f"(attempt {attempts}/{MAX_SEND_ATTEMPTS}, will retry) — "
                         f"{detail}"
                     )
@@ -273,7 +329,9 @@ class TaxWarningService:
                     actor_name=str(member["name"]),
                     action="tax_warning_sent",
                     detail=f"tax warning {level} (contribution below the "
-                           f"{self._auto.min_rate:g}% minimum)",
+                           f"{self._auto.min_rate:g}% minimum)"
+                           + (" — delivery not confirmed by the game"
+                              if unconfirmed else ""),
                 )
             except Exception:  # noqa: BLE001 — bookkeeping must not stop sends
                 log.exception("tax warning action log failed")
@@ -286,12 +344,72 @@ class TaxWarningService:
                     log.exception("Could not mirror tax warning conversation")
             # The conversation id makes every "sent" claim verifiable:
             # /messages/<id> in the game must show this exact message.
-            proof = f"conv #{conversation_id}" if conversation_id else "no conv id!"
-            lines.append(
-                f"📨 warning {level}/{MAX_WARNINGS} sent to {member['name']} "
-                f"({rate:g}%, {proof})"
-            )
+            if unconfirmed:
+                lines.append(
+                    f"📨 warning {level}/{MAX_WARNINGS} to {member['name']} "
+                    f"({rate:g}%) — the game did not confirm delivery; "
+                    "recorded anyway (a resend would duplicate the PM)"
+                )
+            else:
+                proof = (
+                    f"conv #{conversation_id}" if conversation_id
+                    else "no conv id!"
+                )
+                lines.append(
+                    f"📨 warning {level}/{MAX_WARNINGS} sent to "
+                    f"{member['name']} ({rate:g}%, {proof})"
+                )
             sent += 1
+        return lines
+
+    async def _roster_age_minutes(self, now: dt.datetime) -> float | None:
+        """Minutes since the last SUCCESSFUL members sync; None when none is
+        recorded (fresh install — the members table is empty then anyway,
+        so there is nobody to warn either)."""
+        row = await self.runs.last_success("members")
+        if row is None:
+            return None
+        hours = _hours_since(row["finished_at"] or row["started_at"], now)
+        return None if hours is None else hours * 60.0
+
+    async def _verify_kicks(self, roster, now: dt.datetime) -> list[str]:
+        """Reopen trails whose kick did not stick.
+
+        The kick route answers 200 even when the game silently refuses
+        (missing alliance rights, protected role), so ``kicked_at`` is only
+        a claim. The roster is the proof: a member the members sync still
+        sees well AFTER the kick was accepted was not kicked — reopen the
+        trail so the kick-due stage retries (or re-flags) instead of
+        considering them gone forever."""
+        lines: list[str] = []
+        for row in await self.warnings.kicked_rows():
+            member = roster.get(row["mc_user_id"])
+            if member is None:
+                continue  # gone from the roster — the kick stuck
+            kicked_h = _hours_since(row["kicked_at"], now)
+            seen_h = _hours_since(member["last_seen_at"], now)
+            if kicked_h is None or kicked_h < KICK_VERIFY_MIN_HOURS:
+                continue  # the roster hasn't had time to observe the kick
+            if seen_h is None or seen_h + KICK_VERIFY_MARGIN_HOURS >= kicked_h:
+                continue  # not seen since the kick — no verdict yet
+            await self.warnings.mark_kick_failed(row["mc_user_id"])
+            try:
+                await self.actions.log(
+                    discord_user_id=None,
+                    mc_user_id=int(row["mc_user_id"]),
+                    actor_name=str(member["name"]),
+                    action="tax_kick_failed",
+                    detail=f"kick did not stick — still on the roster "
+                           f"{kicked_h:.1f}h later (check the bot account's "
+                           "alliance rights)",
+                )
+            except Exception:  # noqa: BLE001 — bookkeeping must not stop the scan
+                log.exception("kick verification action log failed")
+            lines.append(
+                f"⚠️ {member['name']}: the earlier kick did NOT stick — they "
+                f"are still on the roster {kicked_h:.1f}h later. Check the "
+                "bot account's alliance rights; the kick stage will retry."
+            )
         return lines
 
     async def _handle_kick_due(self, member, state, now: dt.datetime) -> str | None:
@@ -319,9 +437,25 @@ class TaxWarningService:
         if not ok:
             return f"⚠️ {member['name']}: automatic kick failed — {detail}"
         await self.warnings.mark_kicked(member["mc_user_id"])
+        # Into the dossier/timeline too — and note that the claim still gets
+        # verified against the roster (see _verify_kicks).
+        try:
+            await self.actions.log(
+                discord_user_id=None,
+                mc_user_id=int(member["mc_user_id"]),
+                actor_name=str(member["name"]),
+                action="tax_kicked",
+                detail=f"auto-kicked after {MAX_WARNINGS} unresolved donation "
+                       f"warnings ({detail}); the roster sync verifies the "
+                       "departure",
+            )
+        except Exception:  # noqa: BLE001 — bookkeeping must not stop the scan
+            log.exception("tax kick action log failed")
         return (
             f"👢 {member['name']} kicked after {MAX_WARNINGS} unresolved "
-            f"donation warnings ({detail})"
+            f"donation warnings ({detail}) — the roster sync will confirm "
+            "the departure; if they are still listed in a few hours I will "
+            "flag it and retry"
         )
 
     async def overview(self) -> list[str]:
