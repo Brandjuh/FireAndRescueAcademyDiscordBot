@@ -67,12 +67,16 @@ def clamp_class_count(value) -> int:
 GUIDE_MARKER = "[FRA] 📋 How to request a TRAINING"
 
 #: State key holding the last availability walk: {"counts": {...}, "at": epoch}.
-#: Written by the hourly guide refresh; read by the Discord training chooser.
+#: Written by the hourly class-availability job; read by the board guide,
+#: the Discord training chooser and the class panel. The guide only READS
+#: this cache — the walk that fills it must never run inside a poll tick
+#: (it held the board-trainings job lock for its whole duration and
+#: starved every scheduled poll).
 AVAILABILITY_STATE_KEY = "training_availability"
-#: Hard budget for one availability walk inside the guide refresh: paced
-#: page fetches across every academy can otherwise outlive the poll tick,
-#: and the guide write (with its "Last updated" line) then never happens.
-AVAILABILITY_WALK_BUDGET_SECONDS = 20 * 60
+#: Cache older than this gets an honest "(numbers from …)" note on the
+#: guide — one missed hourly walk is fine, silence about a frozen cache
+#: is not.
+AVAILABILITY_STALE_SECONDS = 2 * 3600
 
 #: State key holding the live-harvested course lists per agency:
 #: {"courses": {discipline: {name: days}}, "at": epoch}. The academies'
@@ -268,40 +272,25 @@ class TrainingsService(BoardRequestService):
         return _overview_guide(self._auto.min_contribution_rate)
 
     async def _overview_content(self, now_epoch: float, *, quick: bool = False) -> str:
-        """Overview post: the stable how-to text + the live academy
-        availability + a last-updated line. Expensive (walks the academy
-        pages) — only built once the guide throttle decided to write.
-        ``quick`` skips the walk (used by the forced `!fra guides` sync so
-        the posts land fast); the hourly refresh fills the numbers in.
+        """Overview post: the stable how-to text + the academy availability
+        + a last-updated line.
 
-        The walk is BOUNDED: with many academies (paced 4-9 s per page,
-        yielding to member work) it can outlive the whole poll tick, and
-        an unbounded walk kept the guide's "Last updated" line frozen for
-        days — the write step never ran. On timeout the guide refreshes
-        anyway, with the cached numbers and an honest note."""
-        import asyncio as _asyncio
-
+        The numbers come from the CACHE only — the walk that fills it runs
+        in the hourly ``class-availability`` job, never here. The walk is
+        many BULK-paced page fetches that yield to all member work; ran
+        inside this poll tick it regularly outlived the watchdog's patience
+        while holding the board-trainings job lock (every scheduled tick
+        then skipped with "already running"), which is exactly the
+        recurring "poll has not run for N min" incident. ``quick`` is kept
+        for call compatibility; both paths read the cache."""
         from ..mc.board import guide_updated_line
 
         counts = None
-        from_cache_at: int | None = None
-        if not quick:
-            try:
-                counts = await _asyncio.wait_for(
-                    self._collect_availability(),
-                    timeout=AVAILABILITY_WALK_BUDGET_SECONDS,
-                )
-            except _asyncio.TimeoutError:
-                log.warning(
-                    "training availability walk exceeded %d min; the guide "
-                    "refreshes with cached numbers",
-                    AVAILABILITY_WALK_BUDGET_SECONDS // 60,
-                )
-            if counts is None:
-                cached = await self.cached_availability()
-                if cached is not None:
-                    counts = cached.get("counts")
-                    from_cache_at = cached.get("at")
+        cached_at: int | None = None
+        cached = await self.cached_availability()
+        if cached is not None:
+            counts = cached.get("counts")
+            cached_at = int(cached.get("at") or 0) or None
         lines = [
             self.guide_body(),
             "",
@@ -315,12 +304,13 @@ class TrainingsService(BoardRequestService):
                 count = counts.get(key, 0)
                 unit = "class" if count == 1 else "classes"
                 lines.append(f"- {_AGENCY_TITLES[key]}: {count} {unit}")
-            if from_cache_at:
+            if cached_at and (now_epoch - cached_at) > AVAILABILITY_STALE_SECONDS:
                 stamp = dt.datetime.fromtimestamp(
-                    int(from_cache_at), dt.timezone.utc
+                    cached_at, dt.timezone.utc
                 ).strftime("%Y-%m-%d %H:%M UTC")
                 lines.append(
-                    f"- (numbers from {stamp} — a live recount is under way)"
+                    f"- (numbers from {stamp} — the hourly recount "
+                    "refreshes them)"
                 )
         return "\n".join(lines)
 
@@ -689,21 +679,57 @@ class TrainingsService(BoardRequestService):
                 AmbiguousMatch(name=a["name"], disciplines=tuple(a["disciplines"]))
                 for a in payload.get("ambiguous", [])
             ]
-            # Gate on contribution rate on the first attempt only.
-            rate = await self.contribution_rate(request["requester_mc_id"])
-            if rate is not None and rate < self._auto.min_contribution_rate:
-                await self.requests.set_status(
-                    request["id"], "skipped",
-                    f"contribution rate {rate:g}% is below the required "
-                    f"{self._auto.min_contribution_rate:g}%",
+            # Contribution gate, FAIL-CLOSED: an unknown rate must never
+            # open a free class (a never-set donation shows NO rate on the
+            # roster — exactly how a 0% contributor got a class opened).
+            # Unknown requesters wait for the next members sync instead.
+            # Applies to every BOARD row and to Discord rows with a linked
+            # MC account; web-console rows (thread 0, no MC id) are the
+            # operator's own, exempt like the other member gates there.
+            minimum = self._auto.min_contribution_rate
+            gated = (
+                not self.is_discord_request(request)
+                or request["requester_mc_id"] is not None
+            )
+            if minimum > 0 and gated:
+                known, rate = await self.roster_contribution(
+                    request["requester_mc_id"]
                 )
-                await self.reply_for(
-                    request,
-                    f"@{request['requester_name']}: your training request was not "
-                    f"processed — your alliance contribution is {rate:g}%, the "
-                    f"minimum is {self._auto.min_contribution_rate:g}%."
-                )
-                return
+                if not known:
+                    retry_at = (
+                        dt.datetime.now(dt.timezone.utc)
+                        + dt.timedelta(minutes=30)
+                    ).isoformat()
+                    await self.requests.set_status(
+                        request["id"], "waiting",
+                        "requester is not on the stored roster yet — the "
+                        "contribution gate retries after the next members "
+                        "sync",
+                        bump_attempts=True, next_attempt_at=retry_at,
+                        announce=False,
+                    )
+                    if announce:
+                        await self.reply_for(
+                            request,
+                            f"@{request['requester_name']}: your training "
+                            "request is on hold until your alliance "
+                            "contribution can be verified (usually within "
+                            "the hour).",
+                        )
+                    return
+                if rate < minimum:
+                    await self.requests.set_status(
+                        request["id"], "skipped",
+                        f"contribution rate {rate:g}% is below the required "
+                        f"{minimum:g}%",
+                    )
+                    await self.reply_for(
+                        request,
+                        f"@{request['requester_name']}: your training request "
+                        f"was not processed — your alliance contribution is "
+                        f"{rate:g}%, the minimum is {minimum:g}%."
+                    )
+                    return
 
         await self._process(request, payload, match_counts, ambiguous, announce=announce)
 

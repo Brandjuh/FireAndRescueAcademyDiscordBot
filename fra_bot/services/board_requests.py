@@ -62,6 +62,14 @@ MAX_ATTEMPTS = 12
 ERROR_RETRY_BASE_MINUTES = 15
 ERROR_RETRY_CAP_MINUTES = 120
 
+#: Hard bound on OUT-OF-BAND queue kicks (the Discord intake's immediate
+#: kick, the watchdog's re-kick). They run as raw tasks holding the shared
+#: job lock OUTSIDE the scheduler's per-tick cap — unbounded, a hung kick
+#: wedged that lock and every scheduled poll skipped its tick ("already
+#: running") forever. On timeout the interrupted row is parked 'waiting'
+#: by the CancelledError handler and the next poll resumes the queue.
+EXECUTE_KICK_BUDGET_SECONDS = 900.0
+
 # A request is done with the board once it reaches one of these.
 _TERMINAL_STATUSES = frozenset({"done", "failed", "skipped"})
 
@@ -503,10 +511,21 @@ class BoardRequestService:
             return
         await self.reply(content)
 
-    async def contribution_rate(self, mc_user_id: int | None) -> float | None:
-        """Requester's alliance contribution rate from the roster."""
+    async def roster_contribution(
+        self, mc_user_id: int | None
+    ) -> tuple[bool, float]:
+        """``(known, rate)`` for a requester — the FAIL-CLOSED gate input.
+
+        A roster member whose contribution column is empty is KNOWN at
+        0.0: a member who never set a donation shows no rate at all, and
+        the old ``rate is not None and rate < minimum`` comparison waved
+        exactly those 0% contributors through every gate. ``known=False``
+        (no MC id on the post, or not on the stored roster yet — the
+        hourly sync lags fresh joiners) must make the caller WAIT or
+        refuse, never pass."""
         if mc_user_id is None:
-            return None
-        active = await self.members.active_members()
-        row = active.get(mc_user_id)
-        return row["contribution_rate"] if row is not None else None
+            return False, 0.0
+        row = (await self.members.active_members()).get(mc_user_id)
+        if row is None:
+            return False, 0.0
+        return True, float(row["contribution_rate"] or 0.0)

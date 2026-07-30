@@ -1025,9 +1025,15 @@ async def test_geocode_permanent_failure_notifies_board(db):
     sched = MissionScheduler(_cfg(dry_run=True), FakeClient(), db, DeadGeo())
     board = FakeBoard([])
     sched.board = board
+    # The fail-closed contribution gate needs the requester on the roster.
+    await db.execute(
+        "INSERT INTO members (mc_user_id, name, contribution_rate, is_active, "
+        "first_seen_at, last_seen_at) "
+        "VALUES (42, 'Alice', 10.0, 1, '2026-01-01', '2026-07-01')"
+    )
     mid = await _enqueue(
         sched, source="board", board_thread_id=15307, board_post_id=101,
-        requester_name="Alice", location_text="Atlantis",
+        requester_name="Alice", requester_mc_id=42, location_text="Atlantis",
     )
     await sched._advance()
     row = await sched.missions.get(mid)

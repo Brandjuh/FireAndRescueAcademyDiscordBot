@@ -907,18 +907,34 @@ class MissionScheduler:
         lat, lng = mission["latitude"], mission["longitude"]
         address = mission["address"] or ""
         if lat is None or lng is None:
-            # Board requests are self-serve: gate on contribution rate.
+            # Board requests are self-serve: gate on contribution rate,
+            # FAIL-CLOSED — an unknown rate (never-set donation, or a
+            # requester the hourly roster sync hasn't seen yet) must never
+            # start a mission; unknowns wait for the roster instead.
             if mission["source"] == "board":
-                rate = await self._contribution_rate(mission["requester_mc_id"])
-                if rate is not None and rate < self._auto.min_contribution_rate:
+                minimum = self._auto.min_contribution_rate
+                known, rate = await self._roster_contribution(
+                    mission["requester_mc_id"]
+                )
+                if minimum > 0 and not known:
+                    await self.missions.set_status(
+                        mission["id"], "waiting",
+                        "requester is not on the stored roster yet — the "
+                        "contribution gate retries after the next members "
+                        "sync",
+                        next_attempt_at=_transient_backoff(mission["attempts"]),
+                        bump_attempts=True, announce=False,
+                    )
+                    return None
+                if minimum > 0 and rate < minimum:
                     await self.missions.set_status(
                         mission["id"], "skipped",
-                        f"contribution {rate:g}% below {self._auto.min_contribution_rate:g}%",
+                        f"contribution {rate:g}% below {minimum:g}%",
                     )
                     await self._notify_board(mission, _event_error_reply(
                         requester,
                         f"Latest alliance donation is {rate:.1f}%, below the "
-                        f"required {self._auto.min_contribution_rate:.1f}%.",
+                        f"required {minimum:.1f}%.",
                     ))
                     return None
             try:
@@ -1635,12 +1651,19 @@ class MissionScheduler:
             return await self.geocoder.resolve_maps_link(location_text)
         return await self.geocoder.search(location_text)
 
-    async def _contribution_rate(self, mc_user_id: int | None) -> float | None:
+    async def _roster_contribution(
+        self, mc_user_id: int | None
+    ) -> tuple[bool, float]:
+        """``(known, rate)`` — same fail-closed semantics as
+        :meth:`BoardRequestService.roster_contribution`: an empty
+        contribution column on the roster is KNOWN 0.0 (never-set
+        donation); no id / not on the roster is unknown and must wait."""
         if mc_user_id is None:
-            return None
-        active = await self.members.active_members()
-        row = active.get(mc_user_id)
-        return row["contribution_rate"] if row is not None else None
+            return False, 0.0
+        row = (await self.members.active_members()).get(mc_user_id)
+        if row is None:
+            return False, 0.0
+        return True, float(row["contribution_rate"] or 0.0)
 
     async def _notify_board(self, mission: aiosqlite.Row, content: str) -> None:
         """Reply on the board — only for board-sourced requests, and on the

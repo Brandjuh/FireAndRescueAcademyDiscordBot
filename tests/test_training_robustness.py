@@ -156,6 +156,47 @@ async def test_watchdog_blames_the_lock_when_the_job_keeps_firing(db):
     assert any("lock is held" in text for text in channel.sent)
 
 
+async def test_watchdog_waits_out_a_long_but_healthy_tick(db):
+    # Fired-stamp fresh + heartbeat 25 min old: the scheduler is alive and
+    # a tick is just running long (queue retries, builds). That is NOT an
+    # incident — alerting at the 15-min floor paged the admin on every
+    # legitimately long tick. Patience applies before the lock alert.
+    state = StateRepo(db)
+    age25 = (dt.datetime.now(dt.timezone.utc)
+             - dt.timedelta(minutes=25)).isoformat()
+    await state.set("heartbeat:board-training", age25)
+    await state.set("heartbeat:fired:board-trainings",
+                    dt.datetime.now(dt.timezone.utc).isoformat())
+    channel = FakeChannel()
+    bot = FakeBot(pacer=SimpleNamespace(circuit_open=False),
+                  admin_channel=channel)
+    await AutomationWatchdog(_cfg(), db, bot).run()
+    assert channel.sent == []
+
+
+async def test_watchdog_kick_is_bounded(db, monkeypatch):
+    # The kick holds the poll's job lock as a raw task — a hung queue
+    # execution must be cut off (lock released), never wedge the lock.
+    import fra_bot.services.board_requests as br
+
+    monkeypatch.setattr(br, "EXECUTE_KICK_BUDGET_SECONDS", 0.05)
+    await _seed_stuck(db)
+
+    class HangingService:
+        async def execute_queue_now(self):
+            await asyncio.Event().wait()
+
+    async def session_ok():
+        return True
+
+    bot = FakeBot(pacer=SimpleNamespace(circuit_open=False),
+                  admin_channel=FakeChannel(),
+                  trainings=HangingService(),
+                  mc=SimpleNamespace(verify_session=session_ok))
+    await AutomationWatchdog(_cfg(), db, bot).run()
+    assert not bot.job_lock("board-trainings").locked()
+
+
 async def test_a_hung_job_tick_is_killed_and_the_loop_survives(monkeypatch):
     # The 250-min incident: one tick hung forever and silently killed its
     # own loop while every other job kept running. The tick cap ends it.

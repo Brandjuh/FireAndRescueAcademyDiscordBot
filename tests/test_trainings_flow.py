@@ -57,6 +57,23 @@ def _cfg(dry_run):
     )
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _roster_alice(db):
+    """The contribution gate is fail-closed for board rows now: give the
+    rig's standard requester (mc 42, 'Alice') a healthy roster rate so
+    the flow tests exercise what they test, not the gate."""
+    await db.execute(
+        "INSERT INTO members (mc_user_id, name, contribution_rate, is_active, "
+        "first_seen_at, last_seen_at) "
+        "VALUES (42, 'Alice', 10.0, 1, '2026-01-01', '2026-07-01')"
+    )
+    await db.execute(
+        "INSERT INTO members (mc_user_id, name, contribution_rate, is_active, "
+        "first_seen_at, last_seen_at) "
+        "VALUES (7, 'Bob', 10.0, 1, '2026-01-01', '2026-07-01')"
+    )
+
+
 ACADEMY_LIST = (
     "<table><tr search_attribute='Fire Academy'>"
     "<td><img building_id='4951748' src='/img/fire.png' alt='Fire'/></td>"
@@ -484,12 +501,20 @@ async def test_training_guide_suppressed_when_replies_off(db):
 
 
 async def test_training_overview_has_availability_and_timestamp(db):
+    import json as _json
+
+    import fra_bot.services.trainings as tr
+
     svc, _ = _service(db, dry_run=True)
+    # The overview renders from the availability CACHE (the hourly job
+    # fills it) — never by walking the academies itself.
+    await svc.state.set(tr.AVAILABILITY_STATE_KEY, _json.dumps({
+        "counts": {"fire": 2}, "complete": {"fire": True}, "at": 999,
+    }))
     desired = await svc._overview_content(now_epoch=1000.0)
     assert desired.startswith("[FRA] 📋 How to request a TRAINING")
     assert "[b]Current academy availability[/b]" in desired
     assert "Last updated:" in desired
-    # The fake academy (fire, id 4951748) has 2 free classrooms.
     assert "🚒 Fire Station: 2 classes" in desired
 
 
@@ -540,10 +565,14 @@ async def test_force_guide_is_quick_and_arms_availability_refresh(db):
     assert calls["n"] == 0                              # no walk during force
     overview = board.created[0][1]
     assert "being refreshed" in overview                # placeholder shown
-    # Refresh marker cleared -> the next poll rebuilds with real numbers.
+    # Refresh marker cleared; the guide itself NEVER walks — the hourly
+    # availability job fills the cache, and the next guide rebuild
+    # renders those numbers.
     assert await svc.state.get(svc._guide_refreshed_key()) is None
+    await svc.refresh_availability()
+    assert calls["n"] == 1                              # the job walked, once
     await svc._ensure_guide()
-    assert calls["n"] == 1
+    assert calls["n"] == 1                              # the guide did not
     assert board.edited and "🚒 Fire Station: 2 classes" in board.edited[-1][1]
 
 
@@ -624,11 +653,11 @@ async def test_training_guide_skips_availability_fetch_when_throttled(db):
     assert calls["n"] == 0                              # nothing fetched
     assert board.edited == [] and board.created == []   # nothing written
 
-    # Push the overview's refresh outside the window -> it rebuilds ONCE;
-    # the static agency posts stay untouched.
+    # Push the overview's refresh outside the window -> it rebuilds ONCE
+    # from the cache (never walking); the static agency posts stay put.
     await svc.state.set(svc._guide_refreshed_key(), repr(guide_now() - 7200))
     await svc._ensure_guide()
-    assert calls["n"] == 1
+    assert calls["n"] == 0
     assert board.edited == [(77, await svc._overview_content(0.0))] or (
         len(board.edited) == 1 and board.edited[0][0] == 77
     )
@@ -1111,13 +1140,12 @@ async def test_collect_availability_marks_formless_page_incomplete(db):
     assert cached["complete"]["coastal"] is False
 
 
-async def test_guide_refreshes_with_cached_numbers_when_the_walk_hangs(
-    db, monkeypatch
-):
-    # The frozen "Last updated" incident: an availability walk that outlives
-    # the tick kept the guide write from ever running. With the walk budget
-    # exceeded, the guide must still be built — cached numbers, honest note.
-    import asyncio
+async def test_guide_renders_from_cache_and_never_walks(db, monkeypatch):
+    # ROOT CAUSE of the recurring "poll has not run for N min" watchdog
+    # alerts: the availability walk (bulk-paced, up to its whole budget)
+    # ran INSIDE the poll tick, holding the board-trainings job lock while
+    # every scheduled tick skipped. The guide must render from the cache
+    # the hourly class-availability job maintains — never walk itself.
     import json as _json
 
     import fra_bot.services.trainings as tr
@@ -1127,12 +1155,61 @@ async def test_guide_refreshes_with_cached_numbers_when_the_walk_hangs(
         "counts": {"fire": 3}, "complete": {"fire": True}, "at": 1752797640,
     }))
 
-    async def hangs():
-        await asyncio.Event().wait()
+    async def boom():
+        raise AssertionError("the guide must not walk the academies")
 
-    monkeypatch.setattr(svc, "_collect_availability", hangs)
-    monkeypatch.setattr(tr, "AVAILABILITY_WALK_BUDGET_SECONDS", 0.05)
-    content = await svc._overview_content(1753300000.0)
+    monkeypatch.setattr(svc, "_collect_availability", boom)
+    content = await svc._overview_content(1753300000.0)  # cache days old
     assert "Current academy availability" in content
     assert "3 classes" in content
-    assert "a live recount is under way" in content
+    assert "the hourly recount refreshes them" in content
+
+    # A fresh cache renders without the staleness note.
+    await svc.state.set(tr.AVAILABILITY_STATE_KEY, _json.dumps({
+        "counts": {"fire": 3}, "complete": {"fire": True}, "at": 1753299000,
+    }))
+    content = await svc._overview_content(1753300000.0)
+    assert "3 classes" in content
+    assert "recount refreshes" not in content
+
+
+async def test_board_gate_fails_closed_on_missing_or_unknown_rate(db):
+    # The 0%-contributor incident: a member who never SET a donation has
+    # no rate on the roster at all, and `rate is not None and rate < min`
+    # waved exactly those through. NULL rate = 0% -> refused; a requester
+    # the roster doesn't know yet waits for the next members sync.
+    svc, _ = _service(db, dry_run=True)
+
+    # NULL rate on the roster -> known 0% -> refused.
+    await db.execute(
+        "UPDATE members SET contribution_rate = NULL WHERE mc_user_id = 42"
+    )
+    rid = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=1,
+        requester_name="Alice", requester_mc_id=42,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat", "duration": 3}],
+            "ambiguous": [],
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+    row = await svc.requests.get(rid)
+    assert row["status"] == "skipped"
+    assert "0% is below the required 5%" in row["status_detail"]
+
+    # Not on the stored roster at all -> parked until the sync knows them.
+    rid = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=2,
+        requester_name="Stranger", requester_mc_id=777,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat", "duration": 3}],
+            "ambiguous": [],
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+    row = await svc.requests.get(rid)
+    assert row["status"] == "waiting"
+    assert "not on the stored roster" in row["status_detail"]
+    assert row["attempts"] == 1 and row["next_attempt_at"] is not None
