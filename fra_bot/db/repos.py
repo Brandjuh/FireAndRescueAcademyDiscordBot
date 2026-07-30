@@ -2331,6 +2331,23 @@ class TaxWarningsRepo:
             (now, now, mc_user_id),
         )
 
+    async def kicked_rows(self) -> list[aiosqlite.Row]:
+        """Trails whose member was (claimed) kicked — the roster
+        verification re-checks these until the member is really gone."""
+        async with self._db.conn.execute(
+            "SELECT * FROM tax_warnings WHERE kicked_at IS NOT NULL"
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def mark_kick_failed(self, mc_user_id: int) -> None:
+        """Reopen a trail whose kick did not stick (the member is still on
+        the roster): the kick-due stage re-arms; the warning count stays."""
+        await self._db.execute(
+            "UPDATE tax_warnings SET kicked_at = NULL, updated_at = ? "
+            "WHERE mc_user_id = ?",
+            (utcnow_iso(), mc_user_id),
+        )
+
     async def clear(self, mc_user_id: int) -> None:
         """Forget a member entirely (left the alliance)."""
         await self._db.execute(

@@ -223,6 +223,13 @@ def extract_conversation_id(html: str, final_url: str = "") -> str | None:
     return None
 
 
+#: Detail prefix for a send that was POSTed fine but whose delivery the game
+#: would not confirm (no success flash, no conversation redirect, and no
+#: error text either). The message usually DID arrive — callers that resend
+#: on this detail spam the recipient with duplicates.
+UNCONFIRMED_PREFIX = "the game did not confirm delivery"
+
+
 async def send_new_message(
     client, recipient: str, subject: str, body: str
 ) -> tuple[bool, str, str | None]:
@@ -245,15 +252,26 @@ async def send_new_message(
         return False, f"HTTP {status}", None
     if not message_was_sent(html, final_url):
         # Prefer the game's own error text (e.g. recipient not found) over the
-        # page header, so a failure is actionable instead of opaque.
-        reason = extract_form_error(html) or summarize_response(html)
+        # page header, so a failure is actionable instead of opaque. A found
+        # error text means the game REJECTED the send (hard failure, safe to
+        # retry); no error text means the send probably landed but couldn't be
+        # proven — callers must NOT blindly resend those (see
+        # :data:`UNCONFIRMED_PREFIX`).
+        reason = extract_form_error(html)
+        if reason:
+            log.warning(
+                "in-game PM to %s rejected by the game (HTTP %s): %s",
+                recipient, status, reason,
+            )
+            return False, f"the game rejected the message ({reason[:160]})", None
+        digest = summarize_response(html)
         log.warning(
             "in-game PM to %s NOT confirmed (HTTP %s, landed on %s): %s",
-            recipient, status, final_url or "?", reason,
+            recipient, status, final_url or "?", digest,
         )
         return (
             False,
-            f"the game did not confirm delivery ({reason[:160] or 'empty'})",
+            f"{UNCONFIRMED_PREFIX} ({digest[:160] or 'empty'})",
             None,
         )
     log.info("in-game PM sent to %s (%s)", recipient, subject)
