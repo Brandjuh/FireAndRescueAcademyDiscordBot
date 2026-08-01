@@ -301,7 +301,10 @@ class MembersRepo:
         self, start_iso: str | None, end_iso: str
     ) -> dict[str, int]:
         """Member events by type within a period (occurred_at)."""
-        query = "SELECT event_type, COUNT(*) AS n FROM member_events WHERE occurred_at <= ?"
+        # Half-open end: a row exactly on a period boundary belongs to the
+        # NEXT period only (yesterday.end == today.start — inclusive both
+        # ways double-counted it).
+        query = "SELECT event_type, COUNT(*) AS n FROM member_events WHERE occurred_at < ?"
         params: list[Any] = [end_iso]
         if start_iso:
             query += " AND occurred_at >= ?"
@@ -310,21 +313,66 @@ class MembersRepo:
         async with self._db.conn.execute(query, params) as cur:
             return {row["event_type"]: row["n"] for row in await cur.fetchall()}
 
-    async def credit_deltas(self, since_iso: str, until_iso: str) -> list[aiosqlite.Row]:
-        """Earned-credit gains per member between two instants."""
+    async def credit_deltas(self, since_iso: str, until_iso: str) -> list[dict]:
+        """Earned-credit gains per member between two instants.
+
+        The gain is ``value_at(end) - value_at(start)`` where ``value_at``
+        is the newest snapshot at or before that instant. Baselining on the
+        first snapshot INSIDE the window (the old MAX-MIN) silently dropped
+        everything earned between the window start and the first sweep
+        after it — a whole hour of every game day — and needed two
+        in-window snapshots before "today" showed anything at all. A
+        member without any pre-window snapshot (fresh joiner) baselines on
+        their first snapshot inside the window, like before."""
+
+        async def _latest_at(cutoff: str) -> dict[int, tuple[int, str]]:
+            async with self._db.conn.execute(
+                """
+                SELECT mc_user_id, earned_credits, name, MAX(taken_at)
+                FROM member_snapshots
+                WHERE taken_at <= ? AND earned_credits IS NOT NULL
+                GROUP BY mc_user_id
+                """,
+                (cutoff,),
+            ) as cur:
+                return {
+                    row["mc_user_id"]: (row["earned_credits"], row["name"])
+                    for row in await cur.fetchall()
+                }
+
+        at_end = await _latest_at(until_iso)
+        at_start = await _latest_at(since_iso)
+        # Fresh members: first snapshot inside the window as the baseline.
         async with self._db.conn.execute(
             """
-            SELECT mc_user_id, MAX(name) AS name,
-                   MAX(earned_credits) - MIN(earned_credits) AS delta
+            SELECT mc_user_id, earned_credits, MIN(taken_at)
             FROM member_snapshots
-            WHERE taken_at >= ? AND taken_at <= ? AND earned_credits IS NOT NULL
+            WHERE taken_at > ? AND taken_at <= ?
+              AND earned_credits IS NOT NULL
             GROUP BY mc_user_id
-            HAVING delta > 0
-            ORDER BY delta DESC
             """,
             (since_iso, until_iso),
         ) as cur:
-            return list(await cur.fetchall())
+            first_inside = {
+                row["mc_user_id"]: row["earned_credits"]
+                for row in await cur.fetchall()
+            }
+        out = []
+        for mc_user_id, (end_value, name) in at_end.items():
+            start_row = at_start.get(mc_user_id)
+            baseline = (
+                start_row[0] if start_row is not None
+                else first_inside.get(mc_user_id)
+            )
+            if baseline is None:
+                continue
+            delta = end_value - baseline
+            if delta > 0:
+                out.append(
+                    {"mc_user_id": mc_user_id, "name": name, "delta": delta}
+                )
+        out.sort(key=lambda r: r["delta"], reverse=True)
+        return out
 
 
 class ApplicationsRepo:
@@ -585,15 +633,26 @@ class LogsRepo:
     async def action_counts(
         self, start_iso: str | None, end_iso: str
     ) -> dict[str, int]:
-        """Log rows by action_key within a period (event_at, else scraped_at)."""
-        query = (
-            "SELECT action_key, COUNT(*) AS n FROM alliance_logs "
-            "WHERE COALESCE(event_at, scraped_at) <= ?"
-        )
-        params: list[Any] = [end_iso]
+        """Log rows by action_key within a period.
+
+        Bounded periods filter on ``event_at`` ONLY (half-open end): rows
+        whose game timestamp couldn't be parsed (history older than the
+        8-day inference window) have event_at NULL, and the old
+        COALESCE-to-scraped_at fallback counted the entire log-history
+        backfill as activity on the day it was scraped. Unbounded queries
+        (start=None) keep the COALESCE so all-time totals see every row."""
         if start_iso:
-            query += " AND COALESCE(event_at, scraped_at) >= ?"
-            params.append(start_iso)
+            query = (
+                "SELECT action_key, COUNT(*) AS n FROM alliance_logs "
+                "WHERE event_at >= ? AND event_at < ?"
+            )
+            params: list[Any] = [start_iso, end_iso]
+        else:
+            query = (
+                "SELECT action_key, COUNT(*) AS n FROM alliance_logs "
+                "WHERE COALESCE(event_at, scraped_at) < ?"
+            )
+            params = [end_iso]
         query += " GROUP BY action_key ORDER BY n DESC"
         async with self._db.conn.execute(query, params) as cur:
             return {row["action_key"]: row["n"] for row in await cur.fetchall()}
@@ -711,12 +770,18 @@ class TreasuryRepo:
     async def expense_summary(
         self, start_iso: str | None, end_iso: str, *, top: int = 5
     ) -> dict[str, Any]:
-        """Total spend, row count and top spenders within a period."""
-        where = "event_at IS NOT NULL AND event_at <= ?"
-        params: list[Any] = [end_iso]
+        """Total spend, row count and top spenders within a period.
+
+        Bounded periods filter strictly on ``event_at`` (half-open end);
+        the all-time query (start=None) COALESCEs to ``scraped_at`` so
+        rows whose ledger date could not be inferred still count — the
+        all-time total must match the stored ledger."""
         if start_iso:
-            where += " AND event_at >= ?"
-            params.append(start_iso)
+            where = "event_at >= ? AND event_at < ?"
+            params: list[Any] = [start_iso, end_iso]
+        else:
+            where = "COALESCE(event_at, scraped_at) < ?"
+            params = [end_iso]
         async with self._db.conn.execute(
             f"SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total "
             f"FROM expenses WHERE {where}",
@@ -1182,10 +1247,11 @@ class AutomationRepo:
     async def activity_counts(
         self, start_iso: str | None, end_iso: str
     ) -> list[aiosqlite.Row]:
-        """Request counts grouped by (kind, status) within a period."""
+        """Request counts grouped by (kind, status) within a period
+        (half-open end, so period boundaries never double count)."""
         query = (
             "SELECT kind, status, COUNT(*) AS n FROM automation_requests "
-            "WHERE created_at <= ?"
+            "WHERE created_at < ?"
         )
         params: list[Any] = [end_iso]
         if start_iso:
@@ -1503,8 +1569,9 @@ class MissionsRepo:
     async def status_counts(
         self, start_iso: str | None, end_iso: str
     ) -> dict[str, int]:
-        """Mission counts by status within a period (created_at)."""
-        query = "SELECT status, COUNT(*) AS n FROM scheduled_missions WHERE created_at <= ?"
+        """Mission counts by status within a period (created_at,
+        half-open end)."""
+        query = "SELECT status, COUNT(*) AS n FROM scheduled_missions WHERE created_at < ?"
         params: list[Any] = [end_iso]
         if start_iso:
             query += " AND created_at >= ?"

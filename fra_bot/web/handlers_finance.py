@@ -69,9 +69,11 @@ def _report_panel(result) -> str:
 
 def _when(row) -> str:
     # event_at is inferred during backfill and can be NULL for ambiguous
-    # ledger dates — fall back to the raw in-game date text.
+    # ledger dates — fall back to the raw in-game date text. The stored
+    # value is UTC; say so, or correct period totals look shifted next to
+    # the game's own NY-rendered ledger.
     if row["event_at"]:
-        return esc(str(row["event_at"])[:16])
+        return esc(str(row["event_at"])[:16].replace("T", " ") + " UTC")
     return esc(row["raw_date"])
 
 

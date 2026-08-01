@@ -148,11 +148,15 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
     async def income_daily(period: Period) -> ReportResult:
         # "yesterday" reports the FINISHED game day (the 23:55-NY pre-reset
         # capture); "today" reports the running day. The morning schedule
-        # fires minutes after the NY midnight reset, when the new day has no
-        # snapshot yet — fall back to the finished day instead of showing an
-        # empty "No contributions recorded".
+        # fires minutes after the NY midnight reset — in that first hour a
+        # "today" list is empty or a single early bird, so the finished
+        # day's FINAL standings are what the reader wants (an empty-only
+        # fallback showed a one-contributor "top 10" when anyone donated
+        # within minutes of the reset). Outside that hour the empty-list
+        # fallback still covers a missing fresh snapshot.
+        ny_now = dt.datetime.now(dt.timezone.utc).astimezone(NY)
         day_key, _ = ny_period_keys()
-        if period.name == "yesterday":
+        if period.name == "yesterday" or ny_now.hour == 0:
             day_key, _ = _prev_ny_keys()
         rows = await treasury.latest_snapshot("daily", day_key)
         if not rows and period.name != "yesterday":
@@ -167,11 +171,15 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
         )
 
     async def income_monthly(period: Period) -> ReportResult:
-        # Same shape as the daily report: "prev-month" is explicit, and a
-        # just-rolled-over month (the 1st, right after the NY reset) falls
-        # back to the finished month's final standings.
+        # Same shape as the daily report: "prev-month" is explicit, and the
+        # first hour after the month's NY rollover shows the finished
+        # month's final standings (the monthly schedule fires exactly
+        # then); an empty fresh month still falls back afterwards.
+        ny_now = dt.datetime.now(dt.timezone.utc).astimezone(NY)
         _, month_key = ny_period_keys()
-        if period.name == "prev-month":
+        if period.name == "prev-month" or (
+            ny_now.day == 1 and ny_now.hour == 0
+        ):
             _, month_key = _prev_ny_keys()
         rows = await treasury.latest_snapshot("monthly", month_key)
         if not rows and period.name != "prev-month":

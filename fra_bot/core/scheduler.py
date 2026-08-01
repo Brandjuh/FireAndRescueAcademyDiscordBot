@@ -107,9 +107,14 @@ class Scheduler:
             )
             if target <= now:
                 target += dt.timedelta(days=1)
-            wait = (target - now).total_seconds()
+            # Sleep on REAL elapsed time (UTC timestamps): same-tzinfo
+            # aware subtraction ignores a DST offset change between now and
+            # the target, which made a 23:55 job fire an hour late on the
+            # spring-forward day — an hour AFTER the game reset it exists
+            # to precede.
+            wait = target.timestamp() - now.timestamp()
             log.debug("Daily job %s sleeping %.0fs until %s", name, wait, target)
-            if await self._sleep(wait):
+            if await self._sleep(max(1.0, wait)):
                 return
             await self._invoke(func, name)
 

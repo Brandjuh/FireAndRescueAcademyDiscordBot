@@ -370,3 +370,17 @@ def test_parse_total_funds_anchored_without_panel_id():
         "<h2>Alliance Funds</h2><h1>4,935,224 Credits</h1>"
     )
     assert parse_total_funds(page) == 4935224
+
+
+def test_infer_expense_event_ats_january_finalize_future_guard():
+    # A backfill finalized just after New Year: the newest ledger rows are
+    # still December of the PREVIOUS year — dating them current_year put
+    # them a year in the FUTURE and hid them from every bounded report.
+    import datetime as dt
+
+    ref = dt.datetime(2027, 1, 2, 12, 0, tzinfo=dt.timezone.utc)
+    out = infer_expense_event_ats(
+        ["24 Dec 12:00", "15 Nov 12:00"], current_year=2027, reference=ref
+    )
+    assert out[0].startswith("2026-12-24")
+    assert out[1].startswith("2026-11-15")

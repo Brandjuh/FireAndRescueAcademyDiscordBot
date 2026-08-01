@@ -131,7 +131,8 @@ def _parse_absolute(raw: str) -> tuple[str, int, int] | None:
 
 
 def infer_expense_event_ats(
-    raw_dates: list[str], *, current_year: int
+    raw_dates: list[str], *, current_year: int,
+    reference: dt.datetime | None = None,
 ) -> list[str | None]:
     """Infer UTC event_at for expense dates given in NEWEST→OLDEST order.
 
@@ -141,7 +142,13 @@ def infer_expense_event_ats(
     (…Feb, Jan, Dec…) — each wrap is a year boundary, so we count the year
     down from the newest row. A row carrying an explicit year (absolute
     format) re-anchors the cursor. Unparseable rows yield None.
+
+    ``reference`` ("now", aware) guards the anchor: a backfill finalized
+    in early January whose newest rows are still December would otherwise
+    date those rows a year into the FUTURE (current_year + "Dec"), hiding
+    them from every bounded treasury report.
     """
+    reference = reference or dt.datetime.now(UTC)
     results: list[str | None] = []
     year = current_year
     prev_month: int | None = None
@@ -158,6 +165,17 @@ def infer_expense_event_ats(
         month = parts[0]
         if prev_month is not None and month > prev_month:
             year -= 1  # walked back past a New Year
+        candidate = _parts_to_utc_iso(year, *parts)
+        if prev_month is None and candidate is not None:
+            # Fresh anchor (list start): the ledger's newest row can never
+            # lie in the future — a future date means the year cursor is
+            # one too high (December rows finalized just after New Year).
+            future_edge = (reference + dt.timedelta(minutes=5)).isoformat(
+                timespec="seconds"
+            )
+            if candidate > future_edge:
+                year -= 1
+                candidate = _parts_to_utc_iso(year, *parts)
         prev_month = month
-        results.append(_parts_to_utc_iso(year, *parts))
+        results.append(candidate)
     return results
