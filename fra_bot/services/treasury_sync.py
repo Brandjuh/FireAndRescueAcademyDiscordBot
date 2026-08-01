@@ -67,14 +67,17 @@ class TreasurySyncService:
 
     async def sync_balance_and_income(self) -> None:
         run_id = await self._runs.start("treasury")
+        # Period keys BEFORE the fetches: the paced page loads can take
+        # minutes, and a sync that started before the NY midnight reset
+        # used to store the finished day's standings under the NEW day's
+        # key — the finished day then had no final capture at all.
+        day_key, month_key = ny_period_keys()
         try:
             daily_html = await self._client.fetch_page(KASSE_PATH)
             monthly_html = await self._client.fetch_page(f"{KASSE_PATH}?type=monthly")
         except MissionChiefError as exc:
             await self._runs.finish(run_id, status="failed", message=str(exc))
             raise
-
-        day_key, month_key = ny_period_keys()
         rows = 0
 
         total_funds = parse_total_funds(daily_html)

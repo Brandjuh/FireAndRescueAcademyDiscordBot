@@ -304,3 +304,52 @@ async def test_income_monthly_falls_back_to_finished_month(db, registry):
     report = registry.get("income-monthly")
     result = await report.builder(resolve_period("month"))
     assert prev_month in result.title and "Alice" in result.description
+
+
+def test_scheduled_report_monthly_day_clamps_to_short_months():
+    from types import SimpleNamespace
+
+    from fra_bot.cogs.reporting import ReportingCog
+
+    # day=31 must fire on the LAST day of shorter months instead of never.
+    sched = SimpleNamespace(cadence="monthly", day=31, month=1, weekday=0)
+    assert ReportingCog._is_due(sched, dt.datetime(2026, 1, 31, 0, 5)) is True
+    assert ReportingCog._is_due(sched, dt.datetime(2026, 2, 28, 0, 5)) is True
+    assert ReportingCog._is_due(sched, dt.datetime(2026, 4, 30, 0, 5)) is True
+    assert ReportingCog._is_due(sched, dt.datetime(2026, 4, 29, 0, 5)) is False
+
+
+async def test_credit_deltas_baseline_is_the_last_pre_window_snapshot(db):
+    from fra_bot.db.repos import MembersRepo
+
+    for _ in range(3):  # run_id 1..3 (member_snapshots FK)
+        await db.execute(
+            "INSERT INTO scrape_runs (scraper, started_at) "
+            "VALUES ('members', '2026-07-30T00:00:00+00:00')"
+        )
+
+    async def snap(run, mc, name, credits, taken):
+        await db.execute(
+            "INSERT INTO member_snapshots (run_id, mc_user_id, name, "
+            "earned_credits, taken_at) VALUES (?, ?, ?, ?, ?)",
+            (run, mc, name, credits, taken),
+        )
+
+    # Alice: gains between the pre-window snapshot and the first in-window
+    # sweep must COUNT (the old MAX-MIN baseline dropped them).
+    await snap(1, 1, "Alice", 100, "2026-07-30T22:00:00+00:00")
+    await snap(2, 1, "Alice", 150, "2026-07-31T05:00:00+00:00")
+    await snap(3, 1, "Alice", 180, "2026-07-31T09:00:00+00:00")
+    # Fresh member without history: first in-window snapshot as baseline.
+    await snap(2, 2, "Fresh", 50, "2026-07-31T05:00:00+00:00")
+    await snap(3, 2, "Fresh", 90, "2026-07-31T09:00:00+00:00")
+    # Idle member: no gain, no row.
+    await snap(1, 3, "Idle", 200, "2026-07-30T22:00:00+00:00")
+
+    rows = await MembersRepo(db).credit_deltas(
+        "2026-07-31T04:00:00+00:00", "2026-07-31T12:00:00+00:00"
+    )
+    by = {r["mc_user_id"]: r["delta"] for r in rows}
+    assert by[1] == 80          # 180 - 100, NOT 180 - 150
+    assert by[2] == 40          # 90 - 50 (first in-window baseline)
+    assert 3 not in by

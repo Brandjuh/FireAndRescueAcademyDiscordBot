@@ -432,10 +432,32 @@ class FRABot(commands.Bot):
         # Final pre-reset capture of the daily/monthly income standings.
         # Close to midnight NY (the reset) so the snapshot reflects the full
         # day, but with a safety margin for the fetch to finish first.
+        # Pinned to America/New_York — the GAME's reset clock — never the
+        # display timezone: with reports.timezone=Europe/Amsterdam this job
+        # used to fire at 17:55 NY and the "final" standings missed the
+        # last six hours of the game day. This one shot IS the day's final
+        # standings, so a transient fetch error retries within the margin
+        # instead of silently leaving the day without its capture.
+        async def _pre_reset_capture() -> None:
+            from .mc.errors import MissionChiefError
+
+            for attempt in range(3):
+                try:
+                    await self.treasury_sync.sync_balance_and_income()
+                    return
+                except MissionChiefError as exc:
+                    if attempt == 2:
+                        raise
+                    log.warning(
+                        "pre-reset capture attempt %d failed (%s); retrying",
+                        attempt + 1, exc,
+                    )
+                    await asyncio.sleep(45.0)
+
         sched.add_daily_job(
-            self._guarded(self.treasury_sync.sync_balance_and_income, "pre-reset"),
+            self._guarded(_pre_reset_capture, "pre-reset"),
             at=dt.time(23, 55),
-            timezone=self.cfg.reports.timezone,
+            timezone="America/New_York",
             name="treasury-pre-reset",
         )
 
