@@ -232,6 +232,8 @@ SETTINGS: tuple[Setting, ...] = (
             "Advisory in admin log on a 3rd official warning"),
     Setting("automation.sanctions.third_warning_action", "str", True,
             "Advised follow-up on a 3rd warning", choices=("Kick", "Ban")),
+    Setting("automation.sanctions.game_log_review_enabled", "bool", True,
+            "Import game-log kicks/chat bans as unverified sanctions"),
     Setting("automation.events.enabled", "bool", True, "Events board polling"),
     Setting("automation.events.thread_id", "int", True, "Events board thread"),
     Setting("automation.events.interval", "int", False, "Events poll interval (min)", minimum=2),
