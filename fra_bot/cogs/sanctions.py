@@ -16,12 +16,14 @@ the verified link) or a MissionChief name (resolved via the roster).
 from __future__ import annotations
 
 import logging
+import re
 
 import discord
 from discord.ext import commands
 
 from ..db.repos import LinksRepo, MembersRepo, SanctionsRepo
 from .admin import is_fra_admin
+from .display import profile_url
 
 log = logging.getLogger(__name__)
 
@@ -101,10 +103,62 @@ async def resolve_member_target(
     return None, target.strip(), None
 
 
+class ReviewConfirmButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"fra:sreview:confirm:(?P<sid>[0-9]+)",
+):
+    def __init__(self, sanction_id: int) -> None:
+        super().__init__(discord.ui.Button(
+            label="Confirm sanction",
+            style=discord.ButtonStyle.success,
+            custom_id=f"fra:sreview:confirm:{sanction_id}",
+        ))
+        self.sanction_id = sanction_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match: re.Match):
+        return cls(int(match["sid"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("SanctionsCog")
+        if cog is not None:
+            await cog.handle_review(interaction, self.sanction_id, confirm=True)
+
+
+class ReviewDismissButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"fra:sreview:dismiss:(?P<sid>[0-9]+)",
+):
+    def __init__(self, sanction_id: int) -> None:
+        super().__init__(discord.ui.Button(
+            label="Dismiss",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"fra:sreview:dismiss:{sanction_id}",
+        ))
+        self.sanction_id = sanction_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match: re.Match):
+        return cls(int(match["sid"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("SanctionsCog")
+        if cog is not None:
+            await cog.handle_review(interaction, self.sanction_id, confirm=False)
+
+
+def _review_view(sanction_id: int) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(ReviewConfirmButton(sanction_id))
+    view.add_item(ReviewDismissButton(sanction_id))
+    return view
+
+
 class SanctionsCog(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
         self.repo = SanctionsRepo(bot.db)
+        bot.add_dynamic_items(ReviewConfirmButton, ReviewDismissButton)
 
     async def _resolve_target(
         self, ctx: commands.Context, target: str
@@ -188,7 +242,7 @@ class SanctionsCog(commands.Cog):
         lines = [
             f"`#{r['id']}` {r['created_at'][:10]} — {r['sanction_type']} — "
             f"{r['reason'][:80]}"
-            + (" *(revoked)*" if r["status"] != "active" else "")
+            + (f" *({r['status']})*" if r["status"] != "active" else "")
             for r in rows
         ]
         warnings = await self.repo.official_warning_count(
@@ -209,7 +263,7 @@ class SanctionsCog(commands.Cog):
         lines = [
             f"`#{r['id']}` {r['created_at'][:10]} — **{r['mc_username']}** — "
             f"{r['sanction_type']}"
-            + (" *(revoked)*" if r["status"] != "active" else "")
+            + (f" *({r['status']})*" if r["status"] != "active" else "")
             for r in rows
         ]
         await ctx.send("🕐 Recent sanctions:\n" + "\n".join(lines)[:1800])
@@ -257,6 +311,173 @@ class SanctionsCog(commands.Cog):
             discord_user_id=row["discord_user_id"],
             mc_user_id=row["mc_user_id"],
             actor_name=row["mc_username"],
+        )
+
+    @sanction.command(name="reviewscan")
+    @is_fra_admin()
+    async def sanction_reviewscan(self, ctx: commands.Context) -> None:
+        """Run the game-log sanction review pass right now."""
+        result = await self.bot.sanction_review.scan()
+        if result["bootstrapped"]:
+            await ctx.send(
+                "✅ Review checkpoint initialised at the current log tail — "
+                "new kicks/chat bans are picked up from here."
+            )
+            return
+        await self.post_reviews(result["created"])
+        await ctx.send(
+            f"🔍 Game-log review: **{len(result['created'])}** imported for "
+            f"review, {result['skipped_own']} own tax-kick(s) skipped, "
+            f"{result['skipped_recorded']} already recorded manually."
+        )
+
+    # -- game-log review notices (posted by the scheduler job) -----------------
+
+    async def post_reviews(self, created: list[dict]) -> None:
+        """Post review notices for freshly imported game-log sanctions —
+        one embed each with Confirm/Dismiss, or a single bulk notice when
+        a pass imported a pile (reference behaviour)."""
+        from ..services.sanction_review import BULK_THRESHOLD
+
+        if not created:
+            return
+        channel = (
+            self.bot.channel_for("sanctions") or self.bot.channel_for("admin_log")
+        )
+        if channel is None:
+            return
+        if len(created) >= BULK_THRESHOLD:
+            sample = ", ".join(
+                str(item["name"] or item["mc_user_id"] or "?")
+                for item in created[:8]
+            )
+            embed = discord.Embed(
+                title="⚖️ Bulk game-log sanction review",
+                colour=discord.Colour.orange(),
+                description=(
+                    f"**{len(created)}** moderation entries from the game log "
+                    "were imported as *unverified* sanctions.\n"
+                    f"Sample: {sample}\n\n"
+                    "Review them with `!sanction recent` (Confirm/Dismiss "
+                    "per member via `!sanction list <member>`)."
+                )[:4096],
+            )
+            try:
+                await channel.send(embed=embed)
+            except discord.HTTPException as exc:
+                log.warning("bulk review notice failed: %s", exc)
+            return
+        for item in created:
+            try:
+                await channel.send(
+                    embed=self._review_embed(item),
+                    view=_review_view(item["sanction_id"]),
+                )
+            except discord.HTTPException as exc:
+                log.warning("review notice for sanction #%s failed: %s",
+                            item["sanction_id"], exc)
+
+    def _review_embed(self, item: dict) -> discord.Embed:
+        embed = discord.Embed(
+            title="⚖️ Sanction review required",
+            colour=discord.Colour.orange(),
+            description=(
+                "A moderation entry appeared in the game log without a "
+                "matching record in the sanctions register. Confirm to "
+                "record it, or dismiss if it needs no follow-up."
+            ),
+        )
+        name = item["name"] or "Unknown"
+        url = profile_url(item["mc_user_id"])
+        embed.add_field(
+            name="Member",
+            value=f"[{name}]({url})" if url else name,
+            inline=False,
+        )
+        if item["discord_user_id"]:
+            embed.add_field(
+                name="Discord", value=f"<@{item['discord_user_id']}>",
+                inline=True,
+            )
+        embed.add_field(
+            name="Detected action", value=item["sanction_type"], inline=True
+        )
+        embed.add_field(name="Executed by", value=item["executor"], inline=True)
+        embed.add_field(
+            name="Game log time",
+            value=str(item["event_at"] or item["raw_timestamp"]),
+            inline=False,
+        )
+        if item["description"]:
+            embed.add_field(
+                name="Log entry", value=str(item["description"])[:1024],
+                inline=False,
+            )
+        embed.set_footer(
+            text=f"Sanction #{item['sanction_id']} (unverified) — "
+                 f"game log #{item['log_id']}"
+        )
+        return embed
+
+    async def handle_review(
+        self, interaction: discord.Interaction, sanction_id: int, *,
+        confirm: bool,
+    ) -> None:
+        from .automation import _is_admin_interaction
+
+        if not _is_admin_interaction(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to do this.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        row = await self.repo.get(sanction_id)
+        if row is None:
+            await interaction.followup.send(
+                f"⚠️ Sanction #{sanction_id} no longer exists.", ephemeral=True
+            )
+            return
+        if not await self.repo.resolve_review(
+            sanction_id, confirm=confirm,
+            by=interaction.user.display_name,
+        ):
+            await interaction.followup.send(
+                f"⚠️ Sanction #{sanction_id} is already "
+                f"{row['status']} — nothing changed.",
+                ephemeral=True,
+            )
+            return
+        verb = "Confirmed" if confirm else "Dismissed"
+        if confirm:
+            # Dossier entry on CONFIRM only — parity with `!sanction add`.
+            await self.bot.log_member_action(
+                action="sanction_received",
+                detail=f"#{sanction_id} {row['sanction_type']} — "
+                       f"{row['reason'][:120]} (game log, confirmed by "
+                       f"{interaction.user.display_name})",
+                discord_user_id=row["discord_user_id"],
+                mc_user_id=row["mc_user_id"],
+                actor_name=row["mc_username"],
+            )
+        try:
+            message = interaction.message
+            embed = message.embeds[0] if message and message.embeds else None
+            if message is not None and embed is not None:
+                embed.colour = (
+                    discord.Colour.red() if confirm
+                    else discord.Colour.light_grey()
+                )
+                embed.set_footer(
+                    text=f"{verb} by {interaction.user.display_name} — "
+                         f"sanction #{sanction_id}"
+                )
+                await message.edit(embed=embed, view=None)
+        except discord.HTTPException as exc:
+            log.warning("could not update review embed #%s: %s", sanction_id, exc)
+        await interaction.followup.send(
+            f"✅ {verb} sanction **#{sanction_id}** for "
+            f"**{row['mc_username'] or '?'}**.",
+            ephemeral=True,
         )
 
     # -- announcements ---------------------------------------------------------

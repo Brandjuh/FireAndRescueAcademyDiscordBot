@@ -2072,6 +2072,19 @@ class MemberActionsRepo:
     def __init__(self, db: Database) -> None:
         self._db = db
 
+    async def exists_since(
+        self, *, action: str, mc_user_id: int, since_iso: str
+    ) -> bool:
+        """Did this member get the given bot action since ``since_iso``?
+        (E.g. a recent ``tax_kicked`` proves a game-log kick was the bot's
+        own documented auto-kick, not a manual one needing review.)"""
+        async with self._db.conn.execute(
+            "SELECT 1 FROM member_actions WHERE action = ? AND mc_user_id = ? "
+            "AND created_at >= ? LIMIT 1",
+            (action, mc_user_id, since_iso),
+        ) as cur:
+            return await cur.fetchone() is not None
+
     async def log(
         self, *, discord_user_id: int | None, mc_user_id: int | None,
         actor_name: str | None, action: str, detail: str | None = None,
@@ -2254,21 +2267,70 @@ class SanctionsRepo:
         self, *, mc_user_id: int | None, mc_username: str | None,
         discord_user_id: int | None, admin_discord_id: int, admin_name: str,
         sanction_type: str, reason: str, notes: str | None = None,
+        status: str = "active",
     ) -> int:
+        """``status='unverified'`` marks a game-log import awaiting a human
+        Confirm/Dismiss (the reference bot's review flow)."""
         return await self._db.execute_returning_id(
             """
             INSERT INTO sanctions
                 (mc_user_id, mc_username, discord_user_id, admin_discord_id,
-                 admin_name, sanction_type, reason, notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 admin_name, sanction_type, reason, notes, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (mc_user_id, mc_username, discord_user_id, admin_discord_id,
-             admin_name, sanction_type, reason, notes, utcnow_iso()),
+             admin_name, sanction_type, reason, notes, status, utcnow_iso()),
         )
 
     async def get(self, sanction_id: int) -> aiosqlite.Row | None:
         async with self._db.conn.execute(
             "SELECT * FROM sanctions WHERE id = ?", (sanction_id,)
+        ) as cur:
+            return await cur.fetchone()
+
+    async def resolve_review(
+        self, sanction_id: int, *, confirm: bool, by: str
+    ) -> bool:
+        """Settle an 'unverified' game-log import: Confirm makes it a real
+        active sanction, Dismiss retires it (kept for the audit trail)."""
+        if confirm:
+            n = await self._db.execute(
+                "UPDATE sanctions SET status = 'active' "
+                "WHERE id = ? AND status = 'unverified'",
+                (sanction_id,),
+            )
+        else:
+            n = await self._db.execute(
+                "UPDATE sanctions SET status = 'dismissed', revoked_at = ?, "
+                "revoked_by = ? WHERE id = ? AND status = 'unverified'",
+                (utcnow_iso(), by, sanction_id),
+            )
+        return n == 1
+
+    async def find_matching(
+        self, *, mc_user_id: int | None, name: str | None,
+        sanction_type: str, created_after_iso: str,
+    ) -> aiosqlite.Row | None:
+        """A recent same-type sanction for this member — the game-log
+        import's duplicate guard (an admin who kicked in game AND recorded
+        the sanction manually must not get a review for it)."""
+        clauses, params = [], []
+        if mc_user_id is not None:
+            clauses.append("mc_user_id = ?")
+            params.append(mc_user_id)
+        if name:
+            clauses.append("mc_username = ? COLLATE NOCASE")
+            params.append(name)
+        if not clauses:
+            return None
+        async with self._db.conn.execute(
+            f"""
+            SELECT * FROM sanctions
+            WHERE sanction_type = ? AND status IN ('active', 'unverified')
+              AND created_at >= ? AND ({' OR '.join(clauses)})
+            ORDER BY id DESC LIMIT 1
+            """,
+            (sanction_type, created_after_iso, *params),
         ) as cur:
             return await cur.fetchone()
 

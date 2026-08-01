@@ -136,6 +136,13 @@ class FRABot(commands.Bot):
         from .services.tax_warnings import TaxWarningService
 
         self.tax_warnings = TaxWarningService(cfg, self.mc, self.db)
+        # Game-log sanction review (reference: sanctionmanager's log scan):
+        # kicks/chat bans in the alliance log import as unverified
+        # sanctions for a human Confirm/Dismiss — except the bot's own
+        # documented tax auto-kicks.
+        from .services.sanction_review import SanctionReviewService
+
+        self.sanction_review = SanctionReviewService(cfg, self.db)
         # The missions-database forum: every einsaetze.json mission as a
         # tagged forum post, synced daily.
         from .services.missions_forum import MissionsForumService
@@ -490,6 +497,14 @@ class FRABot(commands.Bot):
             name="automation-watchdog",
             initial_delay_seconds=240.0,
         )
+        # Game-log sanction review: always registered, the switch is read
+        # live per pass (`!fra set sanctions.game_log_review_enabled`).
+        sched.add_interval_job(
+            self._guarded(self._sanction_review_pass, "sanction-review"),
+            minutes=5,
+            name="sanction-review",
+            initial_delay_seconds=330.0,
+        )
         # Academy panel builds queued because funds were low: drain + retry.
         # The buttons themselves work regardless of this switch (they build on
         # click); this only auto-resumes builds that had to wait for funds.
@@ -798,6 +813,15 @@ class FRABot(commands.Bot):
             await self.notify_admin(
                 "💰 **Tax warnings**\n" + "\n".join(lines)[:1800]
             )
+
+    async def _sanction_review_pass(self) -> None:
+        """Import new game-log moderation entries and post their review
+        notices (the sanctions cog owns the Discord side)."""
+        result = await self.sanction_review.scan()
+        if result["created"]:
+            cog = self.get_cog("SanctionsCog")
+            if cog is not None:
+                await cog.post_reviews(result["created"])
 
     def _guarded(self, func, name: str):
         """Wrap a sync job so scheduler jobs log-and-continue on errors,

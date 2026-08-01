@@ -261,9 +261,16 @@ class SanctionsConfig:
     """Sanctions register (reference bot: sanctionmanager). The bot only
     RECORDS and announces; on a member's 3rd official warning it posts the
     configured follow-up as an ADVISORY to the admin log — it never kicks
-    or bans anyone itself."""
+    or bans anyone itself.
+
+    ``game_log_review_enabled`` ports the reference bot's game-log scan:
+    moderation entries in the alliance log (kicks, chat bans) import as
+    UNVERIFIED sanctions with a review notice — except kicks the bot
+    itself executed (the tax auto-kick), which already carry a full
+    documented trail."""
     auto_action_enabled: bool
     third_warning_action: str  # "Kick" | "Ban" (advisory text only)
+    game_log_review_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -736,6 +743,10 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 third_warning_action=str(
                     _get(raw, "automation", "sanctions", "third_warning_action",
                          default="Kick")
+                ),
+                game_log_review_enabled=bool(
+                    _get(raw, "automation", "sanctions",
+                         "game_log_review_enabled", default=True)
                 ),
             ),
             tax_warnings=TaxWarningsConfig(
