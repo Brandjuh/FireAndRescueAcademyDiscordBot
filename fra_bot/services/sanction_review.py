@@ -121,11 +121,16 @@ class SanctionReviewService:
         event_iso = row["event_at"] or utcnow_iso()
 
         # The bot's own tax auto-kick: fully documented already — skip.
+        # Matched on MC id OR name: the log row of a kicked member often
+        # renders their name WITHOUT a profile link (they're no longer in
+        # the alliance), so requiring the id let exactly these reviews
+        # through.
         if (
             row["action_key"] == "kicked_from_alliance"
-            and mc_user_id is not None
             and await self.actions.exists_since(
-                action="tax_kicked", mc_user_id=int(mc_user_id),
+                action="tax_kicked",
+                mc_user_id=int(mc_user_id) if mc_user_id is not None else None,
+                actor_name=name,
                 since_iso=self._iso_before(event_iso, TAX_KICK_LOOKBACK_HOURS),
             )
         ):

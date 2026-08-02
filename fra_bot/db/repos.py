@@ -2073,15 +2073,27 @@ class MemberActionsRepo:
         self._db = db
 
     async def exists_since(
-        self, *, action: str, mc_user_id: int, since_iso: str
+        self, *, action: str, since_iso: str,
+        mc_user_id: int | None = None, actor_name: str | None = None,
     ) -> bool:
         """Did this member get the given bot action since ``since_iso``?
-        (E.g. a recent ``tax_kicked`` proves a game-log kick was the bot's
-        own documented auto-kick, not a manual one needing review.)"""
+        Matched on MC id OR name (case-insensitive): a kicked member's log
+        row often carries no profile link any more, so the id alone missed
+        exactly the rows this check exists for (e.g. proving a game-log
+        kick was the bot's own documented ``tax_kicked`` auto-kick)."""
+        identity, params = [], []
+        if mc_user_id is not None:
+            identity.append("mc_user_id = ?")
+            params.append(mc_user_id)
+        if actor_name:
+            identity.append("actor_name = ? COLLATE NOCASE")
+            params.append(actor_name)
+        if not identity:
+            return False
         async with self._db.conn.execute(
-            "SELECT 1 FROM member_actions WHERE action = ? AND mc_user_id = ? "
-            "AND created_at >= ? LIMIT 1",
-            (action, mc_user_id, since_iso),
+            f"SELECT 1 FROM member_actions WHERE action = ? "
+            f"AND ({' OR '.join(identity)}) AND created_at >= ? LIMIT 1",
+            (action, *params, since_iso),
         ) as cur:
             return await cur.fetchone() is not None
 
