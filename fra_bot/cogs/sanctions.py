@@ -20,16 +20,29 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
+from dataclasses import dataclass
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from ..db.repos import LinksRepo, MembersRepo, SanctionsRepo
-from ..services.sanction_rules import under_warning_until
-from .admin import is_fra_admin
+from ..services.sanction_rules import (
+    COC_RULES,
+    advice_for,
+    effective_status,
+    find_reason_matches,
+    ladder_advice,
+    ladder_step,
+    under_warning_until,
+)
+from .admin import is_fra_admin, is_fra_admin_ctx
 from .display import profile_url
+from .dossier import _staff_check
 
 log = logging.getLogger(__name__)
+
+PANEL_TITLE = "Sanction Management"
 
 #: Short key → the reference bot's sanction type label (kept verbatim so
 #: old and new records read the same).
@@ -125,7 +138,7 @@ class ReviewConfirmButton(
 ):
     def __init__(self, sanction_id: int) -> None:
         super().__init__(discord.ui.Button(
-            label="Confirm sanction",
+            label="Approve",
             style=discord.ButtonStyle.success,
             custom_id=f"fra:sreview:confirm:{sanction_id}",
         ))
@@ -163,10 +176,89 @@ class ReviewDismissButton(
             await cog.handle_review(interaction, self.sanction_id, confirm=False)
 
 
-def _review_view(sanction_id: int) -> discord.ui.View:
+class ReviewEditButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"fra:sreview:edit:(?P<field>type|reason|notes):(?P<sid>[0-9]+)",
+):
+    """Edit one field of a sanction in place (review notices and
+    ``!sanction edit``). The sanction id travels in the custom_id — never
+    in footer text (the reference bot's footer-parsing bug)."""
+
+    _LABELS = {"type": "Edit type", "reason": "Edit reason", "notes": "Edit notes"}
+
+    def __init__(self, field: str, sanction_id: int) -> None:
+        super().__init__(discord.ui.Button(
+            label=self._LABELS[field],
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"fra:sreview:edit:{field}:{sanction_id}",
+        ))
+        self.field = field
+        self.sanction_id = sanction_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match: re.Match):
+        return cls(match["field"], int(match["sid"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("SanctionsCog")
+        if cog is not None:
+            await cog.handle_review_edit(interaction, self.field, self.sanction_id)
+
+
+class EditTextModal(discord.ui.Modal, title="Edit sanction"):
+    value = discord.ui.TextInput(
+        label="Value", style=discord.TextStyle.paragraph, max_length=500,
+    )
+
+    def __init__(self, cog: "SanctionsCog", field: str, sanction_id: int,
+                 current: str | None) -> None:
+        super().__init__(title=f"Edit {field} — sanction #{sanction_id}")
+        self._cog = cog
+        self._field = field
+        self._sanction_id = sanction_id
+        self.value.label = field.capitalize()
+        self.value.default = (current or "")[:500]
+        self.value.required = field == "reason"
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self._cog.apply_review_edit(
+            interaction, self._field, self._sanction_id, str(self.value),
+        )
+
+
+class _EditTypeSelect(discord.ui.Select):
+    def __init__(self, cog: "SanctionsCog", sanction_id: int,
+                 origin: discord.Message | None) -> None:
+        self._cog = cog
+        self._sanction_id = sanction_id
+        self._origin = origin
+        super().__init__(
+            placeholder="New sanction type…",
+            options=[
+                discord.SelectOption(label=label[:100], value=label)
+                for label in SANCTION_TYPE_KEYS.values()
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self._cog.apply_review_edit(
+            interaction, "type", self._sanction_id, self.values[0],
+            origin=self._origin,
+        )
+
+
+def _review_view(sanction_id: int, *, include_resolution: bool = True) -> discord.ui.View:
+    """The full review button set: Approve / Edit type / Edit reason /
+    Edit notes / Dismiss. ``include_resolution=False`` gives just the
+    edit buttons (``!sanction edit`` on an already-settled record)."""
     view = discord.ui.View(timeout=None)
-    view.add_item(ReviewConfirmButton(sanction_id))
-    view.add_item(ReviewDismissButton(sanction_id))
+    if include_resolution:
+        view.add_item(ReviewConfirmButton(sanction_id))
+    view.add_item(ReviewEditButton("type", sanction_id))
+    view.add_item(ReviewEditButton("reason", sanction_id))
+    view.add_item(ReviewEditButton("notes", sanction_id))
+    if include_resolution:
+        view.add_item(ReviewDismissButton(sanction_id))
     return view
 
 
@@ -216,12 +308,334 @@ def _escalation_view(step: str, sanction_id: int) -> discord.ui.View:
     return view
 
 
+# -- the sanction wizard (panel/context-menu flow; all steps ephemeral) -----
+
+@dataclass
+class SanctionDraft:
+    """State carried through the wizard steps."""
+    mc_user_id: int | None = None
+    name: str | None = None
+    discord_id: int | None = None
+    rule_code: str | None = None      # None = free-text reason
+    reason: str | None = None
+    sanction_type: str | None = None
+    notes: str | None = None
+
+
+async def _wizard_guard(interaction: discord.Interaction) -> bool:
+    if _staff_check(interaction.client, interaction.user):
+        return True
+    await interaction.response.send_message(
+        "You don't have permission to do this.", ephemeral=True
+    )
+    return False
+
+
+def type_options(rule_code: str | None) -> list[discord.SelectOption]:
+    """The 16 reference types; the CoC-advised one (if any) first and
+    marked, so the wizard preselects the advice without forcing it."""
+    advice = advice_for(rule_code)
+    advised = advice[0] if advice else None
+    ordered = ([advised] if advised in SANCTION_TYPE_KEYS.values() else []) + [
+        label for label in SANCTION_TYPE_KEYS.values() if label != advised
+    ]
+    return [
+        discord.SelectOption(
+            label=(f"{label} (advised)" if label == advised else label)[:100],
+            value=label,
+        )
+        for label in ordered[:25]
+    ]
+
+
+def repeat_banner(rows, rule_code: str | None, threshold: int = 3) -> str | None:
+    """The reference bot's repeated-offense banner: several warnings for
+    the SAME CoC rule is a strong escalation signal."""
+    if not rule_code:
+        return None
+    same = sum(
+        1 for r in rows
+        if r["status"] in ("active", "expired")
+        and (r["reason_category"] or "") == rule_code
+    )
+    if same < threshold:
+        return None
+    return (
+        f"⚠️ **{same}× rule {rule_code} already on record** — consider "
+        "escalating instead of another warning (CoC section 5)."
+    )
+
+
+class SanctionMemberModal(discord.ui.Modal, title="Sanction a member"):
+    query = discord.ui.TextInput(
+        label="MC name, MC id or Discord id",
+        placeholder="e.g. DutchFireFighter or 123456",
+        max_length=100,
+    )
+
+    def __init__(self, cog: "SanctionsCog", mode: str) -> None:
+        super().__init__(
+            title="Sanction a member" if mode == "create" else "Member history"
+        )
+        self._cog = cog
+        self._mode = mode
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if self._mode == "create":
+            await self._cog.start_wizard(interaction, str(self.query))
+        else:
+            await self._cog.show_history(interaction, str(self.query))
+
+
+class _MemberSelect(discord.ui.Select):
+    def __init__(self, cog: "SanctionsCog", candidates, mode: str) -> None:
+        self._cog = cog
+        self._mode = mode
+        self._by_id = {str(c.mc_user_id): c for c in candidates[:25]}
+        super().__init__(
+            placeholder="Select the member…",
+            options=[
+                discord.SelectOption(
+                    label=c.name[:100], value=str(c.mc_user_id),
+                    description=(
+                        f"MC {c.mc_user_id}"
+                        + ("" if c.is_active else " · left the alliance")
+                    )[:100],
+                )
+                for c in candidates[:25]
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _wizard_guard(interaction):
+            return
+        c = self._by_id[self.values[0]]
+        if self._mode == "history":
+            await self._cog.show_history_for(
+                interaction, mc_user_id=c.mc_user_id, name=c.name,
+                discord_id=c.discord_id, edit=True,
+            )
+            return
+        draft = SanctionDraft(
+            mc_user_id=c.mc_user_id, name=c.name, discord_id=c.discord_id,
+        )
+        await self._cog.wizard_reason_step(interaction, draft)
+
+
+class _ReasonSelect(discord.ui.Select):
+    def __init__(self, cog: "SanctionsCog", draft: SanctionDraft, rules) -> None:
+        self._cog = cog
+        self._draft = draft
+        super().__init__(
+            placeholder="Pick the CoC rule…",
+            options=[
+                discord.SelectOption(
+                    label=f"{rule.code} — {rule.title}"[:100],
+                    value=rule.code,
+                    description=(
+                        (advice_for(rule.code) or (rule.text,))[0]
+                    )[:100],
+                )
+                for rule in rules[:25]
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _wizard_guard(interaction):
+            return
+        rule = COC_RULES[self.values[0]]
+        self._draft.rule_code = rule.code
+        self._draft.reason = f"{rule.code}. {rule.title}"
+        await self._cog.wizard_type_step(interaction, self._draft)
+
+
+class ReasonSearchModal(discord.ui.Modal, title="Search CoC rules"):
+    query = discord.ui.TextInput(
+        label="Keyword (e.g. racism, drama, donation)", max_length=60,
+    )
+
+    def __init__(self, cog: "SanctionsCog", draft: SanctionDraft) -> None:
+        super().__init__()
+        self._cog = cog
+        self._draft = draft
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        matches = [rule for _, rule in find_reason_matches(str(self.query), 10)]
+        if not matches:
+            matches = list(COC_RULES.values())
+        await self._cog.wizard_reason_step(
+            interaction, self._draft, rules=matches, edit=True,
+        )
+
+
+class FreeReasonModal(discord.ui.Modal, title="Custom reason"):
+    reason = discord.ui.TextInput(
+        label="Reason (free text)", style=discord.TextStyle.paragraph,
+        max_length=300,
+    )
+
+    def __init__(self, cog: "SanctionsCog", draft: SanctionDraft) -> None:
+        super().__init__()
+        self._cog = cog
+        self._draft = draft
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        self._draft.rule_code = None
+        self._draft.reason = str(self.reason)
+        await self._cog.wizard_type_step(interaction, self._draft)
+
+
+class ReasonStepView(discord.ui.View):
+    def __init__(self, cog: "SanctionsCog", draft: SanctionDraft, rules) -> None:
+        super().__init__(timeout=600)
+        self._cog = cog
+        self._draft = draft
+        self.add_item(_ReasonSelect(cog, draft, rules))
+
+    @discord.ui.button(label="Search reason", style=discord.ButtonStyle.secondary)
+    async def search_reason(self, interaction, button) -> None:
+        if not await _wizard_guard(interaction):
+            return
+        await interaction.response.send_modal(
+            ReasonSearchModal(self._cog, self._draft)
+        )
+
+    @discord.ui.button(label="Other reason", style=discord.ButtonStyle.secondary)
+    async def other_reason(self, interaction, button) -> None:
+        if not await _wizard_guard(interaction):
+            return
+        await interaction.response.send_modal(
+            FreeReasonModal(self._cog, self._draft)
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction, button) -> None:
+        await interaction.response.edit_message(
+            content="Wizard cancelled.", embed=None, view=None,
+        )
+
+
+class _TypeSelect(discord.ui.Select):
+    def __init__(self, cog: "SanctionsCog", draft: SanctionDraft) -> None:
+        self._cog = cog
+        self._draft = draft
+        super().__init__(
+            placeholder="Pick the sanction type…",
+            options=type_options(draft.rule_code),
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _wizard_guard(interaction):
+            return
+        self._draft.sanction_type = self.values[0]
+        await self._cog.wizard_summary_step(interaction, self._draft)
+
+
+class TypeStepView(discord.ui.View):
+    def __init__(self, cog: "SanctionsCog", draft: SanctionDraft) -> None:
+        super().__init__(timeout=600)
+        self.add_item(_TypeSelect(cog, draft))
+        self._cog = cog
+        self._draft = draft
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction, button) -> None:
+        await interaction.response.edit_message(
+            content="Wizard cancelled.", embed=None, view=None,
+        )
+
+
+class NotesModal(discord.ui.Modal, title="Add notes"):
+    notes = discord.ui.TextInput(
+        label="Internal notes (staff only)",
+        style=discord.TextStyle.paragraph, max_length=500, required=False,
+    )
+
+    def __init__(self, cog: "SanctionsCog", draft: SanctionDraft) -> None:
+        super().__init__()
+        self._cog = cog
+        self._draft = draft
+        self.notes.default = draft.notes or ""
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        self._draft.notes = str(self.notes) or None
+        await self._cog.wizard_summary_step(interaction, self._draft)
+
+
+class SummaryView(discord.ui.View):
+    def __init__(self, cog: "SanctionsCog", draft: SanctionDraft) -> None:
+        super().__init__(timeout=600)
+        self._cog = cog
+        self._draft = draft
+
+    @discord.ui.button(label="Submit", style=discord.ButtonStyle.danger)
+    async def submit(self, interaction, button) -> None:
+        if not await _wizard_guard(interaction):
+            return
+        await self._cog.wizard_submit(interaction, self._draft)
+
+    @discord.ui.button(label="Add notes", style=discord.ButtonStyle.secondary)
+    async def add_notes(self, interaction, button) -> None:
+        if not await _wizard_guard(interaction):
+            return
+        await interaction.response.send_modal(
+            NotesModal(self._cog, self._draft)
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button) -> None:
+        await interaction.response.edit_message(
+            content="Wizard cancelled — nothing recorded.",
+            embed=None, view=None,
+        )
+
+
+class SanctionPanelView(discord.ui.View):
+    def __init__(self, cog: "SanctionsCog") -> None:
+        super().__init__(timeout=None)
+        self._cog = cog
+
+    @discord.ui.button(
+        label="Create sanction", style=discord.ButtonStyle.danger,
+        custom_id="fra:spanel:create", emoji="⚖️",
+    )
+    async def create(self, interaction, button) -> None:
+        if not await _wizard_guard(interaction):
+            return
+        await interaction.response.send_modal(
+            SanctionMemberModal(self._cog, "create")
+        )
+
+    @discord.ui.button(
+        label="Member history", style=discord.ButtonStyle.secondary,
+        custom_id="fra:spanel:history", emoji="📋",
+    )
+    async def history(self, interaction, button) -> None:
+        if not await _wizard_guard(interaction):
+            return
+        await interaction.response.send_modal(
+            SanctionMemberModal(self._cog, "history")
+        )
+
+    @discord.ui.button(
+        label="Statistics", style=discord.ButtonStyle.secondary,
+        custom_id="fra:spanel:stats", emoji="📊",
+    )
+    async def stats(self, interaction, button) -> None:
+        if not await _wizard_guard(interaction):
+            return
+        cog = self._cog
+        embed = await cog.stats_embed()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 class SanctionsCog(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
         self.repo = SanctionsRepo(bot.db)
         bot.add_dynamic_items(
-            ReviewConfirmButton, ReviewDismissButton, EscalationActionButton,
+            ReviewConfirmButton, ReviewDismissButton, ReviewEditButton,
+            EscalationActionButton,
         )
         service = getattr(bot, "sanction_service", None)
         if service is not None:
@@ -234,6 +648,301 @@ class SanctionsCog(commands.Cog):
     ) -> tuple[int | None, str | None, int | None]:
         return await resolve_member_target(self.bot, ctx, target)
 
+    # -- wizard steps (ephemeral; entered from panel/context menu) ----------
+
+    async def _search_candidates(self, query: str):
+        from ..services.dossier import DossierService
+
+        return await DossierService(self.bot.db).search(query)
+
+    async def start_wizard(
+        self, interaction: discord.Interaction, query: str, *,
+        draft: SanctionDraft | None = None,
+    ) -> None:
+        """Entry: resolve the member, then walk reason → type → summary."""
+        if draft is not None and draft.mc_user_id is not None:
+            await self.wizard_reason_step(interaction, draft, edit=False)
+            return
+        candidates = await self._search_candidates(query)
+        if not candidates:
+            await interaction.response.send_message(
+                f"No member found for `{query}` — try the exact MC name or id.",
+                ephemeral=True,
+            )
+            return
+        if len(candidates) > 1 and candidates[0].score <= candidates[1].score:
+            view = discord.ui.View(timeout=600)
+            view.add_item(_MemberSelect(self, candidates, "create"))
+            await interaction.response.send_message(
+                "Multiple matches — pick the member:", view=view,
+                ephemeral=True,
+            )
+            return
+        c = candidates[0]
+        await self.wizard_reason_step(
+            interaction,
+            SanctionDraft(
+                mc_user_id=c.mc_user_id, name=c.name, discord_id=c.discord_id,
+            ),
+            edit=False,
+        )
+
+    def _wizard_embed(self, draft: SanctionDraft, step: str) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"⚖️ Sanction wizard — {draft.name}",
+            colour=discord.Colour.orange(),
+            description=step,
+        )
+        if draft.reason:
+            embed.add_field(name="Reason", value=draft.reason[:1024], inline=False)
+        if draft.sanction_type:
+            embed.add_field(name="Type", value=draft.sanction_type)
+        if draft.notes:
+            embed.add_field(name="Notes", value=draft.notes[:1024], inline=False)
+        return embed
+
+    async def wizard_reason_step(
+        self, interaction: discord.Interaction, draft: SanctionDraft, *,
+        rules=None, edit: bool = True,
+    ) -> None:
+        advice_hint = (
+            "Pick the Code of Conduct rule (the select shows the advised "
+            "sanction per rule), search it, or write a free-text reason."
+        )
+        embed = self._wizard_embed(draft, advice_hint)
+        view = ReasonStepView(self, draft, rules or list(COC_RULES.values()))
+        if edit:
+            await interaction.response.edit_message(embed=embed, view=view)
+        else:
+            await interaction.response.send_message(
+                embed=embed, view=view, ephemeral=True,
+            )
+
+    async def wizard_type_step(
+        self, interaction: discord.Interaction, draft: SanctionDraft,
+    ) -> None:
+        advice = advice_for(draft.rule_code)
+        hint = "Pick the sanction type."
+        if advice:
+            hint += f"\n**CoC advice:** {advice[0]} — {advice[1]}"
+        await interaction.response.edit_message(
+            embed=self._wizard_embed(draft, hint),
+            view=TypeStepView(self, draft),
+        )
+
+    async def wizard_summary_step(
+        self, interaction: discord.Interaction, draft: SanctionDraft,
+    ) -> None:
+        rows = await self.repo.for_member(
+            mc_user_id=draft.mc_user_id, discord_user_id=draft.discord_id,
+            name=draft.name, limit=200,
+        )
+        offenses = await self.repo.offense_count(
+            mc_user_id=draft.mc_user_id, discord_user_id=draft.discord_id,
+            name=draft.name,
+        )
+        lines = ["Check the summary, then **Submit**."]
+        if offenses:
+            lines.append(
+                f"Current CoC offense position: **{offenses}** — next: "
+                f"{ladder_advice(offenses + 1, self.bot.cfg.automation.sanctions.escalation_offense_threshold)}"
+            )
+        banner = repeat_banner(rows, draft.rule_code)
+        if banner:
+            lines.append(banner)
+        embed = self._wizard_embed(draft, "\n".join(lines))
+        await interaction.response.edit_message(
+            embed=embed, view=SummaryView(self, draft),
+        )
+
+    async def wizard_submit(
+        self, interaction: discord.Interaction, draft: SanctionDraft,
+    ) -> None:
+        await interaction.response.defer()
+        summary = await self._issue_full(
+            mc_user_id=draft.mc_user_id, name=draft.name,
+            discord_id=draft.discord_id, admin_id=interaction.user.id,
+            admin_name=interaction.user.display_name,
+            sanction_type=draft.sanction_type or "Warning - Verbal warning",
+            reason=draft.reason or "(no reason given)",
+            reason_category=draft.rule_code, notes=draft.notes,
+            source="panel",
+        )
+        await interaction.edit_original_response(
+            content=summary, embed=None, view=None,
+        )
+
+    # -- member history (panel button) --------------------------------------
+
+    async def show_history(
+        self, interaction: discord.Interaction, query: str,
+    ) -> None:
+        candidates = await self._search_candidates(query)
+        if not candidates:
+            await interaction.response.send_message(
+                f"No member found for `{query}`.", ephemeral=True,
+            )
+            return
+        if len(candidates) > 1 and candidates[0].score <= candidates[1].score:
+            view = discord.ui.View(timeout=600)
+            view.add_item(_MemberSelect(self, candidates, "history"))
+            await interaction.response.send_message(
+                "Multiple matches — pick the member:", view=view,
+                ephemeral=True,
+            )
+            return
+        c = candidates[0]
+        await self.show_history_for(
+            interaction, mc_user_id=c.mc_user_id, name=c.name,
+            discord_id=c.discord_id, edit=False,
+        )
+
+    async def show_history_for(
+        self, interaction: discord.Interaction, *, mc_user_id: int | None,
+        name: str | None, discord_id: int | None, edit: bool,
+    ) -> None:
+        rows = await self.repo.for_member(
+            mc_user_id=mc_user_id, discord_user_id=discord_id, name=name,
+            limit=25,
+        )
+        offenses = await self.repo.offense_count(
+            mc_user_id=mc_user_id, discord_user_id=discord_id, name=name,
+        )
+        under = under_warning_until(rows)
+        lines = [
+            f"`#{r['id']}` {r['created_at'][:10]} — "
+            f"{r['sanction_type']} — {r['reason'][:60]}"
+            + (
+                f" *({effective_status(r)})*"
+                if effective_status(r) != "active" else ""
+            )
+            for r in rows
+        ] or ["*No sanctions on record.*"]
+        badge = f"\n🟠 Under warning until {under[:10]} (CoC 5.1)" if under else ""
+        embed = discord.Embed(
+            title=f"📋 Sanctions — {name}",
+            colour=discord.Colour.orange(),
+            description=(
+                f"CoC offense position: **{offenses}**{badge}\n\n"
+                + "\n".join(lines)
+            )[:4096],
+        )
+        if edit:
+            await interaction.response.edit_message(
+                content=None, embed=embed, view=None,
+            )
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # -- statistics ---------------------------------------------------------
+
+    async def stats_embed(self) -> discord.Embed:
+        by_status = await self.repo.status_summary()
+        type_rows = await self.repo.stats()
+        admins = await self.repo.admin_leaderboard()
+        members = await self.repo.member_leaderboard()
+        embed = discord.Embed(
+            title="📊 Sanction statistics",
+            colour=discord.Colour.blurple(),
+            description=" · ".join(
+                f"{status}: **{n}**"
+                for status, n in sorted(by_status.items())
+            ) or "No sanctions recorded yet.",
+        )
+        if type_rows:
+            embed.add_field(
+                name="By type",
+                value="\n".join(
+                    f"- {r['sanction_type']}"
+                    + (f" ({r['status']})" if r["status"] != "active" else "")
+                    + f": **{r['n']}**"
+                    for r in type_rows[:12]
+                )[:1024],
+                inline=False,
+            )
+        if admins:
+            embed.add_field(
+                name="Top recording admins",
+                value="\n".join(
+                    f"- {r['admin_name']}: {r['n']}" for r in admins
+                )[:1024],
+            )
+        if members:
+            embed.add_field(
+                name="Most sanctioned",
+                value="\n".join(
+                    f"- {r['name']}: {r['n']}" for r in members
+                )[:1024],
+            )
+        return embed
+
+    # -- panel (posted/maintained by the panel keeper) ----------------------
+
+    def panel_embed(self) -> discord.Embed:
+        return discord.Embed(
+            title=f"⚖️ {PANEL_TITLE}",
+            colour=discord.Colour.dark_red(),
+            description=(
+                "Record and manage member sanctions against the alliance "
+                "Code of Conduct.\n\n"
+                "**Create sanction** walks through member → CoC rule → "
+                "type (with the advised sanction preselected) → summary.\n"
+                "**Member history** shows one member's record and CoC "
+                "offense position.\n**Statistics** shows the register "
+                "totals. Staff only; everything opens privately."
+            ),
+        )
+
+    def panel_view(self) -> discord.ui.View:
+        return SanctionPanelView(self)
+
+    @commands.command(name="sanctionpanel")
+    async def sanction_panel(self, ctx: commands.Context) -> None:
+        """(Re)post the sanction-management panel in its channel."""
+        if not is_fra_admin_ctx(ctx):
+            await ctx.send("⛔ You don't have permission to use that command.")
+            return
+        keeper = self.bot.get_cog("PanelKeeperCog")
+        if keeper is None:
+            await ctx.send("Panel keeper not loaded.")
+            return
+        channel_id = getattr(self.bot.cfg.discord.channels, "sanction_panel", 0)
+        channel = self.bot.get_channel(channel_id) if channel_id else ctx.channel
+        if channel is None:
+            await ctx.send(
+                "⚠️ Set the panel channel first: `!fra set sanction_panel <id>`."
+            )
+            return
+        outcome = await keeper.ensure("sanctions", channel=channel, force=True)
+        await ctx.send(f"✅ Sanction panel {outcome} in {channel.mention}.")
+
+    # -- context menu -------------------------------------------------------
+
+    async def sanction_member_menu(
+        self, interaction: discord.Interaction, member: discord.Member,
+    ) -> None:
+        """Right-click → Apps → Sanction member: the wizard with the
+        member preselected (MC identity via the verified link)."""
+        if not await _wizard_guard(interaction):
+            return
+        link = await LinksRepo(self.bot.db).get_by_discord(member.id)
+        mc_user_id = (
+            int(link["mc_user_id"])
+            if link is not None and link["status"] == "approved" else None
+        )
+        name = member.display_name
+        if mc_user_id is not None:
+            roster = await MembersRepo(self.bot.db).active_members()
+            row = roster.get(mc_user_id)
+            if row is not None:
+                name = row["name"]
+        await self.start_wizard(
+            interaction, name,
+            draft=SanctionDraft(
+                mc_user_id=mc_user_id, name=name, discord_id=member.id,
+            ) if mc_user_id is not None else None,
+        )
+
     # -- commands ------------------------------------------------------------
 
     @commands.group(name="sanction", aliases=["sanctions"], invoke_without_command=True)
@@ -242,7 +951,8 @@ class SanctionsCog(commands.Cog):
         keys = ", ".join(sorted(SANCTION_TYPE_KEYS))
         await ctx.send(
             "Sanctions register — subcommands: `add <type> <lid> <reden>`, "
-            "`list <lid>`, `recent`, `stats`, `revoke <id>`.\n"
+            "`list <lid>`, `recent`, `view <id>`, `edit <id>`, `stats`, "
+            "`revoke <id>`, `reviewscan`. Panel: `!sanctionpanel`.\n"
             f"Types: {keys}"
         )
 
@@ -261,10 +971,28 @@ class SanctionsCog(commands.Cog):
             )
             return
         mc_user_id, name, discord_id = await self._resolve_target(ctx, target)
+        summary = await self._issue_full(
+            mc_user_id=mc_user_id, name=name, discord_id=discord_id,
+            admin_id=ctx.author.id, admin_name=ctx.author.display_name,
+            sanction_type=sanction_type, reason=reason,
+        )
+        await ctx.send(summary)
+
+    async def _issue_full(
+        self, *, mc_user_id: int | None, name: str | None,
+        discord_id: int | None, admin_id: int, admin_name: str,
+        sanction_type: str, reason: str, reason_category: str | None = None,
+        notes: str | None = None, source: str = "manual",
+    ) -> str:
+        """The one issue path shared by the command, the wizard and the
+        context menu: register (+ real mute), announce, notify the
+        member, dossier action, escalation follow-up. Returns the
+        summary line for the invoker."""
         result = await self.bot.sanction_service.issue(
             mc_user_id=mc_user_id, mc_username=name, discord_user_id=discord_id,
-            admin_discord_id=ctx.author.id, admin_name=ctx.author.display_name,
+            admin_discord_id=admin_id, admin_name=admin_name,
             sanction_type=sanction_type, reason=reason,
+            reason_category=reason_category, notes=notes, source=source,
         )
         sanction_id = result["sanction_id"]
         offenses = result["offense_count"]
@@ -276,8 +1004,7 @@ class SanctionsCog(commands.Cog):
             )
             under_until = under_warning_until(rows)
         await self._announce(
-            sanction_id, sanction_type, name, reason,
-            ctx.author.display_name, offenses,
+            sanction_id, sanction_type, name, reason, admin_name, offenses,
             expires_at=result["expires_at"], mute_note=result["mute_note"],
             under_until=under_until,
         )
@@ -285,19 +1012,19 @@ class SanctionsCog(commands.Cog):
         await self.bot.log_member_action(
             action="sanction_received",
             detail=f"#{sanction_id} {sanction_type} — {reason[:120]} "
-                   f"(by {ctx.author.display_name})",
+                   f"(by {admin_name})",
             discord_user_id=discord_id, mc_user_id=mc_user_id,
             actor_name=name,
+        )
+        await self._post_escalation(
+            result["escalation"], sanction_id=sanction_id, name=name,
         )
         note = f" — CoC offense position **{offenses}**" if offenses else ""
         unknown = "" if mc_user_id or discord_id else " (⚠️ not on the roster)"
         mute_line = f"\n{result['mute_note']}" if result["mute_note"] else ""
-        await ctx.send(
+        return (
             f"✅ Sanction **#{sanction_id}** recorded: {sanction_type} for "
             f"**{name}**{unknown}.{note}{mute_line}"
-        )
-        await self._post_escalation(
-            result["escalation"], sanction_id=sanction_id, name=name,
         )
 
     @sanction.command(name="list")
@@ -342,16 +1069,86 @@ class SanctionsCog(commands.Cog):
     @sanction.command(name="stats")
     @is_fra_admin()
     async def sanction_stats(self, ctx: commands.Context) -> None:
-        rows = await self.repo.stats()
-        if not rows:
-            await ctx.send("No sanctions recorded yet.")
+        await ctx.send(embed=await self.stats_embed())
+
+    @sanction.command(name="view")
+    @is_fra_admin()
+    async def sanction_view(self, ctx: commands.Context, sanction_id: int) -> None:
+        """Full detail of one sanction, including notes and history."""
+        row = await self.repo.get(sanction_id)
+        if row is None:
+            await ctx.send(f"⚠️ Sanction #{sanction_id} does not exist.")
             return
-        lines = [
-            f"- {r['sanction_type']}: **{r['n']}**"
-            + (" (revoked)" if r["status"] != "active" else "")
-            for r in rows
-        ]
-        await ctx.send("📊 Sanction statistics:\n" + "\n".join(lines)[:1800])
+        status = effective_status(row)
+        embed = discord.Embed(
+            title=f"⚖️ Sanction #{sanction_id} — {row['sanction_type']}"[:256],
+            colour=type_colour(row["sanction_type"]),
+            description=(
+                f"**Member:** {row['mc_username'] or '?'}"
+                + (f" (<@{row['discord_user_id']}>)"
+                   if row["discord_user_id"] else "")
+                + f"\n**Status:** {status}"
+                + f"\n**Source:** {row['source']}"
+            )[:4096],
+        )
+        embed.add_field(name="Type", value=row["sanction_type"])
+        embed.add_field(
+            name="Reason",
+            value=(
+                (f"[{row['reason_category']}] " if row["reason_category"] else "")
+                + (row["reason"] or "—")
+            )[:1024],
+            inline=False,
+        )
+        if row["notes"]:
+            embed.add_field(name="Notes", value=row["notes"][:1024], inline=False)
+        detail = [f"Recorded by {row['admin_name']} on {row['created_at'][:16]}"]
+        if row["expires_at"]:
+            detail.append(f"Expires: {row['expires_at'][:16]}")
+        if row["edited_at"]:
+            detail.append(f"Edited by {row['edited_by']} on {row['edited_at'][:16]}")
+        if row["revoked_at"]:
+            detail.append(f"Settled by {row['revoked_by']} on {row['revoked_at'][:16]}")
+        embed.add_field(name="Record", value="\n".join(detail)[:1024], inline=False)
+        history = await self.repo.history(sanction_id)
+        if history:
+            embed.add_field(
+                name="History",
+                value="\n".join(
+                    f"`{h['created_at'][:16]}` {h['action']} — {h['actor']}"
+                    + (f": {h['detail'][:60]}" if h["detail"] else "")
+                    for h in history[-10:]
+                )[:1024],
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+
+    @sanction.command(name="edit")
+    @is_fra_admin()
+    async def sanction_edit(self, ctx: commands.Context, sanction_id: int) -> None:
+        """Post the edit buttons for a sanction (same set as the review
+        flow; Approve/Dismiss included while it is still unverified)."""
+        row = await self.repo.get(sanction_id)
+        if row is None:
+            await ctx.send(f"⚠️ Sanction #{sanction_id} does not exist.")
+            return
+        embed = discord.Embed(
+            title=f"✏️ Edit sanction #{sanction_id}"[:256],
+            colour=type_colour(row["sanction_type"]),
+            description=f"**Member:** {row['mc_username'] or '?'}"[:4096],
+        )
+        embed.add_field(name="Type", value=row["sanction_type"])
+        embed.add_field(name="Reason", value=(row["reason"] or "—")[:1024],
+                        inline=False)
+        if row["notes"]:
+            embed.add_field(name="Notes", value=row["notes"][:1024], inline=False)
+        await ctx.send(
+            embed=embed,
+            view=_review_view(
+                sanction_id,
+                include_resolution=row["status"] == "unverified",
+            ),
+        )
 
     @sanction.command(name="revoke")
     @is_fra_admin()
@@ -522,18 +1319,41 @@ class SanctionsCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        verb = "Confirmed" if confirm else "Dismissed"
+        verb = "Approved" if confirm else "Dismissed"
         if confirm:
-            # Dossier entry on CONFIRM only — parity with `!sanction add`.
+            # Dossier entry on APPROVE only — parity with `!sanction add`.
             await self.bot.log_member_action(
                 action="sanction_received",
                 detail=f"#{sanction_id} {row['sanction_type']} — "
-                       f"{row['reason'][:120]} (game log, confirmed by "
+                       f"{row['reason'][:120]} (game log, approved by "
                        f"{interaction.user.display_name})",
                 discord_user_id=row["discord_user_id"],
                 mc_user_id=row["mc_user_id"],
                 actor_name=row["mc_username"],
             )
+            # An approved game-log warning/mute is a real CoC offense —
+            # run the same escalation follow-up as a fresh sanction.
+            if str(row["sanction_type"]).startswith(("Warning", "Mute")):
+                count = await self.repo.offense_count(
+                    mc_user_id=row["mc_user_id"],
+                    discord_user_id=row["discord_user_id"],
+                    name=row["mc_username"],
+                )
+                if count >= 2:
+                    threshold = (
+                        self.bot.cfg.automation.sanctions
+                        .escalation_offense_threshold
+                    )
+                    await self._post_escalation(
+                        {
+                            "count": count,
+                            "step": ladder_step(count, threshold),
+                            "advice": ladder_advice(count, threshold),
+                            "mode": self.bot.cfg.automation.sanctions
+                                    .escalation_mode,
+                        },
+                        sanction_id=sanction_id, name=row["mc_username"],
+                    )
         try:
             message = interaction.message
             embed = message.embeds[0] if message and message.embeds else None
@@ -554,6 +1374,112 @@ class SanctionsCog(commands.Cog):
             f"**{row['mc_username'] or '?'}**.",
             ephemeral=True,
         )
+
+    # -- review edits (Edit type / Edit reason / Edit notes) -------------------
+
+    async def handle_review_edit(
+        self, interaction: discord.Interaction, field: str, sanction_id: int,
+    ) -> None:
+        from .automation import _is_admin_interaction
+
+        if not _is_admin_interaction(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to do this.", ephemeral=True
+            )
+            return
+        row = await self.repo.get(sanction_id)
+        if row is None:
+            await interaction.response.send_message(
+                f"⚠️ Sanction #{sanction_id} no longer exists.", ephemeral=True
+            )
+            return
+        if field == "type":
+            view = discord.ui.View(timeout=600)
+            view.add_item(_EditTypeSelect(self, sanction_id, interaction.message))
+            await interaction.response.send_message(
+                f"New type for sanction #{sanction_id} "
+                f"(now: {row['sanction_type']}):",
+                view=view, ephemeral=True,
+            )
+            return
+        current = row["reason"] if field == "reason" else row["notes"]
+        await interaction.response.send_modal(
+            EditTextModal(self, field, sanction_id, current)
+        )
+
+    async def apply_review_edit(
+        self, interaction: discord.Interaction, field: str, sanction_id: int,
+        value: str, *, origin: discord.Message | None = None,
+    ) -> None:
+        from ..services.sanction_rules import mute_expiry
+
+        kwargs: dict = {}
+        if field == "type":
+            kwargs["sanction_type"] = value
+            # A new timed-mute type gets a real expiry from now; other
+            # types keep whatever was stored (edit() ignores None).
+            expires = mute_expiry(value)
+            if expires is not None:
+                kwargs["expires_at"] = expires
+        elif field == "reason":
+            kwargs["reason"] = value
+        else:
+            kwargs["notes"] = value
+        ok = await self.repo.edit(
+            sanction_id, actor=interaction.user.display_name, **kwargs,
+        )
+        if not ok:
+            await interaction.response.send_message(
+                f"⚠️ Could not edit sanction #{sanction_id}.", ephemeral=True
+            )
+            return
+        row = await self.repo.get(sanction_id)
+        # Refresh the message the button lived on (the review notice or
+        # the `!sanction edit` card); for the type-select the origin was
+        # captured at click time, for modals it IS interaction.message.
+        target = origin or interaction.message
+        refreshed = False
+        if target is not None and target.embeds:
+            embed = self._apply_review_edits(target.embeds[0], row)
+            try:
+                if origin is not None:
+                    await origin.edit(embed=embed)
+                    await interaction.response.edit_message(
+                        content=f"✅ Type updated for sanction #{sanction_id}.",
+                        view=None,
+                    )
+                else:
+                    await interaction.response.edit_message(embed=embed)
+                refreshed = True
+            except discord.HTTPException as exc:
+                log.warning("review edit refresh failed: %s", exc)
+        if not refreshed and not interaction.response.is_done():
+            await interaction.response.send_message(
+                f"✅ Sanction #{sanction_id} updated ({field}).",
+                ephemeral=True,
+            )
+
+    @staticmethod
+    def _apply_review_edits(embed: discord.Embed, row) -> discord.Embed:
+        """Reflect the stored values on an existing notice embed."""
+        def set_field(name: str, value: str) -> None:
+            for i, field in enumerate(embed.fields):
+                if field.name == name:
+                    embed.set_field_at(i, name=name, value=value[:1024],
+                                       inline=field.inline)
+                    return
+            embed.add_field(name=name, value=value[:1024], inline=False)
+
+        type_field = (
+            "Detected action"
+            if any(f.name == "Detected action" for f in embed.fields)
+            else "Type"
+        )
+        set_field(type_field, row["sanction_type"])
+        set_field("Reason", row["reason"] or "—")
+        if row["notes"]:
+            set_field("Notes", row["notes"])
+        return embed
 
     # -- escalation (CoC section 5) --------------------------------------------
 
@@ -738,4 +1664,14 @@ class SanctionsCog(commands.Cog):
 
 
 async def setup(bot) -> None:
-    await bot.add_cog(SanctionsCog(bot))
+    cog = SanctionsCog(bot)
+    await bot.add_cog(cog)
+    tree = getattr(bot, "tree", None)
+    if tree is not None:
+        menu = app_commands.ContextMenu(
+            name="Sanction member", callback=cog.sanction_member_menu,
+        )
+        try:
+            tree.add_command(menu)
+        except app_commands.CommandAlreadyRegistered:
+            pass

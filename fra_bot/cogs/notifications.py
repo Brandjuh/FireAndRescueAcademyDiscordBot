@@ -213,6 +213,58 @@ class NotificationsCog(commands.Cog):
         for row in await self._apps.pending_announcements():
             name = row["applicant_name"]
             view = None
+            blocked = None if row["resolved_at"] else (
+                await self._reapply_block(row)
+            )
+            if blocked is not None:
+                # CoC 5.3 return gate: a recently kicked (or banned)
+                # member must NOT be auto-accepted — an admin decides,
+                # with the sanction in view. Revoking the sanction clears
+                # the gate.
+                days = self._reapply_block_days()
+                if blocked.get("sanction_id") is None:
+                    detail = (
+                        "The sanction-register check FAILED — auto-accept "
+                        "is withheld to be safe; check the logs."
+                    )
+                else:
+                    detail = (
+                        f"Sanction #{blocked['sanction_id']} "
+                        f"({blocked['sanction_type']}, "
+                        f"{blocked['age_days']:.0f} days ago) — CoC 5.3: "
+                        f"return only after {days} days, via an admin. "
+                        "Revoke the sanction to clear this gate."
+                    )
+                embed = discord.Embed(
+                    title="⚠️ Application from a sanctioned member — "
+                          "decide manually",
+                    colour=discord.Colour.orange(),
+                    description=(
+                        f"**{name}** wants to (re)join the alliance."
+                    )[:_DESC_LIMIT],
+                    timestamp=dt.datetime.now(dt.timezone.utc),
+                )
+                embed.add_field(
+                    name="⚖️ Sanction gate", value=detail[:_FIELD_LIMIT],
+                    inline=False,
+                )
+                view = _application_view(row["application_id"])
+                url = profile_url(row["mc_user_id"])
+                if url:
+                    embed.add_field(
+                        name="Profile", value=url[:_FIELD_LIMIT], inline=False,
+                    )
+                embed.set_footer(text=f"Application ID: {row['application_id']}")
+                outcome = await self._send_or_skip(
+                    channel, embed,
+                    lambda r=row: self._apps.mark_posted(r["application_id"]),
+                    label="application",
+                    view=view,
+                )
+                if outcome == "retry":
+                    return
+                await asyncio.sleep(_POST_PAUSE_SECONDS)
+                continue
             if row["resolved_at"]:
                 # Vanished from the page (or accepted by us on a previous
                 # tick whose Discord send failed) before we could announce
@@ -280,6 +332,28 @@ class NotificationsCog(commands.Cog):
             if outcome == "retry":
                 return
             await asyncio.sleep(_POST_PAUSE_SECONDS)
+
+    def _reapply_block_days(self) -> int:
+        sanctions_cfg = getattr(self.bot.cfg.automation, "sanctions", None)
+        return int(getattr(sanctions_cfg, "reapply_block_days", 60))
+
+    async def _reapply_block(self, row) -> dict | None:
+        """CoC 5.3: does the sanctions register block auto-accepting this
+        applicant? FAIL-CLOSED: an error in the check withholds the
+        auto-accept (manual decision) instead of letting it through."""
+        try:
+            from ..db.repos import SanctionsRepo
+            from ..services.sanction_rules import reapply_block
+
+            days = self._reapply_block_days()
+            rows = await SanctionsRepo(self.bot.db).for_member(
+                mc_user_id=row["mc_user_id"], name=row["applicant_name"],
+                limit=100,
+            )
+            return reapply_block(rows, days)
+        except Exception:  # noqa: BLE001 — fail closed, never fail open
+            log.exception("application sanction gate failed")
+            return {"sanction_id": None, "sanction_type": "?", "age_days": 0.0}
 
     async def _publish_member_actions(self) -> None:
         """The admin feed: every member's bot-side action, in order, to

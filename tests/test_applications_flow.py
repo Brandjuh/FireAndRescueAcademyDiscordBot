@@ -179,3 +179,65 @@ async def test_button_custom_ids_round_trip():
     match = re.fullmatch(r"fra:app:deny:(?P<aid>[0-9]+)", "fra:app:deny:99")
     item = await ApplicationDenyButton.from_custom_id(None, None, match)
     assert item.application_id == 99
+
+
+# -- the CoC 5.3 reapply gate -------------------------------------------------
+
+async def _kick_sanction(db, *, days_ago=10.0, status="active"):
+    from fra_bot.db.database import Database  # noqa: F401 (fixture provides db)
+    from fra_bot.db.repos import SanctionsRepo
+    import datetime as dt
+
+    repo = SanctionsRepo(db)
+    sid = await repo.add(
+        mc_user_id=777, mc_username="Rookie", discord_user_id=None,
+        admin_discord_id=1, admin_name="Boss", sanction_type="Kick",
+        reason="CoC 5.3", source="manual",
+    )
+    backdated = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days_ago)
+    ).isoformat(timespec="seconds")
+    await db.execute(
+        "UPDATE sanctions SET created_at = ?, status = ? WHERE id = ?",
+        (backdated, status, sid),
+    )
+    return sid
+
+
+async def test_publish_withholds_auto_accept_for_recently_kicked(db):
+    await _seed(db, 41)
+    sid = await _kick_sanction(db, days_ago=10)
+    client = FakeClient()
+    channel = FakeChannel()
+    cog = _cog(_bot(db, client, channel, auto_accept=True))
+    await cog._publish_applications()
+    embed, view = channel.sent[0]
+    assert "decide manually" in embed.title
+    assert view is not None                       # Accept/Deny buttons shown
+    gate = next(f for f in embed.fields if "Sanction gate" in f.name)
+    assert f"#{sid}" in gate.value and "CoC 5.3" in gate.value
+    # The game action was NOT fired.
+    assert not any("annehmen" in path for path in client.fetched)
+
+
+async def test_publish_gate_clears_after_the_waiting_period(db):
+    await _seed(db, 41)
+    await _kick_sanction(db, days_ago=90)         # waited out CoC 5.3
+    client = FakeClient()
+    channel = FakeChannel()
+    cog = _cog(_bot(db, client, channel, auto_accept=True))
+    await cog._publish_applications()
+    embed, _ = channel.sent[0]
+    assert "auto-accepted" in embed.title
+    assert any("annehmen" in path for path in client.fetched)
+
+
+async def test_publish_gate_clears_when_the_kick_is_revoked(db):
+    await _seed(db, 41)
+    await _kick_sanction(db, days_ago=5, status="revoked")
+    client = FakeClient()
+    channel = FakeChannel()
+    cog = _cog(_bot(db, client, channel, auto_accept=True))
+    await cog._publish_applications()
+    embed, _ = channel.sent[0]
+    assert "auto-accepted" in embed.title

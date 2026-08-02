@@ -127,6 +127,27 @@ def test_ladder_follows_coc_section_5():
     assert "2nd" in ladder_advice(2)
 
 
+def test_reapply_block_follows_coc_53():
+    from fra_bot.services.sanction_rules import reapply_block
+
+    def row(stype="Kick", status="active", days_ago=10.0, sid=1):
+        return {"id": sid, "sanction_type": stype, "status": status,
+                "created_at": _iso(days_ago)}
+
+    # A fresh kick blocks; a waited-out kick doesn't.
+    assert reapply_block([row(days_ago=10)], 60, NOW)["sanction_id"] == 1
+    assert reapply_block([row(days_ago=90)], 60, NOW) is None
+    # An active Ban blocks regardless of age (permanent until revoked).
+    assert reapply_block([row("Ban", days_ago=400)], 60, NOW) is not None
+    # Revoked/dismissed records clear the gate; warnings never block.
+    assert reapply_block([row(status="revoked")], 60, NOW) is None
+    assert reapply_block(
+        [row("Warning - Official 1st warning")], 60, NOW
+    ) is None
+    # days=0 disables the gate entirely.
+    assert reapply_block([row()], 0, NOW) is None
+
+
 def test_under_warning_badge_is_display_only():
     recent = {"sanction_type": "Warning - Verbal warning", "status": "active",
               "source": "manual", "created_at": _iso(5)}
