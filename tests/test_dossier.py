@@ -103,3 +103,34 @@ async def test_dossier_embed_renders(db):
     assert "123,456,789" in text and "110,828" in text
     gone = dossier_embed(await svc.build(43))
     assert "Left the alliance" in gone.description
+
+
+async def test_dossier_includes_sanction_summary(db):
+    from fra_bot.cogs.dossier import dossier_embed
+    from fra_bot.db.repos import SanctionsRepo
+
+    await _seed(db)
+    repo = SanctionsRepo(db)
+    await repo.add(
+        mc_user_id=42, mc_username="DutchFireFighter", discord_user_id=None,
+        admin_discord_id=1, admin_name="Boss",
+        sanction_type="Warning - Official 1st warning", reason="1.4 drama",
+    )
+    revoked = await repo.add(
+        mc_user_id=42, mc_username="DutchFireFighter", discord_user_id=None,
+        admin_discord_id=1, admin_name="Boss",
+        sanction_type="Mute 1d", reason="cool down",
+    )
+    await repo.revoke(revoked, revoked_by="Boss")
+    svc = DossierService(db)
+    d = await svc.build(42)
+    assert d.sanctions_total == 2
+    assert d.sanctions_active == 1
+    assert d.offense_count == 1               # the revoked mute doesn't count
+    assert d.last_sanction.startswith(f"#{revoked} Mute 1d")
+    embed = dossier_embed(d)
+    field = next(f for f in embed.fields if "Sanctions" in f.name)
+    assert "CoC offense position: 1" in field.value
+    # A clean member gets no sanctions field at all.
+    clean = dossier_embed(await svc.build(43))
+    assert not any("Sanctions" in f.name for f in clean.fields)

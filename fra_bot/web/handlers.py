@@ -221,20 +221,19 @@ async def member_detail(request: web.Request) -> web.Response:
             "</span></p>"
         )
 
+    from ..services.sanction_rules import effective_status
+
     sanctions_repo = SanctionsRepo(bot.db)
     sanction_rows = await sanctions_repo.for_member(
         mc_user_id=mc_user_id, discord_user_id=dossier.discord_id,
         name=dossier.name,
     )
-    warnings = await sanctions_repo.official_warning_count(
-        mc_user_id=mc_user_id, discord_user_id=dossier.discord_id,
-        name=dossier.name,
-    )
     sanction_lines = "".join(
         "<tr>"
-        f"<td>#{row['id']}</td><td>{esc(row['created_at'][:10])}</td>"
+        f"<td><a href='/sanctions/{row['id']}'>#{row['id']}</a></td>"
+        f"<td>{esc(row['created_at'][:10])}</td>"
         f"<td>{esc(row['sanction_type'])}</td><td>{esc(row['reason'])}</td>"
-        f"<td>{badge('active', 'off') if row['status'] == 'active' else badge('revoked')}</td>"
+        f"<td>{badge('active', 'off') if effective_status(row) == 'active' else badge(effective_status(row))}</td>"
         "<td>"
         + (
             f"<form class='inline' method='post' action='/sanctions/{row['id']}/revoke'>"
@@ -297,7 +296,8 @@ async def member_detail(request: web.Request) -> web.Response:
         "<button>Add note</button></form></div>"
         f"<div class='panel'><h2>Add sanction</h2>{_sanction_form(mc_user_id)}"
         "</div></div></div>"
-        f"<div class='panel'><h2>Sanctions (official warnings: {warnings}/3)"
+        f"<div class='panel'><h2>Sanctions (CoC offense position: "
+        f"{dossier.offense_count})"
         "</h2><table><tr><th>#</th><th>Date</th><th>Type</th><th>Reason</th>"
         f"<th>Status</th><th></th></tr>{sanction_lines}</table></div>"
         f"<div class='panel'><h2>Bot actions</h2>"
@@ -329,52 +329,6 @@ async def post_profile(request: web.Request) -> web.Response:
         discord_user_id=int(link["discord_id"]), mc_user_id=mc_user_id,
     )
     _redirect(f"/members/{mc_user_id}", ok="Profile saved.")
-
-
-async def post_sanction(request: web.Request) -> web.Response:
-    from ..cogs.sanctions import SANCTION_TYPE_KEYS
-
-    bot = _bot(request)
-    mc_user_id = int(request.match_info["mc_id"])
-    dossier = await DossierService(bot.db).build(mc_user_id)
-    if dossier is None:
-        raise web.HTTPNotFound(text="Unknown member")
-    form = await request.post()
-    sanction_type = SANCTION_TYPE_KEYS.get(str(form.get("type") or ""))
-    reason = str(form.get("reason") or "").strip()
-    if not sanction_type or not reason:
-        _redirect(f"/members/{mc_user_id}", err="Type and reason are required.")
-    sanction_id = await SanctionsRepo(bot.db).add(
-        mc_user_id=mc_user_id, mc_username=dossier.name,
-        discord_user_id=dossier.discord_id, admin_discord_id=0,
-        admin_name=WEB_ACTOR, sanction_type=sanction_type, reason=reason,
-        notes=str(form.get("notes") or "").strip() or None,
-    )
-    await bot.log_member_action(
-        action="sanction_received",
-        detail=f"#{sanction_id} {sanction_type} — {reason} (via {WEB_ACTOR})",
-        discord_user_id=dossier.discord_id, mc_user_id=mc_user_id,
-        actor_name=dossier.name,
-    )
-    _redirect(f"/members/{mc_user_id}", ok=f"Sanction #{sanction_id} recorded.")
-
-
-async def post_sanction_revoke(request: web.Request) -> web.Response:
-    bot = _bot(request)
-    sanction_id = int(request.match_info["sanction_id"])
-    form = await request.post()
-    back = f"/members/{int(form.get('mc_id') or 0)}" if form.get("mc_id") else "/members"
-    if not await SanctionsRepo(bot.db).revoke(sanction_id, revoked_by=WEB_ACTOR):
-        _redirect(back, err=f"Sanction #{sanction_id} not found or not active.")
-    row = await SanctionsRepo(bot.db).get(sanction_id)
-    await bot.log_member_action(
-        action="sanction_revoked",
-        detail=f"#{sanction_id} (via {WEB_ACTOR})",
-        discord_user_id=row["discord_user_id"] if row else None,
-        mc_user_id=row["mc_user_id"] if row else None,
-        actor_name=row["mc_username"] if row else None,
-    )
-    _redirect(back, ok=f"Sanction #{sanction_id} revoked.")
 
 
 async def post_note(request: web.Request) -> web.Response:

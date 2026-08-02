@@ -169,6 +169,7 @@ def test_builtin_reports_all_register(registry):
         "credits",
         "treasury",
         "logs",
+        "sanctions",
         "automation",
     ):
         assert expected in names
@@ -353,3 +354,34 @@ async def test_credit_deltas_baseline_is_the_last_pre_window_snapshot(db):
     assert by[1] == 80          # 180 - 100, NOT 180 - 150
     assert by[2] == 40          # 90 - 50 (first in-window baseline)
     assert 3 not in by
+
+
+async def test_sanctions_report_summarises_the_window(db, registry):
+    from fra_bot.db.repos import SanctionsRepo
+
+    repo = SanctionsRepo(db)
+    inside = (NOW - dt.timedelta(hours=2)).isoformat(timespec="seconds")
+    outside = (NOW - dt.timedelta(days=40)).isoformat(timespec="seconds")
+    for name, stype, created in (
+        ("Alice", "Warning - Official 1st warning", inside),
+        ("Alice", "Mute 1d", inside),
+        ("Bob", "Kick", outside),                  # outside "today"
+    ):
+        sid = await repo.add(
+            mc_user_id=hash(name) % 1000, mc_username=name,
+            discord_user_id=None, admin_discord_id=1, admin_name="Boss",
+            sanction_type=stype, reason="t",
+        )
+        await db.execute(
+            "UPDATE sanctions SET created_at = ? WHERE id = ?", (created, sid),
+        )
+    result = await _run(registry, "sanctions", "today")
+    assert "**2** recorded" in result.description
+    assert "3 total" in result.description        # register standing
+    by_type = next(f for f in result.fields if f.name == "By type")
+    assert "Mute 1d: 1" in by_type.value and "Kick" not in by_type.value
+    top = next(f for f in result.fields if f.name == "Most sanctioned")
+    assert "Alice: 2" in top.value
+    # An empty window still reports the register standing.
+    empty = await _run(registry, "sanctions", "today")
+    assert empty is not None

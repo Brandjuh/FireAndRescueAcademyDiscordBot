@@ -100,6 +100,16 @@ def dossier_embed(d: Dossier) -> discord.Embed:
         value="\n".join(lines) if lines else "No requests on record.",
         inline=False,
     )
+    if d.sanctions_total:
+        embed.add_field(
+            name="⚖️ Sanctions",
+            value=(
+                f"CoC offense position: {d.offense_count} · "
+                f"active: {d.sanctions_active} / {d.sanctions_total} total\n"
+                f"Latest: {d.last_sanction or '—'}"
+            ),
+            inline=False,
+        )
     embed.set_footer(text=f"MC {d.mc_user_id} · dossier is private to you")
     return embed
 
