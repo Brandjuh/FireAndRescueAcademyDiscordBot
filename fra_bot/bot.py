@@ -143,6 +143,11 @@ class FRABot(commands.Bot):
         from .services.sanction_review import SanctionReviewService
 
         self.sanction_review = SanctionReviewService(cfg, self.db)
+        # Sanction manager v2: issuing (real in-game mutes), mute expiry
+        # bookkeeping + log verification, and the CoC-5 escalation engine.
+        from .services.sanctions import SanctionService
+
+        self.sanction_service = SanctionService(cfg, self.mc, self.db)
         # The missions-database forum: every einsaetze.json mission as a
         # tagged forum post, synced daily.
         from .services.missions_forum import MissionsForumService
@@ -816,12 +821,19 @@ class FRABot(commands.Bot):
 
     async def _sanction_review_pass(self) -> None:
         """Import new game-log moderation entries and post their review
-        notices (the sanctions cog owns the Discord side)."""
+        notices (the sanctions cog owns the Discord side). The same tick
+        runs the sanction service's sweep: mute expiry bookkeeping,
+        chat-ban log verification, and the auto escalation pass."""
         result = await self.sanction_review.scan()
         if result["created"]:
             cog = self.get_cog("SanctionsCog")
             if cog is not None:
                 await cog.post_reviews(result["created"])
+        lines = await self.sanction_service.sweep()
+        if lines:
+            await self.notify_admin(
+                "⚖️ **Sanctions**\n" + "\n".join(lines)[:1800]
+            )
 
     def _guarded(self, func, name: str):
         """Wrap a sync job so scheduler jobs log-and-continue on errors,

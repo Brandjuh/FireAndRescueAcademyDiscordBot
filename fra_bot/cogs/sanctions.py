@@ -1,10 +1,12 @@
-"""Sanctions register (reference bot: sanctionmanager).
+"""Sanctions register (reference bot: sanctionmanager, rebuilt).
 
-Records sanctions against alliance members with full history and
-statistics, announces them, and tells the member — the bot never
-executes a kick/ban itself (same as the reference cog: enforcement
-stays a human act; on a 3rd official warning it posts the configured
-ADVISORY to the admin log).
+Records sanctions with full history and statistics, announces them,
+tells the member — and, unlike the reference cog, a Mute sanction sets
+the REAL in-game chat ban (via SanctionService; behind the
+``mute_execution_enabled`` switch until the route is verified live).
+Escalation follows CoC section 5 in three modes: ``advisory`` (admin
+text), ``button`` (admin embed with Mute/Kick/Dismiss buttons, the
+default) and ``auto`` (the service acts after the configured gap).
 
 Commands (admins): ``!sanction add <type> <lid> <reden>``, ``list``,
 ``stats``, ``revoke``. Types are the reference bot's labels, addressed
@@ -15,6 +17,7 @@ the verified link) or a MissionChief name (resolved via the roster).
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import re
 
@@ -22,6 +25,7 @@ import discord
 from discord.ext import commands
 
 from ..db.repos import LinksRepo, MembersRepo, SanctionsRepo
+from ..services.sanction_rules import under_warning_until
 from .admin import is_fra_admin
 from .display import profile_url
 
@@ -53,6 +57,18 @@ _WARNING_TYPES = frozenset(SanctionsRepo.OFFICIAL_WARNINGS)
 
 def resolve_type(key: str) -> str | None:
     return SANCTION_TYPE_KEYS.get(key.strip().lower())
+
+
+def _iso_unix(iso: str | None) -> int | None:
+    if not iso:
+        return None
+    try:
+        moment = dt.datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    return int(moment.timestamp())
 
 
 def type_colour(sanction_type: str) -> discord.Colour:
@@ -154,11 +170,64 @@ def _review_view(sanction_id: int) -> discord.ui.View:
     return view
 
 
+class EscalationActionButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"fra:sesc:(?P<verb>mute|kick|dismiss):(?P<sid>[0-9]+)",
+):
+    """One button on an escalation notice (button mode). ``sid`` is the
+    sanction that triggered the step — identity resolves through it, so
+    the button survives restarts without any in-memory state."""
+
+    _STYLES = {
+        "mute": ("Mute now", discord.ButtonStyle.primary),
+        "kick": ("Kick from alliance", discord.ButtonStyle.danger),
+        "dismiss": ("Dismiss", discord.ButtonStyle.secondary),
+    }
+
+    def __init__(self, verb: str, sanction_id: int) -> None:
+        label, style = self._STYLES[verb]
+        super().__init__(discord.ui.Button(
+            label=label, style=style,
+            custom_id=f"fra:sesc:{verb}:{sanction_id}",
+        ))
+        self.verb = verb
+        self.sanction_id = sanction_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match: re.Match):
+        return cls(match["verb"], int(match["sid"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("SanctionsCog")
+        if cog is not None:
+            await cog.handle_escalation_action(
+                interaction, self.verb, self.sanction_id,
+            )
+
+
+def _escalation_view(step: str, sanction_id: int) -> discord.ui.View:
+    """CoC 5.2 (second) offers Mute/Kick/Dismiss; the 5.3 removal step
+    (final) offers Kick/Dismiss."""
+    view = discord.ui.View(timeout=None)
+    if step != "final":
+        view.add_item(EscalationActionButton("mute", sanction_id))
+    view.add_item(EscalationActionButton("kick", sanction_id))
+    view.add_item(EscalationActionButton("dismiss", sanction_id))
+    return view
+
+
 class SanctionsCog(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
         self.repo = SanctionsRepo(bot.db)
-        bot.add_dynamic_items(ReviewConfirmButton, ReviewDismissButton)
+        bot.add_dynamic_items(
+            ReviewConfirmButton, ReviewDismissButton, EscalationActionButton,
+        )
+        service = getattr(bot, "sanction_service", None)
+        if service is not None:
+            # Escalation/auto actions notify through the same DM→in-game
+            # fallback path as command-issued sanctions.
+            service.notify_member = self._notify_member
 
     async def _resolve_target(
         self, ctx: commands.Context, target: str
@@ -192,18 +261,26 @@ class SanctionsCog(commands.Cog):
             )
             return
         mc_user_id, name, discord_id = await self._resolve_target(ctx, target)
-        sanction_id = await self.repo.add(
+        result = await self.bot.sanction_service.issue(
             mc_user_id=mc_user_id, mc_username=name, discord_user_id=discord_id,
             admin_discord_id=ctx.author.id, admin_name=ctx.author.display_name,
             sanction_type=sanction_type, reason=reason,
         )
-        warnings = 0
-        if sanction_type in _WARNING_TYPES:
-            warnings = await self.repo.official_warning_count(
+        sanction_id = result["sanction_id"]
+        offenses = result["offense_count"]
+        under_until = None
+        if offenses:
+            rows = await self.repo.for_member(
                 mc_user_id=mc_user_id, discord_user_id=discord_id, name=name,
+                limit=100,
             )
-        await self._announce(sanction_id, sanction_type, name, reason,
-                             ctx.author.display_name, warnings)
+            under_until = under_warning_until(rows)
+        await self._announce(
+            sanction_id, sanction_type, name, reason,
+            ctx.author.display_name, offenses,
+            expires_at=result["expires_at"], mute_note=result["mute_note"],
+            under_until=under_until,
+        )
         await self._notify_member(discord_id, name, sanction_type, reason)
         await self.bot.log_member_action(
             action="sanction_received",
@@ -212,22 +289,16 @@ class SanctionsCog(commands.Cog):
             discord_user_id=discord_id, mc_user_id=mc_user_id,
             actor_name=name,
         )
-        note = f" — official warning **{warnings}/3**" if warnings else ""
+        note = f" — CoC offense position **{offenses}**" if offenses else ""
         unknown = "" if mc_user_id or discord_id else " (⚠️ not on the roster)"
+        mute_line = f"\n{result['mute_note']}" if result["mute_note"] else ""
         await ctx.send(
             f"✅ Sanction **#{sanction_id}** recorded: {sanction_type} for "
-            f"**{name}**{unknown}.{note}"
+            f"**{name}**{unknown}.{note}{mute_line}"
         )
-        if (
-            warnings >= 3
-            and self.bot.cfg.automation.sanctions.auto_action_enabled
-        ):
-            # ADVISORY only, like the reference bot — no automatic kick.
-            action = self.bot.cfg.automation.sanctions.third_warning_action
-            await self.bot.notify_admin(
-                f"⚠️ **3rd official warning** for **{name}** — configured "
-                f"follow-up: **{action}** (manual action required)."
-            )
+        await self._post_escalation(
+            result["escalation"], sanction_id=sanction_id, name=name,
+        )
 
     @sanction.command(name="list")
     @is_fra_admin()
@@ -291,18 +362,22 @@ class SanctionsCog(commands.Cog):
         if row is None:
             await ctx.send(f"⚠️ Sanction #{sanction_id} does not exist.")
             return
-        if not await self.repo.revoke(
-            sanction_id, revoked_by=ctx.author.display_name
-        ):
-            await ctx.send(f"⚠️ Sanction #{sanction_id} was already revoked.")
+        # The service lifts a still-running mute in the game first; when
+        # that fails the sanction stays active (register = game).
+        ok, note = await self.bot.sanction_service.revoke(
+            sanction_id, revoked_by=ctx.author.display_name,
+        )
+        if not ok:
+            await ctx.send(f"⚠️ Sanction #{sanction_id}: {note}")
             return
         await ctx.send(
             f"↩️ Sanction **#{sanction_id}** ({row['sanction_type']} for "
-            f"**{row['mc_username']}**) revoked."
+            f"**{row['mc_username']}**) revoked.{note}"
         )
         await self.bot.notify_admin(
             f"↩️ Sanction #{sanction_id} ({row['sanction_type']} for "
-            f"**{row['mc_username']}**) revoked by {ctx.author.display_name}."
+            f"**{row['mc_username']}**) revoked by "
+            f"{ctx.author.display_name}.{note}"
         )
         await self.bot.log_member_action(
             action="sanction_revoked",
@@ -480,11 +555,123 @@ class SanctionsCog(commands.Cog):
             ephemeral=True,
         )
 
+    # -- escalation (CoC section 5) --------------------------------------------
+
+    async def _post_escalation(
+        self, esc: dict | None, *, sanction_id: int, name: str | None,
+    ) -> None:
+        """Post the CoC-5 follow-up for a member on/over an escalation
+        step, in the configured mode."""
+        if not esc:
+            return
+        cfg = self.bot.cfg.automation.sanctions
+        if esc["mode"] == "advisory":
+            await self.bot.notify_admin(
+                f"⚖️ **{name}** — {esc['advice']} (manual action required)"
+            )
+            return
+        if esc["mode"] == "auto":
+            await self.bot.notify_admin(
+                f"⚖️ **{name}** — {esc['advice']}\n"
+                f"Auto mode: the bot acts in ~{cfg.escalation_gap_hours}h "
+                "unless the offense is revoked or dismissed first."
+            )
+            return
+        channel = (
+            self.bot.channel_for("sanctions") or self.bot.channel_for("admin_log")
+        )
+        if channel is None:
+            return
+        final = esc["step"] == "final"
+        embed = discord.Embed(
+            title="⚖️ CoC escalation step reached",
+            colour=discord.Colour.red() if final else discord.Colour.orange(),
+            description=f"**Member:** {name}\n{esc['advice']}"[:4096],
+        )
+        if not final:
+            embed.add_field(
+                name="Mute button",
+                value=f"Issues **{cfg.escalation_mute_type}** — a real "
+                      "in-game chat ban once execution is enabled.",
+                inline=False,
+            )
+        embed.set_footer(text=f"Triggered by sanction #{sanction_id}")
+        try:
+            await channel.send(
+                embed=embed, view=_escalation_view(esc["step"], sanction_id),
+            )
+        except discord.HTTPException as exc:
+            log.warning("escalation notice failed: %s", exc)
+
+    async def handle_escalation_action(
+        self, interaction: discord.Interaction, verb: str, sanction_id: int,
+    ) -> None:
+        from .automation import _is_admin_interaction
+
+        if not _is_admin_interaction(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to do this.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        row = await self.repo.get(sanction_id)
+        if row is None:
+            await interaction.followup.send(
+                f"⚠️ Sanction #{sanction_id} no longer exists.", ephemeral=True
+            )
+            return
+        by = interaction.user.display_name
+        mc_user_id = (
+            int(row["mc_user_id"]) if row["mc_user_id"] is not None else None
+        )
+        discord_id = (
+            int(row["discord_user_id"])
+            if row["discord_user_id"] is not None else None
+        )
+        if verb == "dismiss":
+            outcome = (
+                "👌 Escalation dismissed — no action taken (the offenses "
+                "stay on record)."
+            )
+        else:
+            count = await self.repo.offense_count(
+                mc_user_id=mc_user_id, discord_user_id=discord_id,
+                name=row["mc_username"],
+            )
+            service = self.bot.sanction_service
+            if verb == "mute":
+                outcome = await service.execute_escalation_mute(
+                    mc_user_id=mc_user_id, name=row["mc_username"],
+                    discord_user_id=discord_id, count=count, by=by,
+                )
+            else:
+                outcome = await service.execute_escalation_kick(
+                    mc_user_id=mc_user_id, name=row["mc_username"],
+                    discord_user_id=discord_id, count=count, by=by,
+                )
+            outcome = outcome or "⚠️ No action was possible."
+            await self.bot.notify_admin(f"{outcome} (button by {by})")
+        try:
+            message = interaction.message
+            embed = message.embeds[0] if message and message.embeds else None
+            if message is not None and embed is not None:
+                embed.colour = discord.Colour.light_grey()
+                embed.set_footer(
+                    text=f"Resolved ({verb}) by {by} — "
+                         f"triggered by sanction #{sanction_id}"
+                )
+                await message.edit(embed=embed, view=None)
+        except discord.HTTPException as exc:
+            log.warning("could not update escalation embed: %s", exc)
+        await interaction.followup.send(outcome[:1900], ephemeral=True)
+
     # -- announcements ---------------------------------------------------------
 
     async def _announce(
         self, sanction_id: int, sanction_type: str, name: str | None,
-        reason: str, admin_name: str, warnings: int,
+        reason: str, admin_name: str, offenses: int, *,
+        expires_at: str | None = None, mute_note: str | None = None,
+        under_until: str | None = None,
     ) -> None:
         channel = (
             self.bot.channel_for("sanctions") or self.bot.channel_for("admin_log")
@@ -496,8 +683,21 @@ class SanctionsCog(commands.Cog):
             colour=type_colour(sanction_type),
             description=f"**Member:** {name}\n**Reason:** {reason}"[:4096],
         )
-        if warnings:
-            embed.add_field(name="Official warnings", value=f"{warnings}/3")
+        if offenses:
+            embed.add_field(name="CoC offense position", value=str(offenses))
+        unix = _iso_unix(expires_at)
+        if unix is not None:
+            embed.add_field(name="Expires", value=f"<t:{unix}:f> (<t:{unix}:R>)")
+        under_unix = _iso_unix(under_until)
+        if under_unix is not None:
+            embed.add_field(
+                name="Under warning (CoC 5.1)",
+                value=f"until <t:{under_unix}:D>",
+            )
+        if mute_note:
+            embed.add_field(
+                name="In-game chat ban", value=mute_note[:1024], inline=False,
+            )
         embed.set_footer(text=f"Recorded by {admin_name}")
         try:
             await channel.send(embed=embed)

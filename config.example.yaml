@@ -146,12 +146,25 @@ automation:
     enabled: true
     message: "@{name} Welcome! Please check your DM for more information."
   sanctions:
-    # Sanctions register (!sanction add/list/stats/revoke). The bot only
-    # RECORDS and announces — it never kicks or bans anyone itself. With
-    # auto_action_enabled, a member's 3rd official warning posts the
-    # configured follow-up (Kick/Ban) as an ADVISORY to the admin log.
-    auto_action_enabled: false
-    third_warning_action: Kick
+    # Sanction manager (!sanction add/list/stats/revoke + game-log review).
+    # A Mute sanction sets the REAL in-game chat ban once
+    # mute_execution_enabled is on (leave it off until the chat-ban route
+    # is verified on the live bot — see fra_bot/mc/chat_ban.py); timed
+    # mutes expire by themselves in the game, the bot books the expiry.
+    # Escalation follows Code of Conduct section 5 (1st offense: warning,
+    # 2nd: warning + temporary mute or kick, 3rd: removal >= 60 days):
+    #   escalation_mode: advisory = admin text only,
+    #                    button   = admin embed with Mute/Kick/Dismiss,
+    #                    auto     = the bot acts itself after
+    #                               escalation_gap_hours (revoke window).
+    game_log_review_enabled: true
+    escalation_mode: button
+    escalation_offense_threshold: 3   # offenses that trigger the removal step
+    escalation_gap_hours: 24          # auto mode: wait after newest offense
+    escalation_notice: true           # PM the member before an escalation kick
+    escalation_mute_type: Mute 1d     # mute issued at the CoC 5.2 step
+    mute_execution_enabled: false     # real in-game chat bans (route unverified)
+    reapply_block_days: 60            # CoC 5.3: return-after-kick waiting time
   training:
     enabled: false            # master switch for training auto-start
     thread_id: 5935           # /alliance_threads/<id> with training requests

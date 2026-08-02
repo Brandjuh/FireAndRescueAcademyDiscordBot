@@ -2263,13 +2263,25 @@ class FaqRepo:
 
 
 class SanctionsRepo:
-    """Sanctions register (reference bot: sanctionmanager) — records and
-    statistics only; the bot never executes a kick/ban itself."""
+    """Sanctions register (reference bot: sanctionmanager). Since the v2
+    migration (0022) records carry provenance (``source``), a real mute
+    expiry (``expires_at``), an optional CoC rule code
+    (``reason_category``) and a per-sanction ``sanction_history`` trail."""
 
     OFFICIAL_WARNINGS = (
         "Warning - Official 1st warning",
         "Warning - Official 2nd warning",
         "Warning - Official 3rd and last warning",
+    )
+
+    #: SQL mirror of ``sanction_rules.is_countable_offense`` — keep the
+    #: two in sync. Warnings/mutes advance the CoC ladder; tax records
+    #: and escalation consequences don't (or the engine would escalate
+    #: on its own output).
+    _COUNTABLE_WHERE = (
+        "status IN ('active', 'expired') "
+        "AND source NOT IN ('tax', 'escalation') "
+        "AND (sanction_type LIKE 'Warning%' OR sanction_type LIKE 'Mute%')"
     )
 
     def __init__(self, db: Database) -> None:
@@ -2279,26 +2291,90 @@ class SanctionsRepo:
         self, *, mc_user_id: int | None, mc_username: str | None,
         discord_user_id: int | None, admin_discord_id: int, admin_name: str,
         sanction_type: str, reason: str, notes: str | None = None,
-        status: str = "active",
+        status: str = "active", reason_category: str | None = None,
+        source: str = "manual", expires_at: str | None = None,
     ) -> int:
         """``status='unverified'`` marks a game-log import awaiting a human
         Confirm/Dismiss (the reference bot's review flow)."""
-        return await self._db.execute_returning_id(
+        sanction_id = await self._db.execute_returning_id(
             """
             INSERT INTO sanctions
                 (mc_user_id, mc_username, discord_user_id, admin_discord_id,
-                 admin_name, sanction_type, reason, notes, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 admin_name, sanction_type, reason, notes, status, created_at,
+                 reason_category, source, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (mc_user_id, mc_username, discord_user_id, admin_discord_id,
-             admin_name, sanction_type, reason, notes, status, utcnow_iso()),
+             admin_name, sanction_type, reason, notes, status, utcnow_iso(),
+             reason_category, source, expires_at),
         )
+        await self.add_history(
+            sanction_id, action="created", actor=admin_name,
+            detail=f"{sanction_type} — {reason[:200]} (source: {source})",
+        )
+        return sanction_id
 
     async def get(self, sanction_id: int) -> aiosqlite.Row | None:
         async with self._db.conn.execute(
             "SELECT * FROM sanctions WHERE id = ?", (sanction_id,)
         ) as cur:
             return await cur.fetchone()
+
+    async def add_history(
+        self, sanction_id: int, *, action: str, actor: str,
+        detail: str | None = None,
+    ) -> int:
+        return await self._db.execute_returning_id(
+            "INSERT INTO sanction_history (sanction_id, action, actor, "
+            "detail, created_at) VALUES (?, ?, ?, ?, ?)",
+            (sanction_id, action, actor, detail, utcnow_iso()),
+        )
+
+    async def history(self, sanction_id: int) -> list[aiosqlite.Row]:
+        async with self._db.conn.execute(
+            "SELECT * FROM sanction_history WHERE sanction_id = ? "
+            "ORDER BY id ASC",
+            (sanction_id,),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def edit(
+        self, sanction_id: int, *, actor: str,
+        sanction_type: str | None = None, reason: str | None = None,
+        reason_category: str | None = None, notes: str | None = None,
+        expires_at: str | None = None,
+    ) -> bool:
+        """Whitelist-update of the editable fields + audit stamp. (The
+        reference bot silently dropped edits on some fields — here every
+        change lands, and lands in the history too.)"""
+        changes: dict[str, str | None] = {}
+        if sanction_type is not None:
+            changes["sanction_type"] = sanction_type
+        if reason is not None:
+            changes["reason"] = reason
+        if reason_category is not None:
+            changes["reason_category"] = reason_category
+        if notes is not None:
+            changes["notes"] = notes
+        if expires_at is not None:
+            changes["expires_at"] = expires_at
+        if not changes:
+            return False
+        sets = ", ".join(f"{col} = ?" for col in changes)
+        n = await self._db.execute(
+            f"UPDATE sanctions SET {sets}, edited_at = ?, edited_by = ? "
+            "WHERE id = ?",
+            (*changes.values(), utcnow_iso(), actor, sanction_id),
+        )
+        if n != 1:
+            return False
+        await self.add_history(
+            sanction_id, action="edited", actor=actor,
+            detail="; ".join(
+                f"{col} → {str(val)[:120]}" for col, val in changes.items()
+            ),
+        )
+        return True
 
     async def resolve_review(
         self, sanction_id: int, *, confirm: bool, by: str
@@ -2316,6 +2392,11 @@ class SanctionsRepo:
                 "UPDATE sanctions SET status = 'dismissed', revoked_at = ?, "
                 "revoked_by = ? WHERE id = ? AND status = 'unverified'",
                 (utcnow_iso(), by, sanction_id),
+            )
+        if n == 1:
+            await self.add_history(
+                sanction_id,
+                action="approved" if confirm else "dismissed", actor=by,
             )
         return n == 1
 
@@ -2346,13 +2427,136 @@ class SanctionsRepo:
         ) as cur:
             return await cur.fetchone()
 
-    async def revoke(self, sanction_id: int, *, revoked_by: str) -> bool:
+    async def revoke(
+        self, sanction_id: int, *, revoked_by: str,
+        detail: str | None = None,
+    ) -> bool:
         n = await self._db.execute(
             "UPDATE sanctions SET status = 'revoked', revoked_at = ?, "
             "revoked_by = ? WHERE id = ? AND status = 'active'",
             (utcnow_iso(), revoked_by, sanction_id),
         )
+        if n == 1:
+            await self.add_history(
+                sanction_id, action="revoked", actor=revoked_by, detail=detail,
+            )
         return n == 1
+
+    async def expire_due_mutes(self, now_iso: str) -> list[aiosqlite.Row]:
+        """Book the active→expired transition for timed mutes whose
+        expiry passed. The GAME lifts a timed chat ban itself — this is
+        register bookkeeping only, no game request is involved."""
+        async with self._db.conn.execute(
+            "SELECT * FROM sanctions WHERE status = 'active' "
+            "AND sanction_type LIKE 'Mute%' AND expires_at IS NOT NULL "
+            "AND expires_at <= ?",
+            (now_iso,),
+        ) as cur:
+            rows = list(await cur.fetchall())
+        for row in rows:
+            await self._db.execute(
+                "UPDATE sanctions SET status = 'expired' "
+                "WHERE id = ? AND status = 'active'",
+                (row["id"],),
+            )
+            await self.add_history(
+                row["id"], action="expired", actor="FRA Bot",
+                detail="timed mute ran out (the game lifts the chat ban itself)",
+            )
+        return rows
+
+    async def offense_count(
+        self, *, mc_user_id: int | None = None,
+        discord_user_id: int | None = None, name: str | None = None,
+    ) -> int:
+        """The member's CoC offense position (see ``_COUNTABLE_WHERE``).
+        No expiry — per CoC section 5 older offenses keep counting;
+        leniency is expressed through revoke/dismiss."""
+        return len(await self.countable_offenses(
+            mc_user_id=mc_user_id, discord_user_id=discord_user_id, name=name,
+        ))
+
+    async def countable_offenses(
+        self, *, mc_user_id: int | None = None,
+        discord_user_id: int | None = None, name: str | None = None,
+    ) -> list[aiosqlite.Row]:
+        rows = await self.for_member(
+            mc_user_id=mc_user_id, discord_user_id=discord_user_id,
+            name=name, limit=500,
+        )
+        return [r for r in rows if self._is_countable(r)]
+
+    @staticmethod
+    def _is_countable(row) -> bool:
+        # Python mirror of _COUNTABLE_WHERE (and of
+        # sanction_rules.is_countable_offense) — keep all three in sync.
+        if row["status"] not in ("active", "expired"):
+            return False
+        if (row["source"] or "manual") in ("tax", "escalation"):
+            return False
+        return str(row["sanction_type"] or "").startswith(("Warning", "Mute"))
+
+    async def all_countable(self) -> list[aiosqlite.Row]:
+        """Every ladder-advancing record — the escalation engine groups
+        these per member in Python (identities are OR-matched, which SQL
+        GROUP BY can't express)."""
+        async with self._db.conn.execute(
+            f"SELECT * FROM sanctions WHERE {self._COUNTABLE_WHERE} "
+            "ORDER BY id ASC"
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def recent_own_mute(
+        self, *, mc_user_id: int | None, name: str | None, since_iso: str,
+    ) -> aiosqlite.Row | None:
+        """A bot-issued mute for this member since ``since_iso`` — the
+        game-log review's skip: our own chat ban appearing in the log
+        needs no human review (mirror of the tax-kick skip)."""
+        clauses, params = [], []
+        if mc_user_id is not None:
+            clauses.append("mc_user_id = ?")
+            params.append(mc_user_id)
+        if name:
+            clauses.append("mc_username = ? COLLATE NOCASE")
+            params.append(name)
+        if not clauses:
+            return None
+        async with self._db.conn.execute(
+            f"""
+            SELECT * FROM sanctions
+            WHERE sanction_type LIKE 'Mute%' AND source != 'game_log'
+              AND status != 'dismissed' AND created_at >= ?
+              AND ({' OR '.join(clauses)})
+            ORDER BY id DESC LIMIT 1
+            """,
+            (since_iso, *params),
+        ) as cur:
+            return await cur.fetchone()
+
+    async def open_tax_warnings(
+        self, *, mc_user_id: int | None, name: str | None,
+    ) -> list[aiosqlite.Row]:
+        """Active tax-mirrored warnings for a member (Kick rows excluded)
+        — revoked when the member fixes their donation."""
+        clauses, params = [], []
+        if mc_user_id is not None:
+            clauses.append("mc_user_id = ?")
+            params.append(mc_user_id)
+        if name:
+            clauses.append("mc_username = ? COLLATE NOCASE")
+            params.append(name)
+        if not clauses:
+            return []
+        async with self._db.conn.execute(
+            f"""
+            SELECT * FROM sanctions
+            WHERE source = 'tax' AND status = 'active'
+              AND sanction_type LIKE 'Warning%' AND ({' OR '.join(clauses)})
+            ORDER BY id ASC
+            """,
+            params,
+        ) as cur:
+            return list(await cur.fetchall())
 
     async def for_member(
         self, *, mc_user_id: int | None = None,

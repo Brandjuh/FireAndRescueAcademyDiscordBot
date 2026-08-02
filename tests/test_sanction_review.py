@@ -29,10 +29,7 @@ async def db(tmp_path):
 def _cfg(enabled=True):
     return SimpleNamespace(
         automation=SimpleNamespace(
-            sanctions=SimpleNamespace(
-                auto_action_enabled=False, third_warning_action="Kick",
-                game_log_review_enabled=enabled,
-            ),
+            sanctions=SimpleNamespace(game_log_review_enabled=enabled),
         ),
     )
 
@@ -167,6 +164,44 @@ async def test_old_tax_kick_does_not_shield_a_new_manual_kick(db):
         (old, action_id),
     )
     await _log_row(db, action_key="kicked_from_alliance")
+    result = await svc.scan()
+    assert len(result["created"]) == 1
+    assert result["skipped_own"] == 0
+
+
+async def test_own_mute_is_skipped(db):
+    # A chat ban the bot set itself (a real Mute sanction, type "Mute 1d")
+    # must not trigger a review when its log row appears — the exact-type
+    # duplicate guard can't catch it (log imports are bare "Mute").
+    svc = SanctionReviewService(_cfg(), db)
+    await svc.scan()
+    await SanctionsRepo(db).add(
+        mc_user_id=42, mc_username="Slacker", discord_user_id=None,
+        admin_discord_id=0, admin_name="FRA Bot (escalation)",
+        sanction_type="Mute 1d", reason="CoC 5.2", source="escalation",
+    )
+    await _log_row(db, action_key="chat_ban_set", executed_name="FRA Bot")
+    result = await svc.scan()
+    assert result["created"] == []
+    assert result["skipped_own"] == 1
+
+
+async def test_old_own_mute_does_not_shield_a_new_chat_ban(db):
+    svc = SanctionReviewService(_cfg(), db)
+    await svc.scan()
+    repo = SanctionsRepo(db)
+    sid = await repo.add(
+        mc_user_id=42, mc_username="Slacker", discord_user_id=None,
+        admin_discord_id=0, admin_name="FRA Bot (escalation)",
+        sanction_type="Mute 1d", reason="CoC 5.2", source="escalation",
+    )
+    old = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)
+    ).isoformat(timespec="seconds")
+    await db.execute(
+        "UPDATE sanctions SET created_at = ? WHERE id = ?", (old, sid),
+    )
+    await _log_row(db, action_key="chat_ban_set", executed_name="AdminGuy")
     result = await svc.scan()
     assert len(result["created"]) == 1
     assert result["skipped_own"] == 0

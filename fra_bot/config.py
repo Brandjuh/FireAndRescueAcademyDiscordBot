@@ -258,19 +258,41 @@ class TaxWarningsConfig:
 
 @dataclass(frozen=True)
 class SanctionsConfig:
-    """Sanctions register (reference bot: sanctionmanager). The bot only
-    RECORDS and announces; on a member's 3rd official warning it posts the
-    configured follow-up as an ADVISORY to the admin log — it never kicks
-    or bans anyone itself.
+    """Sanction manager (reference bot: sanctionmanager, rebuilt).
 
     ``game_log_review_enabled`` ports the reference bot's game-log scan:
     moderation entries in the alliance log (kicks, chat bans) import as
-    UNVERIFIED sanctions with a review notice — except kicks the bot
-    itself executed (the tax auto-kick), which already carry a full
-    documented trail."""
-    auto_action_enabled: bool
-    third_warning_action: str  # "Kick" | "Ban" (advisory text only)
+    UNVERIFIED sanctions with a review notice — except actions the bot
+    itself executed (tax auto-kick, own mutes), which already carry a
+    full documented trail.
+
+    The escalation engine follows CoC section 5 (1st offense = warning,
+    2nd = warning + temporary mute or kick, 3rd = removal ≥60 days):
+
+    * ``escalation_mode``: ``advisory`` (admin text only), ``button``
+      (admin embed with Mute/Kick/Dismiss buttons) or ``auto`` (the bot
+      acts itself once the newest offense is ``escalation_gap_hours``
+      old — the admins' revoke window).
+    * ``escalation_offense_threshold``: the offense count that triggers
+      the CoC 5.3 removal step (counts 2..threshold-1 are the 5.2
+      mute-or-kick step).
+    * ``escalation_mute_type``: the mute issued at the 5.2 step.
+    * ``escalation_notice``: PM the member before an escalation kick.
+    * ``mute_execution_enabled``: Mute sanctions really set the in-game
+      chat ban. OFF until the chat-ban route is verified on the live
+      bot (see fra_bot/mc/chat_ban.py) — until then mutes are recorded
+      and announced only.
+    * ``reapply_block_days``: CoC 5.3 — kicked/banned members may only
+      return after this many days (the applications auto-accept gate).
+    """
     game_log_review_enabled: bool = True
+    escalation_mode: str = "button"  # advisory | button | auto
+    escalation_offense_threshold: int = 3
+    escalation_gap_hours: int = 24
+    escalation_notice: bool = True
+    escalation_mute_type: str = "Mute 1d"
+    mute_execution_enabled: bool = False
+    reapply_block_days: int = 60
 
 
 @dataclass(frozen=True)
@@ -736,17 +758,37 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ) or DEFAULT_WELCOME_MESSAGE,
             ),
             sanctions=SanctionsConfig(
-                auto_action_enabled=bool(
-                    _get(raw, "automation", "sanctions", "auto_action_enabled",
-                         default=False)
-                ),
-                third_warning_action=str(
-                    _get(raw, "automation", "sanctions", "third_warning_action",
-                         default="Kick")
-                ),
                 game_log_review_enabled=bool(
                     _get(raw, "automation", "sanctions",
                          "game_log_review_enabled", default=True)
+                ),
+                escalation_mode=str(
+                    _get(raw, "automation", "sanctions", "escalation_mode",
+                         default="button")
+                ),
+                escalation_offense_threshold=int(
+                    _get(raw, "automation", "sanctions",
+                         "escalation_offense_threshold", default=3)
+                ),
+                escalation_gap_hours=int(
+                    _get(raw, "automation", "sanctions",
+                         "escalation_gap_hours", default=24)
+                ),
+                escalation_notice=bool(
+                    _get(raw, "automation", "sanctions", "escalation_notice",
+                         default=True)
+                ),
+                escalation_mute_type=str(
+                    _get(raw, "automation", "sanctions",
+                         "escalation_mute_type", default="Mute 1d")
+                ),
+                mute_execution_enabled=bool(
+                    _get(raw, "automation", "sanctions",
+                         "mute_execution_enabled", default=False)
+                ),
+                reapply_block_days=int(
+                    _get(raw, "automation", "sanctions", "reapply_block_days",
+                         default=60)
                 ),
             ),
             tax_warnings=TaxWarningsConfig(
