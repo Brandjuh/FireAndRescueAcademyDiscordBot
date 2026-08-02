@@ -49,6 +49,10 @@ DUPLICATE_LOOKBACK_HOURS = 6.0
 #: A ``tax_kicked`` dossier action within this window before the log row
 #: proves the kick was the bot's own auto-kick.
 TAX_KICK_LOOKBACK_HOURS = 48.0
+#: A bot-issued Mute sanction within this window before a chat_ban_set
+#: log row proves the ban was the bot's own — reviewing it is pure noise
+#: (the mirror of the tax-kick skip).
+OWN_MUTE_LOOKBACK_HOURS = 48.0
 #: This many imports in one pass collapse into a single bulk notice
 #: (reference threshold).
 BULK_THRESHOLD = 10
@@ -137,6 +141,26 @@ class SanctionReviewService:
             result["skipped_own"] += 1
             log.info(
                 "sanction review: skipping log #%s — own tax auto-kick of %s",
+                row["id"], name or mc_user_id,
+            )
+            return None
+
+        # A chat ban the bot set itself (a real Mute sanction) — fully
+        # documented already, skip. Matched on MC id OR name, and on the
+        # 'Mute%' type PREFIX: the register stores "Mute 1d" while the
+        # log import would be a bare "Mute", so find_matching (exact
+        # type) can't catch these.
+        if (
+            row["action_key"] == "chat_ban_set"
+            and await self.sanctions.recent_own_mute(
+                mc_user_id=int(mc_user_id) if mc_user_id is not None else None,
+                name=name,
+                since_iso=self._iso_before(event_iso, OWN_MUTE_LOOKBACK_HOURS),
+            ) is not None
+        ):
+            result["skipped_own"] += 1
+            log.info(
+                "sanction review: skipping log #%s — own mute of %s",
                 row["id"], name or mc_user_id,
             )
             return None

@@ -122,6 +122,24 @@ WARNING_PRESETS: dict[int, tuple[str, str]] = {
 }
 
 
+#: The register mirror of each warning level (source='tax'), so the
+#: member's dossier shows ONE consolidated sanction overview. These do
+#: NOT advance the CoC-5 escalation ladder (the repo's countable filter
+#: excludes source='tax') — the tax ladder is its own CoC 4.1 track.
+TAX_SANCTION_TYPES: dict[int, str] = {
+    1: "Warning - Official 1st warning",
+    2: "Warning - Official 2nd warning",
+    3: "Warning - Official 3rd and last warning",
+}
+TAX_SANCTION_REASON = (
+    "4.1. 5% donation to alliance — alliance donation below the required "
+    "5% minimum (automated warning {level}/" + str(MAX_WARNINGS) + ")"
+)
+TAX_KICK_REASON = (
+    "4.1. 5% donation to alliance — automatic kick after "
+    f"{MAX_WARNINGS} unresolved donation warnings."
+)
+
 #: Sent to the member RIGHT BEFORE the auto-kick (best-effort — a failed
 #: PM never blocks the kick; three warnings were already delivered).
 #: Same tone and structure as the warning presets above.
@@ -166,11 +184,13 @@ class TaxWarningService:
         self.client = client
         self.members = MembersRepo(db)
         self.warnings = TaxWarningsRepo(db)
-        from ..db.repos import MemberActionsRepo
+        from ..db.repos import LinksRepo, MemberActionsRepo, SanctionsRepo
 
         self.actions = MemberActionsRepo(db)
         self.runs = RunsRepo(db)
         self.state = StateRepo(db)
+        self.sanctions = SanctionsRepo(db)
+        self.links = LinksRepo(db)
         self._auto = cfg.automation.tax_warnings
 
     @staticmethod
@@ -221,6 +241,11 @@ class TaxWarningService:
             rate = member["contribution_rate"]
             if rate is not None and rate >= self._auto.min_rate:
                 await self.warnings.mark_resolved(row["mc_user_id"])
+                # The register mirror follows: open tax warnings are
+                # revoked so no ghost sanctions survive a fixed donation.
+                await self._revoke_tax_warning_sanctions(
+                    row["mc_user_id"], row["username"], "donation fixed",
+                )
                 lines.append(
                     f"✅ {member['name']}: donation fixed ({rate:g}%) after "
                     f"warning {row['warning_count']} — warnings reset"
@@ -335,6 +360,7 @@ class TaxWarningService:
             await self.warnings.record_warning(
                 member["mc_user_id"], str(member["name"]), count=level,
             )
+            await self._record_tax_sanction(member, level)
             # Also into the central member-action log, so the warning shows
             # up in the member's dossier/timeline — the tax_warnings table
             # alone is invisible there.
@@ -409,6 +435,12 @@ class TaxWarningService:
             if seen_h is None or seen_h + KICK_VERIFY_MARGIN_HOURS >= kicked_h:
                 continue  # not seen since the kick — no verdict yet
             await self.warnings.mark_kick_failed(row["mc_user_id"])
+            # The register mirror recorded a Kick when the route said OK;
+            # the roster proves otherwise — revoke it so the dossier
+            # doesn't claim a removal that never happened.
+            await self._revoke_tax_kick_sanction(
+                row["mc_user_id"], member["name"],
+            )
             try:
                 await self.actions.log(
                     discord_user_id=None,
@@ -457,6 +489,7 @@ class TaxWarningService:
         if not ok:
             return f"⚠️ {member['name']}: automatic kick failed — {detail}{notice}"
         await self.warnings.mark_kicked(member["mc_user_id"])
+        await self._record_tax_kick_sanction(member, detail)
         # Into the dossier/timeline too — and note that the claim still gets
         # verified against the roster (see _verify_kicks).
         try:
@@ -503,6 +536,86 @@ class TaxWarningService:
             return " · removal notice sent"
         log.warning("kick notice to %s not delivered: %s", member["name"], detail)
         return f" · removal notice failed ({detail[:80]})"
+
+    # -- sanctions-register mirror (source='tax') --------------------------
+
+    async def _tax_discord_id(self, mc_user_id: int) -> int | None:
+        link = await self.links.get_by_mc(int(mc_user_id))
+        if link is not None and link["status"] == "approved":
+            return int(link["discord_id"])
+        return None
+
+    async def _record_tax_sanction(self, member, level: int) -> None:
+        """Mirror a sent warning into the sanctions register so the
+        member's dossier shows one overview. Best-effort: bookkeeping
+        must never disturb the send flow."""
+        try:
+            await self.sanctions.add(
+                mc_user_id=int(member["mc_user_id"]),
+                mc_username=str(member["name"]),
+                discord_user_id=await self._tax_discord_id(member["mc_user_id"]),
+                admin_discord_id=0,
+                admin_name="FRA Bot (tax warnings)",
+                sanction_type=TAX_SANCTION_TYPES[level],
+                reason=TAX_SANCTION_REASON.format(level=level),
+                reason_category="4.1",
+                source="tax",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("tax sanction mirror failed")
+
+    async def _record_tax_kick_sanction(self, member, detail: str) -> None:
+        try:
+            await self.sanctions.add(
+                mc_user_id=int(member["mc_user_id"]),
+                mc_username=str(member["name"]),
+                discord_user_id=await self._tax_discord_id(member["mc_user_id"]),
+                admin_discord_id=0,
+                admin_name="FRA Bot (tax warnings)",
+                sanction_type="Kick",
+                reason=TAX_KICK_REASON,
+                notes=f"Kick executed by the bot ({detail}); the roster "
+                      "sync verifies the departure.",
+                reason_category="4.1",
+                source="tax",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("tax kick sanction mirror failed")
+
+    async def _revoke_tax_warning_sanctions(
+        self, mc_user_id: int, username: str | None, why: str,
+    ) -> None:
+        try:
+            for row in await self.sanctions.open_tax_warnings(
+                mc_user_id=int(mc_user_id), name=username,
+            ):
+                await self.sanctions.revoke(
+                    row["id"], revoked_by="FRA Bot (tax warnings)",
+                    detail=why,
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("tax sanction revoke failed")
+
+    async def _revoke_tax_kick_sanction(
+        self, mc_user_id: int, username: str | None,
+    ) -> None:
+        try:
+            rows = await self.sanctions.for_member(
+                mc_user_id=int(mc_user_id), name=username, limit=50,
+            )
+            for row in rows:
+                if (
+                    row["source"] == "tax"
+                    and row["sanction_type"] == "Kick"
+                    and row["status"] == "active"
+                ):
+                    await self.sanctions.revoke(
+                        row["id"], revoked_by="FRA Bot (tax warnings)",
+                        detail="kick did not stick — member still on the roster",
+                    )
+                    break
+        except Exception:  # noqa: BLE001
+            log.exception("tax kick sanction revoke failed")
 
     async def overview(self) -> list[str]:
         """Current standing for the admin command: who is below the rate

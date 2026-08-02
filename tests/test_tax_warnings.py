@@ -513,3 +513,92 @@ async def test_failed_removal_notice_never_blocks_the_kick(db, monkeypatch):
     lines = await svc.scan()
     assert kicked == [1]
     assert any("kicked after" in line for line in lines)
+
+
+# -- sanctions-register mirror (source='tax') -------------------------------
+
+async def test_sent_warning_mirrors_into_the_sanctions_register(db, monkeypatch):
+    from fra_bot.db.repos import SanctionsRepo
+
+    async def fake_send(client, recipient, subject, body):
+        return True
+
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
+    await _add_member(db, 1, "Slacker", 1.0)
+    svc = TaxWarningService(_cfg(), FakeClient(), db)
+    await svc.scan()
+    rows = await SanctionsRepo(db).for_member(mc_user_id=1)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["source"] == "tax"
+    assert row["sanction_type"] == "Warning - Official 1st warning"
+    assert row["reason_category"] == "4.1"
+    assert "5% donation to alliance" in row["reason"]
+    # Tax mirrors never advance the CoC escalation ladder.
+    assert await SanctionsRepo(db).offense_count(mc_user_id=1) == 0
+
+
+async def test_fixed_donation_revokes_the_tax_sanctions(db, monkeypatch):
+    from fra_bot.db.repos import SanctionsRepo
+
+    async def fake_send(client, recipient, subject, body):
+        return True
+
+    monkeypatch.setattr(
+        "fra_bot.mc.messages.send_new_message", _as_new_message(fake_send)
+    )
+    await _add_member(db, 1, "Fixer", 1.0)
+    svc = TaxWarningService(_cfg(), FakeClient(), db)
+    await svc.scan()                                      # warning 1 + mirror
+    await db.execute(
+        "UPDATE members SET contribution_rate = 7.5 WHERE mc_user_id = 1"
+    )
+    lines = await svc.scan()
+    assert any("donation fixed" in line for line in lines)
+    rows = await SanctionsRepo(db).for_member(mc_user_id=1)
+    assert rows and all(r["status"] == "revoked" for r in rows)
+
+
+async def test_auto_kick_mirrors_a_kick_sanction(db):
+    from fra_bot.db.repos import SanctionsRepo
+
+    await _add_member(db, 1, "Stubborn", 1.0)
+    svc = TaxWarningService(_cfg(auto_kick=True), FakeClient(), db)
+    await svc.warnings.record_warning(1, "Stubborn", count=MAX_WARNINGS)
+    await db.execute(
+        "UPDATE tax_warnings SET last_warning_at = ? WHERE mc_user_id = 1",
+        (_iso(8),),
+    )
+    await svc.scan()
+    rows = await SanctionsRepo(db).for_member(mc_user_id=1)
+    kicks = [r for r in rows if r["sanction_type"] == "Kick"]
+    assert len(kicks) == 1
+    assert kicks[0]["source"] == "tax"
+    assert kicks[0]["status"] == "active"
+
+
+async def test_unstuck_kick_revokes_the_mirrored_kick_sanction(db):
+    from fra_bot.db.repos import SanctionsRepo
+
+    await _add_member(db, 1, "Stubborn", 1.0)             # stays on the roster
+    svc = TaxWarningService(_cfg(auto_kick=True), FakeClient(), db)
+    await svc.warnings.record_warning(1, "Stubborn", count=MAX_WARNINGS)
+    await db.execute(
+        "UPDATE tax_warnings SET last_warning_at = ? WHERE mc_user_id = 1",
+        (_iso(8),),
+    )
+    await svc.scan()                                      # "kick" + mirror
+    await db.execute(
+        "UPDATE tax_warnings SET kicked_at = ? WHERE mc_user_id = 1",
+        (_iso(0.2),),                                     # ~5h ago
+    )
+    lines = await svc.scan()                              # reopen + retry
+    assert any("did NOT stick" in line for line in lines)
+    kicks = [
+        r for r in await SanctionsRepo(db).for_member(mc_user_id=1)
+        if r["sanction_type"] == "Kick"
+    ]
+    # The disproven kick is revoked; the retry recorded a fresh one.
+    assert sorted(r["status"] for r in kicks) == ["active", "revoked"]
