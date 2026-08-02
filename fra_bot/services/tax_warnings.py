@@ -122,6 +122,22 @@ WARNING_PRESETS: dict[int, tuple[str, str]] = {
 }
 
 
+#: Sent to the member RIGHT BEFORE the auto-kick (best-effort — a failed
+#: PM never blocks the kick; three warnings were already delivered).
+#: Same tone and structure as the warning presets above.
+KICK_NOTICE_PRESET = (
+    "Final notice: Removed from the alliance",
+    "Hello {username},\n\n"
+    "Despite three warnings, your alliance donation is still not set to the "
+    "required minimum of 5% (Code of Conduct, rule 4.1).\n\n"
+    "You are therefore being removed from the Fire & Rescue Academy "
+    "alliance.\n\n"
+    "You are welcome to reapply once you are willing to meet the donation "
+    "requirement. If you believe this is a mistake, please contact an admin "
+    "on our Discord server.",
+)
+
+
 def _hours_since(iso: str | None, now: dt.datetime) -> float | None:
     if not iso:
         return None
@@ -433,9 +449,13 @@ class TaxWarningService:
             )
         from ..mc.kick import kick_alliance_member
 
+        # Tell the member FIRST — after the kick they are outside the
+        # alliance and a PM may no longer reach them. Best-effort: a failed
+        # notice never blocks the kick (three warnings were delivered).
+        notice = await self._send_kick_notice(member)
         ok, detail = await kick_alliance_member(self.client, member["mc_user_id"])
         if not ok:
-            return f"⚠️ {member['name']}: automatic kick failed — {detail}"
+            return f"⚠️ {member['name']}: automatic kick failed — {detail}{notice}"
         await self.warnings.mark_kicked(member["mc_user_id"])
         # Into the dossier/timeline too — and note that the claim still gets
         # verified against the roster (see _verify_kicks).
@@ -453,10 +473,36 @@ class TaxWarningService:
             log.exception("tax kick action log failed")
         return (
             f"👢 {member['name']} kicked after {MAX_WARNINGS} unresolved "
-            f"donation warnings ({detail}) — the roster sync will confirm "
-            "the departure; if they are still listed in a few hours I will "
-            "flag it and retry"
+            f"donation warnings ({detail}){notice} — the roster sync will "
+            "confirm the departure; if they are still listed in a few hours "
+            "I will flag it and retry"
         )
+
+    async def _send_kick_notice(self, member) -> str:
+        """The removal PM, sent right before the auto-kick. Returns a short
+        suffix for the admin summary line ('' only when nothing applies)."""
+        from ..mc.messages import send_new_message
+
+        subject, body = KICK_NOTICE_PRESET
+        try:
+            ok, detail, conversation_id = await send_new_message(
+                self.client, str(member["name"]), subject,
+                body.format(username=member["name"]),
+            )
+        except Exception as exc:  # noqa: BLE001 — the notice must never block the kick
+            log.exception("kick notice to %s errored", member["name"])
+            return f" · kick notice errored ({exc})"
+        if ok or detail.startswith(UNCONFIRMED_PREFIX):
+            if self.mirror is not None and conversation_id:
+                try:
+                    await self.mirror(
+                        conversation_id, str(member["name"]), subject
+                    )
+                except Exception:  # noqa: BLE001 — mirroring is best-effort
+                    log.exception("Could not mirror the kick notice")
+            return " · removal notice sent"
+        log.warning("kick notice to %s not delivered: %s", member["name"], detail)
+        return f" · removal notice failed ({detail[:80]})"
 
     async def overview(self) -> list[str]:
         """Current standing for the admin command: who is below the rate

@@ -460,3 +460,56 @@ async def test_confirmed_kick_stays_closed(db):
     )
     assert await svc.scan() == []
     assert (await svc.warnings.get(1))["kicked_at"] is not None
+
+
+async def test_auto_kick_sends_removal_notice_before_the_kick(db, monkeypatch):
+    events = []
+
+    async def fake_send(client, recipient, subject, body):
+        events.append(("pm", recipient, subject))
+        return True, "sent", "9001"
+
+    async def fake_kick(client, mc_user_id):
+        events.append(("kick", mc_user_id))
+        return True, "kick confirmed"
+
+    monkeypatch.setattr("fra_bot.mc.messages.send_new_message", fake_send)
+    monkeypatch.setattr("fra_bot.mc.kick.kick_alliance_member", fake_kick)
+    await _add_member(db, 1, "Stubborn", 1.0)
+    svc = TaxWarningService(_cfg(auto_kick=True), FakeClient(), db)
+    await svc.warnings.record_warning(1, "Stubborn", count=MAX_WARNINGS)
+    await db.execute(
+        "UPDATE tax_warnings SET last_warning_at = ? WHERE mc_user_id = 1",
+        (_iso(8),),
+    )
+
+    lines = await svc.scan()
+    # The removal PM goes out FIRST — after the kick it may not arrive.
+    assert [e[0] for e in events] == ["pm", "kick"]
+    assert "Removed from the alliance" in events[0][2]
+    assert any("removal notice sent" in line for line in lines)
+
+
+async def test_failed_removal_notice_never_blocks_the_kick(db, monkeypatch):
+    async def broken_send(client, recipient, subject, body):
+        raise RuntimeError("compose form exploded")
+
+    kicked = []
+
+    async def fake_kick(client, mc_user_id):
+        kicked.append(mc_user_id)
+        return True, "kick confirmed"
+
+    monkeypatch.setattr("fra_bot.mc.messages.send_new_message", broken_send)
+    monkeypatch.setattr("fra_bot.mc.kick.kick_alliance_member", fake_kick)
+    await _add_member(db, 1, "Ghost", 1.0)
+    svc = TaxWarningService(_cfg(auto_kick=True), FakeClient(), db)
+    await svc.warnings.record_warning(1, "Ghost", count=MAX_WARNINGS)
+    await db.execute(
+        "UPDATE tax_warnings SET last_warning_at = ? WHERE mc_user_id = 1",
+        (_iso(8),),
+    )
+
+    lines = await svc.scan()
+    assert kicked == [1]
+    assert any("kicked after" in line for line in lines)

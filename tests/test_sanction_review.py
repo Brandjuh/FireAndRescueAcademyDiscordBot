@@ -170,3 +170,20 @@ async def test_old_tax_kick_does_not_shield_a_new_manual_kick(db):
     result = await svc.scan()
     assert len(result["created"]) == 1
     assert result["skipped_own"] == 0
+
+
+async def test_own_tax_kick_without_profile_link_is_skipped(db):
+    # The kicked member's log row often shows their NAME without a profile
+    # link (they're no longer in the alliance) — the skip must match on
+    # name too, or exactly these reviews slip through.
+    svc = SanctionReviewService(_cfg(), db)
+    await svc.scan()
+    await MemberActionsRepo(db).log(
+        discord_user_id=None, mc_user_id=42, actor_name="Slacker",
+        action="tax_kicked", detail="auto-kicked after 3 warnings",
+    )
+    await _log_row(db, action_key="kicked_from_alliance",
+                   affected_mc_id=None, executed_name="FRA Bot")
+    result = await svc.scan()
+    assert result["created"] == []
+    assert result["skipped_own"] == 1
