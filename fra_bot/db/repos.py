@@ -2612,6 +2612,33 @@ class SanctionsRepo:
         ) as cur:
             return list(await cur.fetchall())
 
+    async def status_summary(self) -> dict[str, int]:
+        async with self._db.conn.execute(
+            "SELECT status, COUNT(*) AS n FROM sanctions GROUP BY status"
+        ) as cur:
+            return {row["status"]: row["n"] for row in await cur.fetchall()}
+
+    async def admin_leaderboard(self, limit: int = 5) -> list[aiosqlite.Row]:
+        """Who records the most sanctions — human sources only (imports
+        and automation would drown the humans)."""
+        async with self._db.conn.execute(
+            "SELECT admin_name, COUNT(*) AS n FROM sanctions "
+            "WHERE source IN ('manual', 'panel', 'web') "
+            "GROUP BY admin_name ORDER BY n DESC, admin_name ASC LIMIT ?",
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def member_leaderboard(self, limit: int = 5) -> list[aiosqlite.Row]:
+        """Most-sanctioned members (active/expired records only)."""
+        async with self._db.conn.execute(
+            "SELECT MAX(mc_username) AS name, COUNT(*) AS n FROM sanctions "
+            "WHERE status IN ('active', 'expired') AND mc_username IS NOT NULL "
+            "GROUP BY lower(mc_username) ORDER BY n DESC, name ASC LIMIT ?",
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
 
 class TaxWarningsRepo:
     """Per-member tax (alliance donation) warning state for the automated

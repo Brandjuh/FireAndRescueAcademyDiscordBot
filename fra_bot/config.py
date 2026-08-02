@@ -92,6 +92,8 @@ class DiscordChannels:
     chat_bridge: int = 0
     # Public sanction announcements; 0 = fall back to admin_log.
     sanctions: int = 0
+    # The sanction-management panel (Create/History/Statistics); 0 = off.
+    sanction_panel: int = 0
     # Admin feed of every member's bot-side action; 0 = feed off
     # (actions still record for the per-member history).
     member_actions: int = 0
@@ -560,6 +562,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 chat_bridge=int(channels.get("chat_bridge", 0)),
                 sanctions=int(channels.get("sanctions", 0)),
+                sanction_panel=int(channels.get("sanction_panel", 0)),
                 member_actions=int(channels.get("member_actions", 0)),
                 game_sync=int(
                     channels.get("game_sync", 1527609874551410698)

@@ -97,6 +97,10 @@ discord:
     class_panel: 1421627971831070730
     # Academy-build panel (Fire/Police/Rescue/Coastal buttons). 0 = off.
     academy_panel: 1426226521231589507
+    # Public sanction announcements + review notices. 0 = admin_log.
+    sanctions: 0
+    # Sanction-management panel (Create/History/Statistics). 0 = off.
+    sanction_panel: 0
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
   # Role that is always pinged by the eventpinger (Notify-Event).

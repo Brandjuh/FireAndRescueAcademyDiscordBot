@@ -419,6 +419,49 @@ def _ordinal(n: int) -> str:
     return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
 
 
+def reapply_block(
+    rows, days: int, now: dt.datetime | None = None
+) -> dict | None:
+    """CoC 5.3 return gate for the applications auto-accept.
+
+    An ACTIVE Ban blocks regardless of age (permanent until revoked); an
+    active Kick blocks while younger than ``days``. Revoked/dismissed
+    records never block — that's how an admin explicitly clears the way.
+    Returns ``{"sanction_id", "sanction_type", "age_days", "created_at"}``
+    for the newest blocking record, or None."""
+    if days <= 0:
+        return None
+    now = now or dt.datetime.now(dt.timezone.utc)
+    blocking: dict | None = None
+    for row in rows:
+        stype = str(_field(row, "sanction_type") or "")
+        if stype not in ("Kick", "Ban"):
+            continue
+        if _field(row, "status") != "active":
+            continue
+        raw = _field(row, "created_at")
+        try:
+            created = dt.datetime.fromisoformat(raw) if raw else None
+        except ValueError:
+            created = None
+        if created is not None and created.tzinfo is None:
+            created = created.replace(tzinfo=dt.timezone.utc)
+        age_days = (
+            (now - created).total_seconds() / 86400.0
+            if created is not None else 0.0
+        )
+        if stype == "Kick" and age_days >= days:
+            continue  # waited out the CoC 5.3 period
+        if blocking is None or age_days < blocking["age_days"]:
+            blocking = {
+                "sanction_id": _field(row, "id"),
+                "sanction_type": stype,
+                "age_days": age_days,
+                "created_at": raw,
+            }
+    return blocking
+
+
 def under_warning_until(rows, now: dt.datetime | None = None) -> str | None:
     """CoC 5.1's 30-day 'under warning' badge: the ISO moment it ends,
     or None when the member's latest countable offense is older than
