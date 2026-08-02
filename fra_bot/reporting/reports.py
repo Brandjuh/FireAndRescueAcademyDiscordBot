@@ -118,6 +118,58 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
         result.add("By action", "\n".join(lines), inline=False)
         return result
 
+    async def sanctions_report(period: Period) -> ReportResult:
+        from ..db.repos import SanctionsRepo
+        from ..services.sanction_rules import effective_status
+
+        repo = SanctionsRepo(db)
+        result = ReportResult(title=f"⚖️ Sanctions — {period.label}")
+        rows = await repo.issued_between(period.start_iso, period.end_iso)
+        summary = await repo.status_summary()
+        standing = (
+            f"Register: {summary.get('active', 0)} active · "
+            f"{summary.get('unverified', 0)} awaiting review · "
+            f"{sum(summary.values())} total"
+        )
+        if not rows:
+            result.description = (
+                f"No sanctions recorded in this period.\n{standing}"
+            )
+            return result
+        by_type: dict[str, int] = {}
+        by_status: dict[str, int] = {}
+        by_member: dict[str, int] = {}
+        for row in rows:
+            by_type[row["sanction_type"]] = by_type.get(row["sanction_type"], 0) + 1
+            status = effective_status(row)
+            by_status[status] = by_status.get(status, 0) + 1
+            name = row["mc_username"] or "?"
+            by_member[name] = by_member.get(name, 0) + 1
+        result.description = f"**{len(rows)}** recorded.\n{standing}"
+        result.add(
+            "By type",
+            "\n".join(
+                f"• {stype}: {n}"
+                for stype, n in sorted(by_type.items(), key=lambda kv: -kv[1])
+            )[:1024],
+            inline=False,
+        )
+        result.add(
+            "Outcome",
+            ", ".join(
+                f"{status}: {n}" for status, n in sorted(by_status.items())
+            )[:1024],
+            inline=False,
+        )
+        top = sorted(by_member.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+        if top:
+            result.add(
+                "Most sanctioned",
+                "\n".join(f"• {name}: {n}" for name, n in top)[:1024],
+                inline=False,
+            )
+        return result
+
     async def automation_report(period: Period) -> ReportResult:
         result = ReportResult(title=f"🤖 Board automation — {period.label}")
         rows = await automation.activity_counts(period.start_iso, period.end_iso)
@@ -217,6 +269,11 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
     registry.register(Report(
         "logs", "Alliance-log activity by action", logs_report,
         periods=("today", "week", "month"),
+    ))
+    registry.register(Report(
+        "sanctions", "Sanctions issued, outcomes and repeat offenders",
+        sanctions_report,
+        periods=("today", "week", "month", "prev-month"),
     ))
     registry.register(Report(
         "automation", "Board request activity and outcomes", automation_report,

@@ -2618,6 +2618,52 @@ class SanctionsRepo:
         ) as cur:
             return {row["status"]: row["n"] for row in await cur.fetchall()}
 
+    async def issued_between(
+        self, start_iso: str | None, end_iso: str,
+    ) -> list[aiosqlite.Row]:
+        """Records created in [start, end) — the sanctions report's input."""
+        if start_iso is None:
+            sql = "SELECT * FROM sanctions WHERE created_at < ? ORDER BY id ASC"
+            params: tuple = (end_iso,)
+        else:
+            sql = ("SELECT * FROM sanctions WHERE created_at >= ? "
+                   "AND created_at < ? ORDER BY id ASC")
+            params = (start_iso, end_iso)
+        async with self._db.conn.execute(sql, params) as cur:
+            return list(await cur.fetchall())
+
+    async def filtered(
+        self, *, status: str | None = None, sanction_type: str | None = None,
+        source: str | None = None, member: str | None = None,
+        limit: int = 300,
+    ) -> list[aiosqlite.Row]:
+        """The web console's list query. ``status`` filters on the STORED
+        status — the caller derives 'expired' display via
+        ``effective_status`` (the sweep stores the transition, so stored
+        and derived only diverge for minutes)."""
+        clauses, params = [], []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if sanction_type:
+            clauses.append("sanction_type = ?")
+            params.append(sanction_type)
+        if source:
+            clauses.append("source = ?")
+            params.append(source)
+        if member:
+            clauses.append(
+                "(mc_username LIKE ? COLLATE NOCASE OR mc_user_id = ?)"
+            )
+            params.append(f"%{member}%")
+            params.append(int(member) if member.isdigit() else -1)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        async with self._db.conn.execute(
+            f"SELECT * FROM sanctions {where} ORDER BY id DESC LIMIT ?",
+            (*params, limit),
+        ) as cur:
+            return list(await cur.fetchall())
+
     async def admin_leaderboard(self, limit: int = 5) -> list[aiosqlite.Row]:
         """Who records the most sanctions — human sources only (imports
         and automation would drown the humans)."""

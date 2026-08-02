@@ -52,6 +52,12 @@ class Dossier:
     link_status: str | None            # approved | denied | None
     requests: dict = field(default_factory=dict)   # kind -> {count, last_status, last_at}
     missions: dict = field(default_factory=dict)   # kind -> {count, last_status, last_at}
+    # Sanction summary (sanction manager v2): CoC offense position,
+    # active/total record counts, and a one-line latest record.
+    offense_count: int = 0
+    sanctions_active: int = 0
+    sanctions_total: int = 0
+    last_sanction: str | None = None
 
 
 class DossierService:
@@ -149,7 +155,37 @@ class DossierService:
         dossier.missions = await self._request_summary(
             "scheduled_missions", "kind", member["name"], mc_user_id
         )
+        await self._sanction_summary(dossier)
         return dossier
+
+    async def _sanction_summary(self, dossier: Dossier) -> None:
+        try:
+            from ..db.repos import SanctionsRepo
+            from .sanction_rules import effective_status
+
+            repo = SanctionsRepo(self._db)
+            rows = await repo.for_member(
+                mc_user_id=dossier.mc_user_id,
+                discord_user_id=dossier.discord_id, name=dossier.name,
+                limit=100,
+            )
+            dossier.sanctions_total = len(rows)
+            dossier.sanctions_active = sum(
+                1 for r in rows if effective_status(r) == "active"
+            )
+            dossier.offense_count = await repo.offense_count(
+                mc_user_id=dossier.mc_user_id,
+                discord_user_id=dossier.discord_id, name=dossier.name,
+            )
+            if rows:
+                latest = rows[0]
+                dossier.last_sanction = (
+                    f"#{latest['id']} {latest['sanction_type']} "
+                    f"({latest['created_at'][:10]}, "
+                    f"{effective_status(latest)})"
+                )
+        except aiosqlite.Error:
+            pass  # dossier stays useful without the sanction block
 
     async def _income(self, mc_user_id: int, period: str) -> int | None:
         """The member's latest treasury-income snapshot amount (their
