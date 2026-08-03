@@ -2932,6 +2932,32 @@ class VehiclesForumRepo:
         )
 
 
+class DmSystemRepo:
+    """In-game system messages already posted to the system-message
+    channel. Their ids are a separate namespace from
+    ``dm_conversations.conversation_id`` (hence an own table)."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def seen(self, system_id: str) -> bool:
+        async with self._db.conn.execute(
+            "SELECT 1 FROM dm_system_messages WHERE system_id = ?",
+            (str(system_id),),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def record(self, system_id: str, *, subject: str | None) -> None:
+        now = utcnow_iso()
+        await self._db.execute(
+            "INSERT INTO dm_system_messages (system_id, subject, posted_at, "
+            "created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(system_id) DO UPDATE SET subject = excluded.subject, "
+            "posted_at = excluded.posted_at",
+            (str(system_id), subject, now, now),
+        )
+
+
 class DmMirrorRepo:
     """conversation_id → forum-thread mapping for the in-game DM mirror,
     plus the per-conversation progress marker (newest mirrored message

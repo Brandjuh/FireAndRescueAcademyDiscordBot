@@ -33,9 +33,10 @@ import discord
 
 from ..config import Config
 from ..db.database import Database
-from ..db.repos import DmMirrorRepo, MembersRepo
+from ..db.repos import DmMirrorRepo, DmSystemRepo, MembersRepo
 from ..mc import mailbox
 from ..mc.client import MissionChiefClient
+from ..mc.errors import MissionChiefError
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ class DmMirrorService:
         self._mc = mc
         self._bot = bot
         self._repo = DmMirrorRepo(db)
+        self._system = DmSystemRepo(db)
         self._members = MembersRepo(db)
         # Bodies we just POSTed into the game from a forum thread: the next
         # scan skips mirroring them back (they are already in the thread as
@@ -125,6 +127,20 @@ class DmMirrorService:
             return None
         channel = self._bot.get_channel(channel_id)
         if channel is None or not hasattr(channel, "create_thread"):
+            return None
+        return channel
+
+    def system_channel(self):
+        """The system-message channel (0 = feature off; an unreachable
+        configured channel also returns None — the pass then records
+        nothing, so those messages retry next scan)."""
+        channel_id = int(
+            getattr(self._cfg.discord.channels, "system_messages", 0) or 0
+        )
+        if not channel_id:
+            return None
+        channel = self._bot.get_channel(channel_id)
+        if channel is None or not hasattr(channel, "send"):
             return None
         return channel
 
@@ -148,14 +164,27 @@ class DmMirrorService:
         """One mirror pass over the inbox. Fetches a conversation page when
         the conversation is unknown (catches ones WE started), flagged
         "New", or known-but-threadless; mirrors only messages newer than
-        the stored marker."""
+        the stored marker. System messages take their own path: an embed
+        into the system-message channel, deduped by system id."""
         forum = self.forum()
-        if forum is None:
+        system_channel = self.system_channel()
+        if forum is None and system_channel is None:
             return self._summary(
                 error="DM-mirror forum is not configured — set it with "
                       "`!fra set dm_mirror <forum channel id>`."
             )
-        rows = await mailbox.fetch_inbox(self._mc)
+        all_rows = await mailbox.fetch_inbox(self._mc)
+        system_posted, system_failed = await self._system_pass(
+            system_channel, [r for r in all_rows if r.is_system]
+        )
+        rows = [r for r in all_rows if not r.is_system]
+        if forum is None:
+            summary = self._summary(
+                error="DM-mirror forum is not configured — set it with "
+                      "`!fra set dm_mirror <forum channel id>`."
+            )
+            summary["system_posted"] = system_posted
+            return summary
         threads_created = mirrored = skipped = failed = 0
         for row in rows:
             known = await self._repo.get(row.conversation_id)
@@ -180,7 +209,77 @@ class DmMirrorService:
         return self._summary(
             conversations=len(rows), threads_created=threads_created,
             mirrored=mirrored, skipped=skipped, failed=failed,
+            system_posted=system_posted, system_failed=system_failed,
         )
+
+    # ------------------------------------------------------------------
+    # System messages (game → the system-message channel)
+    # ------------------------------------------------------------------
+
+    async def _system_pass(self, channel, rows) -> tuple[int, int]:
+        """Post unseen system messages as embeds. No quiet bootstrap:
+        whatever the first scan finds in the inbox is posted once (the
+        admin explicitly wants the backlog), then the table dedupes.
+        A failed fetch/post is not recorded, so it retries next scan."""
+        if channel is None or not rows:
+            return 0, 0
+        posted = failed = 0
+        for row in rows:
+            try:
+                if await self._system.seen(row.conversation_id):
+                    continue
+                body = await mailbox.fetch_system_message(
+                    self._mc, row.conversation_id
+                )
+                if not body:
+                    body = (
+                        "*(body could not be parsed — open the message in "
+                        "the game inbox)*"
+                    )
+                content, allowed = self._system_mention()
+                await channel.send(
+                    content=content,
+                    embed=self._system_embed(row, body),
+                    allowed_mentions=allowed,
+                )
+                await self._system.record(
+                    row.conversation_id, subject=row.subject
+                )
+                posted += 1
+            except (MissionChiefError, discord.HTTPException, ValueError) as exc:
+                failed += 1
+                log.warning(
+                    "system message %s could not be posted: %s",
+                    row.conversation_id, exc,
+                )
+        return posted, failed
+
+    def _system_mention(self):
+        """(content above the embed, allowed mentions): the configured
+        role as a real ping, or nothing at all (role id 0 — the current
+        default; enable later with `!fra set system_message_role_id`)."""
+        role_id = int(
+            getattr(self._cfg.discord, "system_message_role_id", 0) or 0
+        )
+        if not role_id:
+            return None, discord.AllowedMentions.none()
+        return (
+            f"<@&{role_id}>",
+            discord.AllowedMentions(roles=[discord.Object(id=role_id)]),
+        )
+
+    def _system_embed(self, row, body: str) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"📢 System message — {row.subject or 'No subject'}"[:256],
+            colour=discord.Colour.teal(),
+            description=body[:4096],
+            timestamp=dt.datetime.now(dt.timezone.utc),
+        )
+        footer = f"System message #{row.conversation_id}"
+        if row.raw_date:
+            footer += f" · {row.raw_date}"
+        embed.set_footer(text=footer[:2048])
+        return embed
 
     async def _mirror_conversation(self, forum, row, known) -> tuple[bool, int]:
         """Returns (created_new_thread, messages_posted)."""
@@ -417,14 +516,23 @@ class DmMirrorService:
     def _summary(*, error: str | None = None, **counts) -> dict:
         if error:
             return {"error": error, "lines": [error], "changed": False}
-        lines = [
+        line = (
             f"{counts.get('conversations', 0)} conversation(s) in the inbox — "
             f"{counts.get('threads_created', 0)} new thread(s), "
             f"{counts.get('mirrored', 0)} message(s) mirrored, "
             f"{counts.get('skipped', 0)} unchanged, {counts.get('failed', 0)} failed"
-        ]
+        )
+        if counts.get("system_posted") or counts.get("system_failed"):
+            line += (
+                f"; {counts.get('system_posted', 0)} system message(s) posted"
+                + (
+                    f", {counts.get('system_failed', 0)} failed"
+                    if counts.get("system_failed") else ""
+                )
+            )
         changed = bool(
             counts.get("threads_created") or counts.get("mirrored")
-            or counts.get("failed")
+            or counts.get("failed") or counts.get("system_posted")
+            or counts.get("system_failed")
         )
-        return {**counts, "error": None, "lines": lines, "changed": changed}
+        return {**counts, "error": None, "lines": [line], "changed": changed}

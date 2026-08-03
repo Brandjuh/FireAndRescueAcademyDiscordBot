@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 MESSAGES_PATH = "/messages"
 
 _PROFILE_RE = re.compile(r"/profile/\d+")
+_SYSTEM_RE = re.compile(r"/messages/system_message/(\d+)")
 
 
 def _text(element) -> str:
@@ -41,6 +42,12 @@ class InboxRow:
     sender: str
     subject: str
     is_new: bool = False
+    #: True for a system message ("/messages/system_message/<id>" subject
+    #: link); ``conversation_id`` then holds the SYSTEM id from that href —
+    #: a separate id namespace from normal conversations.
+    is_system: bool = False
+    #: The inbox date column as shown by the game (e.g. "today").
+    raw_date: str = ""
 
 
 @dataclass
@@ -51,7 +58,10 @@ class ConversationMessage:
 
 
 def parse_inbox(html: str) -> list[InboxRow]:
-    """Conversations on the /messages page; system messages are skipped."""
+    """Conversations on the /messages page. System messages (subject link
+    to ``/messages/system_message/<id>``) are returned too, flagged
+    ``is_system`` and carrying the system id from that href — callers
+    route them to the system-message channel instead of the mirror."""
     soup = BeautifulSoup(html or "", "lxml")
     inbox_form = None
     for form in soup.find_all("form"):
@@ -74,18 +84,52 @@ def parse_inbox(html: str) -> list[InboxRow]:
         subject_link = cells[3].find("a", href=True)
         if not subject_link:
             continue
-        if "/messages/system_message/" in str(subject_link.get("href") or ""):
-            continue
         sender_link = cells[2].find("a", href=True)
+        raw_date = _text(cells[4]) if len(cells) > 4 else ""
+        system = _SYSTEM_RE.search(str(subject_link.get("href") or ""))
         rows.append(
             InboxRow(
-                conversation_id=conversation_id,
+                # System ids live in their own namespace; the checkbox
+                # value is a conversation id and must not be used for them.
+                conversation_id=system.group(1) if system else conversation_id,
                 sender=_text(sender_link) if sender_link else _text(cells[2]),
                 subject=_text(subject_link),
                 is_new=_text(cells[1]).casefold() == "new",
+                is_system=system is not None,
+                raw_date=raw_date,
             )
         )
     return rows
+
+
+def parse_system_message(html: str) -> str:
+    """Body text of a ``/messages/system_message/<id>`` page.
+
+    The exact layout is UNVERIFIED from this sandbox (the reference cogs
+    never open system messages), so parse defensively: prefer ``.well``
+    paragraph text WITHOUT ``parse_conversation``'s profile-link
+    requirement (system messages have no author profile), fall back to
+    the page's main content column, and return "" when nothing sensible
+    is found — the caller posts a placeholder then."""
+    soup = BeautifulSoup(html or "", "lxml")
+    for well in soup.find_all(
+        "div", class_=lambda value: value and "well" in str(value).split()
+    ):
+        body = "\n".join(
+            _text(p) for p in well.find_all("p") if _text(p)
+        ).strip()
+        if not body:
+            body = _text(well)
+        if body:
+            return body
+    main = soup.find("div", id="content") or soup.find(
+        "div", class_=lambda value: value and "container" in str(value).split()
+    )
+    if main is not None:
+        for tag in main.find_all(("script", "style", "nav", "form")):
+            tag.decompose()
+        return _text(main)[:3500].strip()
+    return ""
 
 
 def parse_conversation(html: str) -> list[ConversationMessage]:
@@ -172,6 +216,16 @@ async def fetch_conversation(client, conversation_id: str) -> list[ConversationM
         raise ValueError("Conversation id must be numeric.")
     html = await client.fetch_page(f"{MESSAGES_PATH}/{conversation_id}")
     return parse_conversation(html)
+
+
+async def fetch_system_message(client, system_id: str) -> str:
+    """Body of one system message (opening it marks it read in-game,
+    same as opening a conversation)."""
+    system_id = str(system_id).strip()
+    if not system_id.isdigit():
+        raise ValueError("System message id must be numeric.")
+    html = await client.fetch_page(f"{MESSAGES_PATH}/system_message/{system_id}")
+    return parse_system_message(html)
 
 
 async def send_reply(client, conversation_id: str, body: str) -> tuple[bool, str]:
