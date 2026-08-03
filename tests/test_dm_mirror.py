@@ -91,13 +91,53 @@ COMPOSE_HTML = """
 # Parsers
 # ---------------------------------------------------------------------------
 
-def test_parse_inbox_rows_and_skips_system_messages():
+def test_parse_inbox_rows_and_flags_system_messages():
     rows = mailbox.parse_inbox(INBOX_HTML)
-    assert [r.conversation_id for r in rows] == ["9001", "9002"]
+    assert [r.conversation_id for r in rows] == ["9001", "9002", "5"]
     assert rows[0].sender == "Alex1129" and rows[0].is_new is True
     assert rows[1].sender == "4m1rudin" and rows[1].is_new is False
     assert rows[0].subject == "Question about tax"
+    assert [r.is_system for r in rows] == [False, False, True]
+    # The system row's id comes from the href (its own namespace), NOT
+    # from the checkbox value (9003 — a conversation id).
+    system = rows[2]
+    assert system.conversation_id == "5"
+    assert system.subject == "Daily reward"
+    assert system.raw_date == "today"
     assert mailbox.parse_inbox("<html>no form</html>") == []
+
+
+SYSTEM_MSG_HTML = """
+<div class="container">
+  <div class="well">
+    <p>Dear player,</p>
+    <p>You received your daily reward: 500 coins.</p>
+  </div>
+</div>
+"""
+
+SYSTEM_MSG_PLAIN_HTML = """
+<div id="content">
+  <h1>Maintenance</h1>
+  Servers restart at 04:00.
+  <script>ignore()</script>
+</div>
+"""
+
+
+def test_parse_system_message_prefers_well_paragraphs():
+    body = mailbox.parse_system_message(SYSTEM_MSG_HTML)
+    assert body == "Dear player,\nYou received your daily reward: 500 coins."
+    # No profile link required — that's exactly what parse_conversation
+    # would demand (and system messages don't have one).
+    assert mailbox.parse_conversation(SYSTEM_MSG_HTML) == []
+
+
+def test_parse_system_message_falls_back_to_main_content():
+    body = mailbox.parse_system_message(SYSTEM_MSG_PLAIN_HTML)
+    assert "Servers restart at 04:00" in body
+    assert "ignore()" not in body
+    assert mailbox.parse_system_message("<html></html>") == ""
 
 
 def test_parse_conversation_messages():
@@ -141,17 +181,22 @@ class FakeMC:
     def __init__(self):
         self.inbox_html = INBOX_HTML
         self.conversations = {"9001": CONV_9001_HTML, "9002": CONV_9002_HTML}
+        self.system_pages = {"5": SYSTEM_MSG_HTML}
         self.posts = []
+        self.fetched = []
         self.reply_response = SENT_HTML
 
     def url(self, path):
         return "https://www.missionchief.com" + path
 
     async def fetch_page(self, path, **kwargs):
+        self.fetched.append(path)
         if path == "/messages":
             return self.inbox_html
         if path.rstrip("/").endswith("/messages/new"):
             return COMPOSE_HTML
+        if "/system_message/" in path:
+            return self.system_pages[path.rsplit("/", 1)[-1]]
         cid = path.rsplit("/", 1)[-1]
         return self.conversations[cid]
 
@@ -221,18 +266,34 @@ class FakeBot:
         return channel
 
 
-def _cfg(dry_run=False):
+def _cfg(dry_run=False, *, dm_mirror=800, system_channel=0, system_role=0):
     return SimpleNamespace(
         discord=SimpleNamespace(
-            channels=SimpleNamespace(dm_mirror=800),
+            channels=SimpleNamespace(
+                dm_mirror=dm_mirror, system_messages=system_channel,
+            ),
             admin_role_ids=(1,),
             staff_role_ids=(2,),
+            system_message_role_id=system_role,
         ),
         automation=SimpleNamespace(
             dry_run=dry_run,
             dm_mirror=SimpleNamespace(enabled=True, interval=15),
         ),
     )
+
+
+class FakeTextChannel:
+    """The system-message channel: a plain sendable channel (no threads)."""
+
+    def __init__(self, channel_id, bot):
+        self.id = channel_id
+        self.sent = []  # (content, embed, allowed_mentions)
+        bot.add_channel(self)
+
+    async def send(self, content=None, embed=None, allowed_mentions=None):
+        self.sent.append((content, embed, allowed_mentions))
+        return FakeMessage(content)
 
 
 @pytest_asyncio.fixture
@@ -247,7 +308,10 @@ def _service(db, cfg=None):
     bot = FakeBot()
     forum = FakeForum(800, bot)
     mc = FakeMC()
-    service = DmMirrorService(cfg or _cfg(), mc, db, bot)
+    cfg = cfg or _cfg()
+    if getattr(cfg.discord.channels, "system_messages", 0):
+        FakeTextChannel(cfg.discord.channels.system_messages, bot)
+    service = DmMirrorService(cfg, mc, db, bot)
     return service, forum, mc, bot
 
 
@@ -519,3 +583,79 @@ def test_settings_expose_the_new_keys():
     assert (
         rt.resolve("dm_mirror.interval").path == "automation.dm_mirror.interval"
     )
+
+
+# ---------------------------------------------------------------------------
+# System messages → the system-message channel
+# ---------------------------------------------------------------------------
+
+async def test_system_message_posts_embed_once_and_never_mirrors(db):
+    service, forum, mc, bot = _service(db, _cfg(system_channel=900))
+    summary = await service.scan()
+    channel = bot.get_channel(900)
+    assert summary["system_posted"] == 1
+    assert len(channel.sent) == 1
+    content, embed, allowed = channel.sent[0]
+    assert content is None                        # role id 0: no mention line
+    assert allowed.roles is False or allowed.roles == []
+    assert embed.title == "📢 System message — Daily reward"
+    assert "daily reward: 500 coins" in embed.description
+    assert "System message #5" in embed.footer.text
+    assert "today" in embed.footer.text
+    # It never became a mirrored conversation thread…
+    assert all("#5" not in t.name for t in forum.threads)
+    # …and the wrong (checkbox) conversation id 9003 was never fetched.
+    assert all("9003" not in p for p in mc.fetched)
+    # Dedupe: the next scan posts nothing new.
+    summary = await service.scan()
+    assert summary.get("system_posted", 0) == 0
+    assert len(channel.sent) == 1
+
+
+async def test_system_message_mention_structure_above_the_embed(db):
+    service, _, _, bot = _service(
+        db, _cfg(system_channel=900, system_role=4242),
+    )
+    await service.scan()
+    content, _, allowed = bot.get_channel(900).sent[0]
+    assert content == "<@&4242>"                  # above/outside the embed
+    assert [r.id for r in allowed.roles] == [4242]
+
+
+async def test_system_channel_off_keeps_ignoring(db):
+    service, _, mc, _ = _service(db)              # system_messages = 0
+    summary = await service.scan()
+    assert summary.get("system_posted", 0) == 0
+    # The system-message page is never opened (no needless traffic, and
+    # no in-game mark-as-read side effect).
+    assert all("/system_message/" not in p for p in mc.fetched)
+
+
+async def test_system_pass_runs_even_without_a_mirror_forum(db):
+    service, _, _, bot = _service(
+        db, _cfg(dm_mirror=0, system_channel=900),
+    )
+    summary = await service.scan()
+    assert summary["error"] is not None           # mirror still unconfigured
+    assert summary["system_posted"] == 1
+    assert len(bot.get_channel(900).sent) == 1
+
+
+async def test_failed_system_post_retries_next_scan(db):
+    service, _, _, bot = _service(db, _cfg(system_channel=900))
+    channel = bot.get_channel(900)
+    original_send = channel.send
+
+    async def broken_send(**kwargs):
+        raise discord.HTTPException(
+            SimpleNamespace(status=500, reason="boom"), "boom"
+        )
+
+    channel.send = broken_send
+    summary = await service.scan()
+    assert summary["system_failed"] == 1 and summary["system_posted"] == 0
+    # Not recorded — the next scan retries and succeeds.
+    channel.send = original_send
+    summary = await service.scan()
+    assert summary["system_posted"] == 1
+    assert len(channel.sent) == 1

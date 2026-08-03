@@ -100,6 +100,10 @@ class DiscordChannels:
     # PRIVATE intake channel for the profile-sync userscript webhook;
     # 0 = game sync off.
     game_sync: int = 1527609874551410698
+    # In-game SYSTEM messages (the /messages/system_message/<id> entries
+    # the DM mirror used to ignore) land here as embeds; 0 = keep
+    # ignoring them.
+    system_messages: int = 1421256548977606827
 
 
 @dataclass(frozen=True)
@@ -121,6 +125,9 @@ class DiscordConfig:
     # Pinged on new-vehicle announcements in the vehicle_announce channel
     # (0 = no ping, just the message).
     vehicle_announce_role_id: int = 0
+    # Pinged ABOVE the embed of a mirrored in-game system message
+    # (0 = no ping, just the embed — the current default).
+    system_message_role_id: int = 0
     # Eventpinger announcement watcher: the channel where the official
     # MissionChief app announces EVERY alliance mission/event start (also
     # manual ones), and that app's user id. Each announcement gets a reply
@@ -564,6 +571,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 sanctions=int(channels.get("sanctions", 0)),
                 sanction_panel=int(channels.get("sanction_panel", 0)),
                 member_actions=int(channels.get("member_actions", 0)),
+                system_messages=int(
+                    channels.get("system_messages", 1421256548977606827)
+                ),
                 game_sync=int(
                     channels.get("game_sync", 1527609874551410698)
                 ),
@@ -583,6 +593,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             ),
             vehicle_announce_role_id=int(
                 _get(raw, "discord", "vehicle_announce_role_id", default=0)
+            ),
+            system_message_role_id=int(
+                _get(raw, "discord", "system_message_role_id", default=0)
             ),
             event_watch_channel_id=int(
                 _get(raw, "discord", "event_watch_channel_id",
