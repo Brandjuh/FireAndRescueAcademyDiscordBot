@@ -803,9 +803,14 @@ class FRABot(commands.Bot):
 
     async def _dm_mirror_pass(self) -> None:
         """One DM inbox scan; only errors are surfaced to the admin channel
-        (new mirrored messages are visible in the forum itself)."""
+        (new mirrored messages are visible in the forum itself — and a
+        broken system-message channel or failed system post counts as an
+        error, not something to swallow)."""
         summary = await self.dm_mirror.scan()
-        if summary.get("error") or summary.get("failed"):
+        if (
+            summary.get("error") or summary.get("failed")
+            or summary.get("system_failed") or summary.get("system_warning")
+        ):
             await self.notify_admin(
                 "📬 **DM mirror**\n" + "\n".join(summary["lines"])[:1800]
             )

@@ -2957,6 +2957,12 @@ class DmSystemRepo:
             (str(system_id), subject, now, now),
         )
 
+    async def count(self) -> int:
+        async with self._db.conn.execute(
+            "SELECT COUNT(*) AS n FROM dm_system_messages"
+        ) as cur:
+            return (await cur.fetchone())["n"]
+
 
 class DmMirrorRepo:
     """conversation_id → forum-thread mapping for the in-game DM mirror,

@@ -659,3 +659,87 @@ async def test_failed_system_post_retries_next_scan(db):
     summary = await service.scan()
     assert summary["system_posted"] == 1
     assert len(channel.sent) == 1
+
+
+# ---------------------------------------------------------------------------
+# Live-page tolerance + observability (system messages missing in prod)
+# ---------------------------------------------------------------------------
+
+INBOX_NO_CHECKBOX_HTML = """
+<form action="/messages/move_folder">
+  <input type="hidden" name="current_box" value="inbox"/>
+  <table><tbody>
+    <tr>
+      <td><input type="checkbox" name="conversations[]" value="9001"/></td>
+      <td>New</td>
+      <td><a href="/profile/111">Alex1129</a></td>
+      <td><a href="/messages/9001">Question about tax</a></td>
+      <td>today</td>
+    </tr>
+    <tr>
+      <td></td>
+      <td>New</td>
+      <td>System</td>
+      <td><a href="https://www.missionchief.com/messages/system_message/77">Server maintenance</a></td>
+      <td>yesterday</td>
+    </tr>
+  </tbody></table>
+</form>
+"""
+
+
+def test_parse_inbox_system_row_without_checkbox():
+    # System messages are not selectable like conversations, so the live
+    # table may render them WITHOUT the conversations[] checkbox — the
+    # old parser dropped exactly these rows before the system check. The
+    # href may also be absolute.
+    rows = mailbox.parse_inbox(INBOX_NO_CHECKBOX_HTML)
+    assert [r.conversation_id for r in rows] == ["9001", "77"]
+    system = rows[1]
+    assert system.is_system is True
+    assert system.subject == "Server maintenance"
+    assert system.sender == "System"
+    assert system.raw_date == "yesterday"
+    assert system.is_new is True
+
+
+async def test_scan_summary_always_reports_system_state(db):
+    service, _, _, _ = _service(db, _cfg(system_channel=900))
+    summary = await service.scan()
+    assert summary["system_configured"] is True
+    assert summary["system_seen"] == 1
+    assert summary["system_posted"] == 1
+    assert "system messages: 1 in the inbox, 1 posted" in summary["lines"][0]
+    # Second scan: still spelled out, so "0 posted" is visibly distinct
+    # from "feature broken".
+    summary = await service.scan()
+    assert "system messages: 1 in the inbox, 0 posted" in summary["lines"][0]
+
+
+async def test_unreachable_system_channel_warns_instead_of_silence(db):
+    bot = FakeBot()
+    FakeForum(800, bot)
+    mc = FakeMC()
+    # Channel 901 configured but never added to the bot: unreachable.
+    service = DmMirrorService(_cfg(system_channel=901), mc, db, bot)
+    summary = await service.scan()
+    assert summary["system_warning"] is not None
+    assert "not reachable" in summary["system_warning"]
+    assert summary["system_failed"] == 1        # the seen row went nowhere
+    assert any("not reachable" in line for line in summary["lines"])
+    # Nothing recorded — once the channel works the message still posts.
+    FakeTextChannel(901, bot)
+    summary = await service.scan()
+    assert summary["system_posted"] == 1 and summary["system_warning"] is None
+
+
+async def test_status_lines_show_system_channel_state(db):
+    service, _, _, _ = _service(db, _cfg(system_channel=900))
+    await service.scan()
+    lines = await service.status_lines()
+    system_line = next(line for line in lines if "system messages" in line)
+    assert "<#900>" in system_line and "1 posted so far" in system_line
+    # Feature off → says so.
+    service_off, _, _, _ = _service(db, _cfg())
+    lines = await service_off.status_lines()
+    assert any("off (" in line for line in lines if "system messages" in line)

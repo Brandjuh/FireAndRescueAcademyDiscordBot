@@ -74,29 +74,58 @@ def parse_inbox(html: str) -> list[InboxRow]:
 
     rows: list[InboxRow] = []
     for row in inbox_form.find_all("tr"):
+        cells = row.find_all("td")
+        if not cells:
+            continue
+        # System rows FIRST and WITHOUT the checkbox requirement: system
+        # messages are not selectable like conversations (no move/delete),
+        # so the live table may render them without a conversations[]
+        # checkbox — requiring one made them invisible. The system link
+        # is matched anywhere in the row (relative or absolute href).
+        system = None
+        system_link = None
+        for link in row.find_all("a", href=True):
+            system = _SYSTEM_RE.search(str(link.get("href") or ""))
+            if system:
+                system_link = link
+                break
+        if system is not None:
+            link_cell = system_link.find_parent("td")
+            link_index = cells.index(link_cell) if link_cell in cells else -1
+            rows.append(
+                InboxRow(
+                    # The href id — its own namespace; a checkbox value
+                    # (when present) is a conversation id and must not be
+                    # used for system messages.
+                    conversation_id=system.group(1),
+                    sender=_text(cells[link_index - 1]) if link_index > 0 else "",
+                    subject=_text(system_link),
+                    is_new=any(_text(c).casefold() == "new" for c in cells),
+                    is_system=True,
+                    raw_date=(
+                        _text(cells[link_index + 1])
+                        if 0 <= link_index < len(cells) - 1 else ""
+                    ),
+                )
+            )
+            continue
         checkbox = row.find("input", attrs={"name": "conversations[]"})
         if not checkbox:
             continue
         conversation_id = str(checkbox.get("value") or "").strip()
-        cells = row.find_all("td")
         if len(cells) < 4 or not conversation_id:
             continue
         subject_link = cells[3].find("a", href=True)
         if not subject_link:
             continue
         sender_link = cells[2].find("a", href=True)
-        raw_date = _text(cells[4]) if len(cells) > 4 else ""
-        system = _SYSTEM_RE.search(str(subject_link.get("href") or ""))
         rows.append(
             InboxRow(
-                # System ids live in their own namespace; the checkbox
-                # value is a conversation id and must not be used for them.
-                conversation_id=system.group(1) if system else conversation_id,
+                conversation_id=conversation_id,
                 sender=_text(sender_link) if sender_link else _text(cells[2]),
                 subject=_text(subject_link),
                 is_new=_text(cells[1]).casefold() == "new",
-                is_system=system is not None,
-                raw_date=raw_date,
+                raw_date=_text(cells[4]) if len(cells) > 4 else "",
             )
         )
     return rows
