@@ -285,6 +285,48 @@ class DmMirrorService:
                 )
         return posted, failed
 
+    async def repost_system(self, system_id: str) -> tuple[bool, str]:
+        """Re-post one already-recorded system message (`!fra dmmirror
+        repost <id>`) — e.g. after a body-parser fix rendered the first
+        post with a placeholder. Unknown ids are not fetched: an UNSEEN
+        message posts automatically on the next scan anyway."""
+        system_id = str(system_id).strip()
+        channel = self.system_channel()
+        if channel is None:
+            return False, (
+                "the system-message channel is not configured or not "
+                "reachable"
+            )
+        known = await self._system.get(system_id)
+        if known is None:
+            return False, (
+                "not posted before — unseen messages post automatically, "
+                "run `!fra dmmirror scan`"
+            )
+        row = mailbox.InboxRow(
+            conversation_id=system_id, sender="",
+            subject=known["subject"] or "No subject", is_system=True,
+        )
+        try:
+            body = await mailbox.fetch_system_message(self._mc, system_id)
+        except (MissionChiefError, ValueError) as exc:
+            return False, f"could not fetch the message ({exc})"
+        if not body:
+            body = (
+                "*(body could not be parsed — open the message in "
+                "the game inbox)*"
+            )
+        content, allowed = self._system_mention()
+        try:
+            await channel.send(
+                content=content, embed=self._system_embed(row, body),
+                allowed_mentions=allowed,
+            )
+        except discord.HTTPException as exc:
+            return False, f"Discord post failed ({exc})"
+        await self._system.record(system_id, subject=known["subject"])
+        return True, "re-posted"
+
     def _system_mention(self):
         """(content above the embed, allowed mentions): the configured
         role as a real ping, or nothing at all (role id 0 — the current

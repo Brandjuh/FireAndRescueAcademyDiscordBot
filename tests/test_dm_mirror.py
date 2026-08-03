@@ -787,3 +787,66 @@ async def test_status_lines_show_system_channel_state(db):
     service_off, _, _, _ = _service(db, _cfg())
     lines = await service_off.status_lines()
     assert any("off (" in line for line in lines if "system messages" in line)
+
+
+# ---------------------------------------------------------------------------
+# System message BODY (verified layout) + repost
+# ---------------------------------------------------------------------------
+
+# The verified body layout (from `!fra dump /messages/system_message/770`):
+# a run of <div> blocks inside div.system_message_content_container, with
+# <div><br></div> as the blank lines. No .well, no #content.
+SYSTEM_BODY_REAL_HTML = """
+<div class="panel panel-default">
+  <div class="panel-body system_message_content">
+    <div class="system_message_content_container">
+      <div>Dear MissionChief community,</div><div><br></div>
+      <div>Our Summer Event is live through August 21.</div>
+      <div><br></div><div><br></div>
+      <div>Your MissionChief team</div><div><br></div>
+    </div>
+  </div>
+  <div class="panel-footer">
+    <a class="btn btn-danger" href="/messages/system_message/770/remove">Delete</a>
+  </div>
+</div>
+"""
+
+
+def test_parse_system_message_matches_the_verified_body_layout():
+    body = mailbox.parse_system_message(SYSTEM_BODY_REAL_HTML)
+    assert body == (
+        "Dear MissionChief community,\n"
+        "\n"
+        "Our Summer Event is live through August 21.\n"
+        "\n"
+        "Your MissionChief team"
+    )
+    # The footer's Delete button never leaks into the body.
+    assert "Delete" not in body
+
+
+async def test_repost_system_message(db):
+    service, _, mc, bot = _service(db, _cfg(system_channel=900))
+    await service.scan()                          # posts #5 once
+    channel = bot.get_channel(900)
+    assert len(channel.sent) == 1
+    # Parser improved (the page now yields a real body) → repost.
+    mc.system_pages["5"] = SYSTEM_BODY_REAL_HTML
+    ok, detail = await service.repost_system("5")
+    assert ok and detail == "re-posted"
+    assert len(channel.sent) == 2
+    _, embed, _ = channel.sent[1]
+    assert "Summer Event is live" in embed.description
+    # Still recorded: the next scan does not post a third copy.
+    summary = await service.scan()
+    assert summary["system_posted"] == 0
+
+
+async def test_repost_rejects_unknown_id_and_missing_channel(db):
+    service, _, _, _ = _service(db, _cfg(system_channel=900))
+    ok, detail = await service.repost_system("999")
+    assert not ok and "not posted before" in detail
+    service_off, _, _, _ = _service(db, _cfg())   # channel 0
+    ok, detail = await service_off.repost_system("5")
+    assert not ok and "not configured" in detail

@@ -1630,6 +1630,16 @@ class AdminCog(commands.Cog):
             content=f"{icon} DM mirror:\n" + "\n".join(summary["lines"])[:1800]
         )
 
+    @dm_mirror_group.command(name="repost")
+    async def dm_mirror_repost(
+        self, ctx: commands.Context, system_id: str
+    ) -> None:
+        """Re-post one system message to the system-message channel
+        (e.g. after a parser fix): `!fra dmmirror repost 770`."""
+        ok, detail = await self.bot.dm_mirror.repost_system(system_id)
+        icon = "✅" if ok else "⚠️"
+        await ctx.send(f"{icon} System message #{system_id}: {detail}")
+
     @fra.command(name="dm")
     async def dm_send(self, ctx: commands.Context, *, spec: str = "") -> None:
         """Start a new in-game PM from Discord (the old bot's Send Message):

@@ -128,13 +128,34 @@ def parse_inbox(html: str) -> list[InboxRow]:
 def parse_system_message(html: str) -> str:
     """Body text of a ``/messages/system_message/<id>`` page.
 
-    The exact layout is UNVERIFIED from this sandbox (the reference cogs
-    never open system messages), so parse defensively: prefer ``.well``
-    paragraph text WITHOUT ``parse_conversation``'s profile-link
-    requirement (system messages have no author profile), fall back to
-    the page's main content column, and return "" when nothing sensible
-    is found — the caller posts a placeholder then."""
+    The VERIFIED live layout (page dump): the body lives in
+    ``div.system_message_content_container`` as a flat run of ``<div>``
+    blocks, with ``<div><br></div>`` rendering the blank lines — no
+    ``.well``, no ``#content``. The older ``.well`` and main-content
+    fallbacks are kept for layout drift; "" means nothing parsed (the
+    caller posts a placeholder then)."""
     soup = BeautifulSoup(html or "", "lxml")
+    container = soup.find(
+        "div",
+        class_=lambda value: value
+        and "system_message_content_container" in str(value).split(),
+    ) or soup.find(
+        "div",
+        class_=lambda value: value
+        and "system_message_content" in str(value).split(),
+    )
+    if container is not None:
+        blocks = container.find_all("div", recursive=False)
+        if blocks:
+            text = "\n".join(_text(block) for block in blocks)
+            # Runs of empty <div><br></div> blocks collapse to ONE blank
+            # line, like the game renders them.
+            text = re.sub(r"\n{3,}", "\n\n", text).strip()
+            if text:
+                return text
+        text = _text(container)
+        if text:
+            return text
     for well in soup.find_all(
         "div", class_=lambda value: value and "well" in str(value).split()
     ):
