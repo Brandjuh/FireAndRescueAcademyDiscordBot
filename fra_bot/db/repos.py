@@ -2941,11 +2941,14 @@ class DmSystemRepo:
         self._db = db
 
     async def seen(self, system_id: str) -> bool:
+        return await self.get(system_id) is not None
+
+    async def get(self, system_id: str) -> aiosqlite.Row | None:
         async with self._db.conn.execute(
-            "SELECT 1 FROM dm_system_messages WHERE system_id = ?",
+            "SELECT * FROM dm_system_messages WHERE system_id = ?",
             (str(system_id),),
         ) as cur:
-            return await cur.fetchone() is not None
+            return await cur.fetchone()
 
     async def record(self, system_id: str, *, subject: str | None) -> None:
         now = utcnow_iso()
