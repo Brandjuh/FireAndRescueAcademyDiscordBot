@@ -46,7 +46,8 @@ class InboxRow:
     #: link); ``conversation_id`` then holds the SYSTEM id from that href —
     #: a separate id namespace from normal conversations.
     is_system: bool = False
-    #: The inbox date column as shown by the game (e.g. "today").
+    #: The inbox date column, when the layout has one (the verified live
+    #: page currently shows none — then "").
     raw_date: str = ""
 
 
@@ -58,11 +59,37 @@ class ConversationMessage:
 
 
 def parse_inbox(html: str) -> list[InboxRow]:
-    """Conversations on the /messages page. System messages (subject link
-    to ``/messages/system_message/<id>``) are returned too, flagged
-    ``is_system`` and carrying the system id from that href — callers
-    route them to the system-message channel instead of the mirror."""
+    """Conversations AND system messages on the /messages page.
+
+    The live page (verified via `!fra dump /messages`) renders system
+    messages in their OWN panel above the inbox form
+    (``div.system_messages_container``): two cells per row — a "New"
+    marker and the ``/messages/system_message/<id>`` subject link. No
+    checkbox, no sender, no date. They are therefore collected with a
+    PAGE-WIDE link scan, not from the inbox form (which only holds the
+    conversations); flagged ``is_system`` with the id from the href."""
     soup = BeautifulSoup(html or "", "lxml")
+    rows: list[InboxRow] = []
+
+    seen_system: set[str] = set()
+    for link in soup.find_all("a", href=True):
+        system = _SYSTEM_RE.search(str(link.get("href") or ""))
+        if not system or system.group(1) in seen_system:
+            continue
+        seen_system.add(system.group(1))
+        row = link.find_parent("tr")
+        cells = row.find_all("td") if row is not None else []
+        rows.append(
+            InboxRow(
+                conversation_id=system.group(1),
+                sender="",  # the system panel has no sender column
+                subject=_text(link),
+                is_new=any(_text(c).casefold() == "new" for c in cells),
+                is_system=True,
+                raw_date="",  # …and no date column either
+            )
+        )
+
     inbox_form = None
     for form in soup.find_all("form"):
         current_box = form.find("input", attrs={"name": "current_box"})
@@ -70,49 +97,16 @@ def parse_inbox(html: str) -> list[InboxRow]:
             inbox_form = form
             break
     if inbox_form is None:
-        return []
+        return rows
 
-    rows: list[InboxRow] = []
     for row in inbox_form.find_all("tr"):
-        cells = row.find_all("td")
-        if not cells:
-            continue
-        # System rows FIRST and WITHOUT the checkbox requirement: system
-        # messages are not selectable like conversations (no move/delete),
-        # so the live table may render them without a conversations[]
-        # checkbox — requiring one made them invisible. The system link
-        # is matched anywhere in the row (relative or absolute href).
-        system = None
-        system_link = None
-        for link in row.find_all("a", href=True):
-            system = _SYSTEM_RE.search(str(link.get("href") or ""))
-            if system:
-                system_link = link
-                break
-        if system is not None:
-            link_cell = system_link.find_parent("td")
-            link_index = cells.index(link_cell) if link_cell in cells else -1
-            rows.append(
-                InboxRow(
-                    # The href id — its own namespace; a checkbox value
-                    # (when present) is a conversation id and must not be
-                    # used for system messages.
-                    conversation_id=system.group(1),
-                    sender=_text(cells[link_index - 1]) if link_index > 0 else "",
-                    subject=_text(system_link),
-                    is_new=any(_text(c).casefold() == "new" for c in cells),
-                    is_system=True,
-                    raw_date=(
-                        _text(cells[link_index + 1])
-                        if 0 <= link_index < len(cells) - 1 else ""
-                    ),
-                )
-            )
-            continue
+        if row.find("a", href=_SYSTEM_RE):
+            continue  # already collected by the page-wide system scan
         checkbox = row.find("input", attrs={"name": "conversations[]"})
         if not checkbox:
             continue
         conversation_id = str(checkbox.get("value") or "").strip()
+        cells = row.find_all("td")
         if len(cells) < 4 or not conversation_id:
             continue
         subject_link = cells[3].find("a", href=True)

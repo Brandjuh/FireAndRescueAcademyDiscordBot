@@ -17,31 +17,89 @@ from fra_bot.services.dm_mirror import (
 )
 
 INBOX_HTML = """
-<form action="/messages/move_folder">
-  <input type="hidden" name="current_box" value="inbox"/>
-  <table><tbody>
+<div class="panel panel-default">
+  <div class="panel-heading">System messages</div>
+  <div class="panel-body system_messages_container">
+    <table class="table table-condensed table-striped"><tbody>
+      <tr>
+        <td class="system-message-row"><div class="system-message-content">New</div></td>
+        <td class="system-message-row"><div class="system-message-content">
+          <a href="/messages/system_message/5">Daily reward</a>
+        </div></td>
+      </tr>
+    </tbody></table>
+  </div>
+</div>
+<form action="/messages/trash" method="post">
+  <input id="current_box" name="current_box" type="hidden" value="inbox"/>
+  <table class="table table-striped"><tbody>
     <tr>
-      <td><input type="checkbox" name="conversations[]" value="9001"/></td>
+      <td><input class="delete_multiple_checkbox" name="conversations[]" type="checkbox" value="9001"/></td>
       <td>New</td>
-      <td><a href="/profile/111">Alex1129</a></td>
+      <td><a href="/messages/9001">Alex1129</a></td>
       <td><a href="/messages/9001">Question about tax</a></td>
-      <td>today</td>
     </tr>
     <tr>
-      <td><input type="checkbox" name="conversations[]" value="9002"/></td>
+      <td><input class="delete_multiple_checkbox" name="conversations[]" type="checkbox" value="9002"/></td>
       <td></td>
-      <td><a href="/profile/222">4m1rudin</a></td>
+      <td><a href="/messages/9002">4m1rudin</a></td>
       <td><a href="/messages/9002">Reminder: Please set your alliance donation to 5%</a></td>
-      <td>today</td>
-    </tr>
-    <tr>
-      <td><input type="checkbox" name="conversations[]" value="9003"/></td>
-      <td>New</td>
-      <td><a href="/profile/333">System</a></td>
-      <td><a href="/messages/system_message/5">Daily reward</a></td>
-      <td>today</td>
     </tr>
   </tbody></table>
+</form>
+"""
+
+# The verified live layout (from `!fra dump /messages`): system messages
+# in their own panel OUTSIDE the inbox form, two cells per row (a "New"
+# marker + the subject link), no checkbox / sender / date.
+REAL_PAGE_HTML = """
+<ol class="breadcrumb"><li class="active">Inbox</li></ol>
+<div class="panel panel-default ">
+  <div class="panel-heading">System messages</div>
+  <div class="panel-body system_messages_container">
+    <div class="system_messages_content_container" style="max-height: none">
+      <table class="table table-condensed table-striped"><tbody>
+        <tr>
+          <td class="system-message-row"><div class="system-message-content" style="height: 30px">New</div></td>
+          <td class="system-message-row"><div class="system-message-content" style="height: 30px">
+            <a href="/messages/system_message/787">\U0001f6a8Alliance Challenge \U0001f6a8</a>
+          </div></td>
+        </tr>
+        <tr>
+          <td class="system-message-row"><div class="system-message-content" style="height: 30px">New</div></td>
+          <td class="system-message-row"><div class="system-message-content" style="height: 30px">
+            <a href="/messages/system_message/782">\U0001f33b Summer Event Part 2 ☀️</a>
+          </div></td>
+        </tr>
+        <tr>
+          <td class="system-message-row"><div class="system-message-content" style="height: 30px"></div></td>
+          <td class="system-message-row"><div class="system-message-content" style="height: 30px">
+            <a href="/messages/system_message/770">\U0001f31e\U0001f6a8Summer Event\U0001f6a8\U0001f31e</a>
+          </div></td>
+        </tr>
+      </tbody></table>
+    </div>
+  </div>
+</div>
+<form accept-charset="UTF-8" action="/messages/trash" method="post">
+  <input id="current_box" name="current_box" type="hidden" value="inbox" />
+  <table class="table table-striped">
+    <thead><tr><th></th><th></th><th>Sender</th><th>Subject</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><input class="delete_multiple_checkbox" id="" name="conversations[]" type="checkbox" value="240834" /></td>
+        <td></td>
+        <td><a href="/messages/240834">FawnsathBB</a></td>
+        <td><a href="/messages/240834">Reminder: Please set your alliance donation to 5%</a></td>
+      </tr>
+      <tr>
+        <td><input class="delete_multiple_checkbox" id="" name="conversations[]" type="checkbox" value="219650" /></td>
+        <td></td>
+        <td><a href="/alliances/1621">Fire &amp; Rescue Academy</a></td>
+        <td><a href="/messages/219650">Welcome to the Fire &amp; Rescue Academy. PLEASE READ</a></td>
+      </tr>
+    </tbody>
+  </table>
 </form>
 """
 
@@ -93,18 +151,31 @@ COMPOSE_HTML = """
 
 def test_parse_inbox_rows_and_flags_system_messages():
     rows = mailbox.parse_inbox(INBOX_HTML)
-    assert [r.conversation_id for r in rows] == ["9001", "9002", "5"]
-    assert rows[0].sender == "Alex1129" and rows[0].is_new is True
-    assert rows[1].sender == "4m1rudin" and rows[1].is_new is False
-    assert rows[0].subject == "Question about tax"
-    assert [r.is_system for r in rows] == [False, False, True]
-    # The system row's id comes from the href (its own namespace), NOT
-    # from the checkbox value (9003 — a conversation id).
-    system = rows[2]
-    assert system.conversation_id == "5"
+    # Page-wide system scan runs first, then the inbox form.
+    assert [r.conversation_id for r in rows] == ["5", "9001", "9002"]
+    assert [r.is_system for r in rows] == [True, False, False]
+    system = rows[0]
     assert system.subject == "Daily reward"
-    assert system.raw_date == "today"
+    assert system.is_new is True
+    conv = rows[1]
+    assert conv.sender == "Alex1129" and conv.is_new is True
+    assert conv.subject == "Question about tax"
+    assert rows[2].sender == "4m1rudin" and rows[2].is_new is False
     assert mailbox.parse_inbox("<html>no form</html>") == []
+
+
+def test_parse_inbox_matches_the_verified_live_layout():
+    # Regression guard: the REAL page (from `!fra dump /messages`) keeps
+    # system messages in their own panel OUTSIDE the inbox form — the
+    # original parser only walked the form and saw zero of them.
+    rows = mailbox.parse_inbox(REAL_PAGE_HTML)
+    system = [r for r in rows if r.is_system]
+    assert [r.conversation_id for r in system] == ["787", "782", "770"]
+    assert system[0].subject == "\U0001f6a8Alliance Challenge \U0001f6a8"
+    assert [r.is_new for r in system] == [True, True, False]
+    convs = [r for r in rows if not r.is_system]
+    assert [r.conversation_id for r in convs] == ["240834", "219650"]
+    assert convs[1].sender == "Fire & Rescue Academy"
 
 
 SYSTEM_MSG_HTML = """
@@ -601,11 +672,8 @@ async def test_system_message_posts_embed_once_and_never_mirrors(db):
     assert embed.title == "📢 System message — Daily reward"
     assert "daily reward: 500 coins" in embed.description
     assert "System message #5" in embed.footer.text
-    assert "today" in embed.footer.text
-    # It never became a mirrored conversation thread…
+    # It never became a mirrored conversation thread.
     assert all("#5" not in t.name for t in forum.threads)
-    # …and the wrong (checkbox) conversation id 9003 was never fetched.
-    assert all("9003" not in p for p in mc.fetched)
     # Dedupe: the next scan posts nothing new.
     summary = await service.scan()
     assert summary.get("system_posted", 0) == 0
@@ -665,42 +733,18 @@ async def test_failed_system_post_retries_next_scan(db):
 # Live-page tolerance + observability (system messages missing in prod)
 # ---------------------------------------------------------------------------
 
-INBOX_NO_CHECKBOX_HTML = """
-<form action="/messages/move_folder">
-  <input type="hidden" name="current_box" value="inbox"/>
-  <table><tbody>
-    <tr>
-      <td><input type="checkbox" name="conversations[]" value="9001"/></td>
-      <td>New</td>
-      <td><a href="/profile/111">Alex1129</a></td>
-      <td><a href="/messages/9001">Question about tax</a></td>
-      <td>today</td>
-    </tr>
-    <tr>
-      <td></td>
-      <td>New</td>
-      <td>System</td>
-      <td><a href="https://www.missionchief.com/messages/system_message/77">Server maintenance</a></td>
-      <td>yesterday</td>
-    </tr>
-  </tbody></table>
-</form>
-"""
-
-
-def test_parse_inbox_system_row_without_checkbox():
-    # System messages are not selectable like conversations, so the live
-    # table may render them WITHOUT the conversations[] checkbox — the
-    # old parser dropped exactly these rows before the system check. The
-    # href may also be absolute.
-    rows = mailbox.parse_inbox(INBOX_NO_CHECKBOX_HTML)
-    assert [r.conversation_id for r in rows] == ["9001", "77"]
-    system = rows[1]
-    assert system.is_system is True
-    assert system.subject == "Server maintenance"
-    assert system.sender == "System"
-    assert system.raw_date == "yesterday"
-    assert system.is_new is True
+def test_parse_inbox_system_link_variants():
+    # The page-wide scan copes with absolute hrefs, links outside any
+    # table, and duplicates of the same id (posted once).
+    html = """
+    <div class="system_messages_container">
+      <a href="https://www.missionchief.com/messages/system_message/77">Server maintenance</a>
+      <a href="/messages/system_message/77">Server maintenance</a>
+    </div>
+    """
+    rows = mailbox.parse_inbox(html)
+    assert [r.conversation_id for r in rows] == ["77"]
+    assert rows[0].is_system and rows[0].subject == "Server maintenance"
 
 
 async def test_scan_summary_always_reports_system_state(db):
