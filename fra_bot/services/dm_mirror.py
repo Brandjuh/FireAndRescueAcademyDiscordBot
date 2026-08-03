@@ -167,23 +167,50 @@ class DmMirrorService:
         the stored marker. System messages take their own path: an embed
         into the system-message channel, deduped by system id."""
         forum = self.forum()
-        system_channel = self.system_channel()
-        if forum is None and system_channel is None:
+        configured_system = int(
+            getattr(self._cfg.discord.channels, "system_messages", 0) or 0
+        )
+        if forum is None and not configured_system:
             return self._summary(
                 error="DM-mirror forum is not configured — set it with "
                       "`!fra set dm_mirror <forum channel id>`."
             )
         all_rows = await mailbox.fetch_inbox(self._mc)
-        system_posted, system_failed = await self._system_pass(
-            system_channel, [r for r in all_rows if r.is_system]
-        )
+        system_rows = [r for r in all_rows if r.is_system]
         rows = [r for r in all_rows if not r.is_system]
+        system_counts: dict = {}
+        system_warning = None
+        if configured_system:
+            system_channel = self.system_channel()
+            if system_channel is None:
+                # A configured-but-unresolvable channel used to fail in
+                # total silence — exactly the wrong behaviour for a
+                # feature whose whole point is visibility.
+                system_warning = (
+                    f"⚠️ system-message channel {configured_system} is "
+                    "configured but not reachable (wrong id, or the bot "
+                    "lacks access) — nothing was posted"
+                )
+                system_posted, system_failed = 0, len(system_rows)
+            else:
+                system_posted, system_failed = await self._system_pass(
+                    system_channel, system_rows
+                )
+            system_counts = {
+                "system_configured": True,
+                "system_seen": len(system_rows),
+                "system_posted": system_posted,
+                "system_failed": system_failed,
+            }
         if forum is None:
             summary = self._summary(
                 error="DM-mirror forum is not configured — set it with "
                       "`!fra set dm_mirror <forum channel id>`."
             )
-            summary["system_posted"] = system_posted
+            summary.update(system_counts)
+            summary["system_warning"] = system_warning
+            if system_warning:
+                summary["lines"].append(system_warning)
             return summary
         threads_created = mirrored = skipped = failed = 0
         for row in rows:
@@ -209,7 +236,7 @@ class DmMirrorService:
         return self._summary(
             conversations=len(rows), threads_created=threads_created,
             mirrored=mirrored, skipped=skipped, failed=failed,
-            system_posted=system_posted, system_failed=system_failed,
+            system_warning=system_warning, **system_counts,
         )
 
     # ------------------------------------------------------------------
@@ -246,6 +273,10 @@ class DmMirrorService:
                     row.conversation_id, subject=row.subject
                 )
                 posted += 1
+                log.info(
+                    "system message #%s (%s) posted to channel %s",
+                    row.conversation_id, row.subject, channel.id,
+                )
             except (MissionChiefError, discord.HTTPException, ValueError) as exc:
                 failed += 1
                 log.warning(
@@ -507,13 +538,24 @@ class DmMirrorService:
                 if channels.dm_mirror else "not set (`!fra set dm_mirror <id>`)"
             ),
             f"conversations tracked: {await self._repo.count()}",
+            "system messages: "
+            + (
+                f"<#{getattr(channels, 'system_messages', 0)}>"
+                + ("" if self.system_channel() else " (⚠️ not reachable)")
+                + f" · {await self._system.count()} posted so far"
+                if int(getattr(channels, "system_messages", 0) or 0)
+                else "off (`!fra set system_messages <channel id>`)"
+            ),
             f"inbox scan: {'every ' + str(auto.interval) + ' min' if auto.enabled else 'OFF'}",
             "replies from threads: "
             + ("dry-run (NOT sent)" if self._cfg.automation.dry_run else "live"),
         ]
 
     @staticmethod
-    def _summary(*, error: str | None = None, **counts) -> dict:
+    def _summary(
+        *, error: str | None = None, system_warning: str | None = None,
+        **counts,
+    ) -> dict:
         if error:
             return {"error": error, "lines": [error], "changed": False}
         line = (
@@ -522,17 +564,27 @@ class DmMirrorService:
             f"{counts.get('mirrored', 0)} message(s) mirrored, "
             f"{counts.get('skipped', 0)} unchanged, {counts.get('failed', 0)} failed"
         )
-        if counts.get("system_posted") or counts.get("system_failed"):
+        if counts.get("system_configured"):
+            # Always spelled out when the feature is on — "0 seen" (no
+            # system messages in the inbox) must be distinguishable from
+            # a broken channel or a parser miss.
             line += (
-                f"; {counts.get('system_posted', 0)} system message(s) posted"
+                f"; system messages: {counts.get('system_seen', 0)} in the "
+                f"inbox, {counts.get('system_posted', 0)} posted"
                 + (
                     f", {counts.get('system_failed', 0)} failed"
                     if counts.get("system_failed") else ""
                 )
             )
+        lines = [line]
+        if system_warning:
+            lines.append(system_warning)
         changed = bool(
             counts.get("threads_created") or counts.get("mirrored")
             or counts.get("failed") or counts.get("system_posted")
-            or counts.get("system_failed")
+            or counts.get("system_failed") or system_warning
         )
-        return {**counts, "error": None, "lines": [line], "changed": changed}
+        return {
+            **counts, "system_warning": system_warning, "error": None,
+            "lines": lines, "changed": changed,
+        }
