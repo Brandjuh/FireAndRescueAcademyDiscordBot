@@ -103,7 +103,7 @@ class DiscordChannels:
     # In-game SYSTEM messages (the /messages/system_message/<id> entries
     # the DM mirror used to ignore) land here as embeds; 0 = keep
     # ignoring them.
-    system_messages: int = 1421256548977606827
+    system_messages: int = 1434606230998876314
 
 
 @dataclass(frozen=True)
@@ -572,7 +572,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 sanction_panel=int(channels.get("sanction_panel", 0)),
                 member_actions=int(channels.get("member_actions", 0)),
                 system_messages=int(
-                    channels.get("system_messages", 1421256548977606827)
+                    channels.get("system_messages", 1434606230998876314)
                 ),
                 game_sync=int(
                     channels.get("game_sync", 1527609874551410698)

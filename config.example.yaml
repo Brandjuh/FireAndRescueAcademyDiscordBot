@@ -104,7 +104,7 @@ discord:
     # In-game SYSTEM messages (the DM mirror used to ignore these) are
     # posted here as embeds; a role can be pinged above the embed via
     # discord.system_message_role_id. 0 = keep ignoring them.
-    system_messages: 1421256548977606827
+    system_messages: 1434606230998876314
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
   # Role that is always pinged by the eventpinger (Notify-Event).
