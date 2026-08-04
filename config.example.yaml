@@ -181,6 +181,11 @@ automation:
     thread_id: 5935           # /alliance_threads/<id> with training requests
     interval: 5               # poll interval in minutes
     min_contribution_rate: 5.0
+    # Answer a board post in which NO course name was recognized with a
+    # short hint (plus the closest names), instead of ignoring it — a
+    # mistyped course used to vanish without a word. Set to false if the
+    # topic gets chatty enough for the hint to become noise.
+    hint_when_unmatched: true
     # OPTIONAL. The bot already finds every academy of the right discipline
     # from the alliance building list and, if one has no free classroom, moves
     # on to the next — you do NOT need to list academies here. This is only a

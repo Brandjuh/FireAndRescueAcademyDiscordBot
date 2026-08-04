@@ -109,8 +109,8 @@ class TrainingMatch:
     discipline: str
     name: str
     duration_days: int
-    #: Copies of the class requested ("3x HazMat"); the services clamp
-    #: this to their per-request maximum (4).
+    #: Copies of the class requested ("3x HazMat", "x3 HazMat"); the
+    #: services clamp this to their per-request maximum (4).
     count: int = 1
 
 
@@ -127,13 +127,59 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _alias_variants(name: str) -> list[str]:
-    normalized = _normalize(name)
-    variants = [normalized]
+#: Extra accepted spellings per course, keyed by the NORMALIZED catalog
+#: name (so they apply to the live-harvested catalog too).
+#:
+#: Fuzzy matching cannot cover SHORT names: "swot" against "swat" scores
+#: 0.5 — nowhere near MATCH_THRESHOLD — so a member typing the very common
+#: "SWOT" got silence. Typos actually seen on the board therefore get an
+#: explicit entry here, which is exact (score 1.0) and loosens no
+#: threshold. Matcher-side only: ``_normalize``/``normalized_equals`` stay
+#: untouched, so the academy dropdown lookup keeps using the real name.
+#: NB: an alias containing the word "and" can never match — the chunk
+#: splitter in ``match_trainings`` splits on it.
+COURSE_ALIASES: dict[str, tuple[str, ...]] = {
+    "swat": ("SWOT", "S.W.A.T."),
+}
+
+
+def _strip_suffixes(variant: str) -> list[str]:
+    out = [variant]
     for suffix in (" training", " course", " certification", " certificate"):
-        if normalized.endswith(suffix):
-            variants.append(normalized[: -len(suffix)].strip())
-    return [v for v in variants if v]
+        if variant.endswith(suffix):
+            out.append(variant[: -len(suffix)].strip())
+    return out
+
+
+def _match_variants(name: str) -> list[tuple[str, bool]]:
+    """``(variant, exact_only)`` spellings to test a chunk against.
+
+    The course's own name (and its suffix-stripped forms) goes through the
+    full scoring ladder — substring and fuzzy included, so typos of long
+    names still land. Entries from :data:`COURSE_ALIASES` are marked
+    ``exact_only``: they are alternative SPELLINGS, not fuzz seeds. A
+    4-letter alias like "swot" would otherwise match inside longer words
+    through the substring branch ("swotting").
+    """
+    normalized = _normalize(name)
+    pairs: list[tuple[str, bool]] = [
+        (variant, False) for variant in _strip_suffixes(normalized)
+    ]
+    for alias in COURSE_ALIASES.get(normalized, ()):
+        pairs.extend(
+            (variant, True) for variant in _strip_suffixes(_normalize(alias))
+        )
+    seen: set[str] = set()
+    ordered: list[tuple[str, bool]] = []
+    for variant, exact_only in pairs:
+        if variant and variant not in seen:
+            seen.add(variant)
+            ordered.append((variant, exact_only))
+    return ordered
+
+
+def _alias_variants(name: str) -> list[str]:
+    return [variant for variant, _ in _match_variants(name)]
 
 
 def ambiguous_names(catalog=None) -> dict[str, tuple[str, ...]]:
@@ -160,20 +206,32 @@ def _detect_prefix(chunk: str) -> tuple[str | None, str]:
     return None, chunk
 
 
-_COUNT_PREFIX_RE = re.compile(r"^\s*(\d+)\s*[x×]\s+", re.IGNORECASE)
+#: Both orders of the leading copy count. Members write "x4 SWAT" at
+#: least as often as "4x SWAT"; the x-first form used to fall through
+#: with count=1 while the leftover "x4 " still matched the course name on
+#: a word boundary — so the request silently opened ONE class.
+_COUNT_PREFIX_RE = re.compile(
+    r"^\s*(?:(\d+)\s*[x×]|[x×]\s*(\d+))\s+", re.IGNORECASE
+)
 _COUNT_SUFFIX_RE = re.compile(r"\s+[x×]\s*(\d+)\s*$", re.IGNORECASE)
 #: Board copy-count cap — mirrors the services' MAX_CLASSES_PER_REQUEST.
 _MAX_COUNT = 4
 
 
+def _clamp_count(raw: str) -> int:
+    return max(1, min(_MAX_COUNT, int(raw)))
+
+
 def _extract_count(chunk: str) -> tuple[str, int]:
-    """Split a copy count off a chunk: "3x HazMat" / "HazMat x3" → 3."""
+    """Split a copy count off a chunk: "3x HazMat" / "x3 HazMat" /
+    "HazMat x3" → 3. A bare leading number ("3 HazMat") is deliberately
+    NOT a count: course text carries stray numbers too."""
     match = _COUNT_PREFIX_RE.match(chunk)
     if match:
-        return chunk[match.end():], max(1, min(_MAX_COUNT, int(match.group(1))))
+        return chunk[match.end():], _clamp_count(match.group(1) or match.group(2))
     match = _COUNT_SUFFIX_RE.search(chunk)
     if match:
-        return chunk[: match.start()], max(1, min(_MAX_COUNT, int(match.group(1))))
+        return chunk[: match.start()], _clamp_count(match.group(1))
     return chunk, 1
 
 
@@ -211,7 +269,7 @@ def match_trainings(
                 is_ambiguous = (
                     forced_discipline is None and _normalize(name) in ambiguous
                 )
-                for variant in _alias_variants(name):
+                for variant, exact_only in _match_variants(name):
                     compact = variant.replace(" ", "")
                     score = 0.0
                     if re.search(rf"\b{re.escape(variant)}\b", normalized_chunk) or (
@@ -219,6 +277,10 @@ def match_trainings(
                         and re.search(rf"\b{re.escape(compact)}\b", normalized_chunk)
                     ):
                         score = 1.0
+                    elif exact_only:
+                        # A known alternative spelling only counts when it
+                        # stands as a whole word — never as a fuzz seed.
+                        continue
                     elif variant in normalized_chunk or normalized_chunk in variant:
                         score = max(
                             0.88,
@@ -265,6 +327,49 @@ def match_trainings(
     for match in matches.values():
         ambiguities.pop(_normalize(match.name), None)
     return list(matches.values()), list(ambiguities.values())
+
+
+#: Suggestion-only floor, deliberately far below MATCH_THRESHOLD: a
+#: near-miss is worth naming in a board hint ("did you mean …?") but must
+#: never open a class by itself.
+SUGGEST_THRESHOLD = 0.45
+
+
+def suggest_courses(text: str, catalog=None, *, limit: int = 3) -> list[str]:
+    """Closest course names for text that matched NOTHING — used purely to
+    make the board hint helpful. Never opens anything."""
+    normalized = _normalize(text)
+    if not normalized:
+        return []
+    scored: list[tuple[float, str]] = []
+    for trainings in (catalog or DISCIPLINES).values():
+        for name in trainings:
+            best = max(
+                SequenceMatcher(None, variant, normalized).ratio()
+                for variant in _alias_variants(name)
+            )
+            # Also score against each word, so one wrong word in a longer
+            # post still surfaces the course the member meant.
+            for word in normalized.split():
+                if len(word) < 3:
+                    continue
+                best = max(
+                    best,
+                    max(
+                        SequenceMatcher(None, variant, word).ratio()
+                        for variant in _alias_variants(name)
+                    ),
+                )
+            if best >= SUGGEST_THRESHOLD:
+                scored.append((best, name))
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    out: list[str] = []
+    for _, name in scored:
+        if name not in out:
+            out.append(name)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def normalized_equals(a: str, b: str) -> bool:

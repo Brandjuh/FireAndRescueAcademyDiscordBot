@@ -36,6 +36,7 @@ from ..mc.trainings_catalog import (
     AmbiguousMatch,
     TrainingMatch,
     match_trainings,
+    suggest_courses,
 )
 from .board_requests import BoardRequestService
 
@@ -646,6 +647,31 @@ class TrainingsService(BoardRequestService):
             },
         )
 
+    async def _on_unmatched_post(self, post: BoardPost) -> None:
+        """Answer a post in which NO course name was recognized.
+
+        Members used to get complete silence here: a mistyped course (the
+        live case was "SWOT") produced no request, no reply and no log —
+        the post just vanished. One short hint, once per post, with the
+        closest names when we can name them. Switchable per board via
+        ``automation.training.hint_when_unmatched`` for when the topic
+        turns chatty."""
+        if not self._auto.hint_when_unmatched:
+            return
+        if not re.search(r"[a-z]", post.content or "", re.IGNORECASE):
+            return  # emoji/punctuation only — nothing to be helpful about
+        catalog = await merged_course_catalog(self.state)
+        suggestions = suggest_courses(post.content, catalog)
+        lines = [
+            f"Training request not recognized for {post.author_name or 'member'}.",
+            "",
+            "No known course name was found in this post. The guide posts "
+            "above list the exact names to use.",
+        ]
+        if suggestions:
+            lines.append("Did you mean: " + ", ".join(suggestions) + "?")
+        await self.reply("\n".join(lines))
+
     async def execute_request(self, request, *, announce: bool) -> None:
         payload = json.loads(request["payload"] or "{}")
 
@@ -1246,15 +1272,15 @@ def _overview_guide(min_rate: float) -> str:
         "- Type one or more training names from the agency posts below.",
         "- You can request multiple classes in one post, one per line or "
         "separated by commas.",
-        "- Want several copies of one course? Prefix a count: 3x HazMat "
-        "(maximum 4 per request).",
+        "- Want several copies of one course? Add a count: x2 SWAT, 2x SWAT "
+        f"or SWAT x2 (maximum {MAX_CLASSES_PER_REQUEST} per request).",
         "- Small typos are supported, but the exact names below work best.",
         "- Some trainings exist in more than one academy type. For those, use "
         "the prefixed text shown in the agency posts.",
         "- Example: use Fire Station - Lifeguard Training or Water Rescue - "
         "Lifeguard Training, not only Lifeguard Training.",
-        "- Requests are opened as free alliance classes, 1 class per "
-        "recognized training.",
+        "- Requests are opened as free alliance classes — one class per copy "
+        "you asked for.",
         "- A class stays open to the whole alliance for 1 hour to join.",
         f"- If your alliance contribution is below {min_rate:g}%, the class "
         "will not be opened automatically.",
@@ -1270,6 +1296,7 @@ def _overview_guide(min_rate: float) -> str:
         "",
         "[b]Examples[/b]",
         "HazMat",
+        "x2 SWAT",
         "SWAT, K-9",
         "Fire Station - Lifeguard Training",
         "Water Rescue - Lifeguard Training",
