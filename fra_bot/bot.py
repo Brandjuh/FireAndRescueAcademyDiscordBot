@@ -163,6 +163,11 @@ class FRABot(commands.Bot):
         from .services.dm_mirror import DmMirrorService
 
         self.dm_mirror = DmMirrorService(cfg, self.mc, self.db, self)
+        # Outage watcher: turns the traffic the bot already makes into the
+        # two messages members care about — the game is down / it is back.
+        from .services.mc_status import MissionChiefStatusService
+
+        self.mc_status = MissionChiefStatusService(cfg, self.mc, self.db, self)
         # Sent tax warnings mirror into the DM forum at send time (like the
         # reference bot): outgoing-only conversations live in the game's
         # SENT box and may never show on the inbox page the scan reads.
@@ -680,6 +685,17 @@ class FRABot(commands.Bot):
                 name="dm-mirror",
                 initial_delay_seconds=240.0,
             )
+        # MissionChief outage watcher: ALWAYS registered — the switch is
+        # read live per pass, and a watcher you have to restart the bot to
+        # enable is useless exactly when the game is already down. Makes no
+        # MissionChief request itself; it only reads what the other jobs'
+        # traffic recorded.
+        sched.add_interval_job(
+            self._guarded(self._mc_status_pass, "mc-status"),
+            minutes=2,
+            name="mc-status",
+            initial_delay_seconds=150.0,
+        )
         # Member tax (5% donation) warnings: escalating in-game PMs, reset
         # the moment a member fixes their donation. Every action lands in
         # the admin channel.
@@ -800,6 +816,15 @@ class FRABot(commands.Bot):
         keeper = self.get_cog("PanelKeeperCog")
         if keeper is not None:
             await keeper.ensure("classes")
+
+    async def _mc_status_pass(self) -> None:
+        """Announce a MissionChief outage / recovery to members, and mirror
+        the transition into the admin log. Local-state only: no game
+        request, so it keeps working while the circuit breaker holds all
+        traffic — which is precisely when an outage is running."""
+        line = await self.mc_status.check()
+        if line:
+            await self.notify_admin(line)
 
     async def _dm_mirror_pass(self) -> None:
         """One DM inbox scan; only errors are surfaced to the admin channel

@@ -36,6 +36,7 @@ from bs4 import BeautifulSoup
 from ..config import MissionChiefConfig
 from ..core.pacing import HumanPacer
 from .errors import FetchError, LoginError, SessionExpiredError
+from .health import MissionChiefHealth
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +74,10 @@ class MissionChiefClient:
         self._pacer = pacer
         self._session: aiohttp.ClientSession | None = None
         self._login_lock = asyncio.Lock()
+        #: Reachability of the site itself — every request below reports
+        #: into it, so the status service can tell "the game is down"
+        #: apart from "we were refused" or "the bot is idle".
+        self.health = MissionChiefHealth()
 
     @property
     def pacer_backlog(self) -> int:
@@ -195,9 +200,17 @@ class MissionChiefClient:
 
             await self._pacer.wait_turn()
             sign_in_url = self.url(SIGN_IN_PATH)
-            async with self.session.get(sign_in_url, allow_redirects=True) as resp:
-                html = await resp.text()
-                landed_on = str(resp.url)
+            try:
+                async with self.session.get(sign_in_url, allow_redirects=True) as resp:
+                    html = await resp.text()
+                    landed_on = str(resp.url)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                # A site that fails at login time is exactly the outage the
+                # status service reports — record it before the error leaves
+                # (booting into an outage must still be recognised as one).
+                self.health.note_unreachable(type(exc).__name__)
+                raise
+            self.health.note_reachable()
 
             if SIGN_IN_PATH not in landed_on and self._looks_logged_in(landed_on, html):
                 # Persistent cookie was still valid; nothing to do.
@@ -223,13 +236,18 @@ class MissionChiefClient:
             fields.setdefault("user[remember_me]", "1")
 
             await self._pacer.wait_turn()
-            async with self.session.post(
-                action_url,
-                data=fields,
-                allow_redirects=True,
-                headers={"Referer": sign_in_url},
-            ) as resp:
-                await resp.text()
+            try:
+                async with self.session.post(
+                    action_url,
+                    data=fields,
+                    allow_redirects=True,
+                    headers={"Referer": sign_in_url},
+                ) as resp:
+                    await resp.text()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                self.health.note_unreachable(type(exc).__name__)
+                raise
+            self.health.note_reachable()
 
             # Devise renders the sign-in form again with HTTP 200 on bad
             # credentials, so verify with a separate authenticated GET.
@@ -285,6 +303,12 @@ class MissionChiefClient:
 
                 if status == 429 or status >= 500:
                     self._pacer.record_failure()
+                    # 429 means the SITE answered and throttled us — that
+                    # is not an outage. Only 5xx is the site failing.
+                    if status >= 500:
+                        self.health.note_unreachable(f"HTTP {status}")
+                    else:
+                        self.health.note_reachable()
                     delay = _parse_retry_after(retry_after) or min(
                         5.0 * (2**attempt), 60.0
                     )
@@ -297,6 +321,9 @@ class MissionChiefClient:
 
                 if status >= 400:
                     self._pacer.record_failure()
+                    # A 4xx is a refusal, not a dead site: the server
+                    # answered, so it counts as reachable.
+                    self.health.note_reachable()
                     raise FetchError(target, status)
 
                 if SIGN_IN_PATH in final_url:
@@ -311,6 +338,7 @@ class MissionChiefClient:
                     continue
 
                 self._pacer.record_success()
+                self.health.note_reachable()
                 return html
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -319,6 +347,7 @@ class MissionChiefClient:
                 # here a slow page would skip the retry/backoff path (and the
                 # pacer's failure bookkeeping) and crash the calling job.
                 self._pacer.record_failure()
+                self.health.note_unreachable(type(exc).__name__)
                 delay = min(5.0 * (2**attempt), 60.0)
                 log.warning(
                     "Network error fetching %s (attempt %d/%d): %s — retrying in %.1fs",
@@ -385,6 +414,7 @@ class MissionChiefClient:
             # verification paths key on — a bare TimeoutError would bypass
             # them straight into the generic failure handlers.
             self._pacer.record_failure()
+            self.health.note_unreachable(type(exc).__name__)
             raise FetchError(target, message=f"POST to {target} failed: {exc}") from exc
 
         # Session expiry shows up either as a followed redirect ending on
@@ -395,8 +425,13 @@ class MissionChiefClient:
             raise SessionExpiredError(f"POST to {target} redirected to sign-in")
         if status >= 400:
             self._pacer.record_failure()
+            if status >= 500:
+                self.health.note_unreachable(f"HTTP {status}")
+            else:
+                self.health.note_reachable()
         else:
             self._pacer.record_success()
+            self.health.note_reachable()
         return status, html, final_url
 
     async def verify_session(self) -> bool:
