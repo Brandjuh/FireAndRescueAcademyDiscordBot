@@ -1602,6 +1602,12 @@ class AdminCog(commands.Cog):
             content=f"✅ Adopted {adopted} post(s). Content refreshes on the next sync."
         )
 
+    @fra.command(name="mcstatus", aliases=["gamestatus"])
+    async def mc_status(self, ctx: commands.Context) -> None:
+        """What the outage watcher currently believes about MissionChief."""
+        lines = await self.bot.mc_status.status_lines()
+        await ctx.send("🌐 **MissionChief status**\n" + "\n".join(lines)[:1900])
+
     @fra.group(name="dmmirror", aliases=["dms", "dmirror"], invoke_without_command=True)
     async def dm_mirror_group(self, ctx: commands.Context) -> None:
         """In-game DM mirror status. `!fra dmmirror scan` runs an inbox

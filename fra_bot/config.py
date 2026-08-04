@@ -104,6 +104,9 @@ class DiscordChannels:
     # the DM mirror used to ignore) land here as embeds; 0 = keep
     # ignoring them.
     system_messages: int = 1434606230998876314
+    # "MissionChief looks down" / "it is back" notices for members;
+    # 0 = no outage announcements.
+    mc_status: int = 543935264708362251
 
 
 @dataclass(frozen=True)
@@ -271,6 +274,21 @@ class TaxWarningsConfig:
 
 
 @dataclass(frozen=True)
+class MissionChiefStatusConfig:
+    """Tell members when MissionChief itself is down, and when it is back.
+
+    The bot talks to the game every few minutes, so it notices an outage
+    long before anyone reports it. Only site-is-down signals count (5xx,
+    connection errors, timeouts) — a 4xx, rate limiting or a sign-in
+    redirect proves the server answered. ``outage_minutes`` is the
+    patience before the notice: below it, a hiccup or a game deploy never
+    reaches the channel. The notices go to
+    ``discord.channels.mc_status``; each transition is announced once."""
+    enabled: bool = True
+    outage_minutes: int = 15
+
+
+@dataclass(frozen=True)
 class SanctionsConfig:
     """Sanction manager (reference bot: sanctionmanager, rebuilt).
 
@@ -360,6 +378,7 @@ class AutomationConfig:
     chat: ChatBridgeConfig
     sanctions: SanctionsConfig
     welcome: WelcomeConfig
+    mc_status: MissionChiefStatusConfig
 
 
 DEFAULT_WELCOME_MESSAGE = (
@@ -579,6 +598,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 system_messages=int(
                     channels.get("system_messages", 1434606230998876314)
                 ),
+                mc_status=int(channels.get("mc_status", 543935264708362251)),
                 game_sync=int(
                     channels.get("game_sync", 1527609874551410698)
                 ),
@@ -781,6 +801,15 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                     _get(raw, "automation", "welcome", "message",
                          default=DEFAULT_WELCOME_MESSAGE)
                 ) or DEFAULT_WELCOME_MESSAGE,
+            ),
+            mc_status=MissionChiefStatusConfig(
+                enabled=bool(
+                    _get(raw, "automation", "mc_status", "enabled", default=True)
+                ),
+                outage_minutes=max(1, int(
+                    _get(raw, "automation", "mc_status", "outage_minutes",
+                         default=15)
+                )),
             ),
             sanctions=SanctionsConfig(
                 game_log_review_enabled=bool(

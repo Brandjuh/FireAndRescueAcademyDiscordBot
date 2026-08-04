@@ -105,6 +105,9 @@ discord:
     # posted here as embeds; a role can be pinged above the embed via
     # discord.system_message_role_id. 0 = keep ignoring them.
     system_messages: 1434606230998876314
+    # "MissionChief looks down" / "MissionChief is back" notices for
+    # members (see automation.mc_status). 0 = no outage announcements.
+    mc_status: 543935264708362251
   # Role ids allowed to use admin commands (besides server administrators).
   admin_role_ids: []
   # Role that is always pinged by the eventpinger (Notify-Event).
@@ -156,6 +159,16 @@ automation:
     # who join afterwards.
     enabled: true
     message: "@{name} Welcome! Please check your DM for more information."
+  mc_status:
+    # Tell members in discord.channels.mc_status when MissionChief itself
+    # is unreachable, and again when it is back (with how long it lasted).
+    # Only site-is-down signals count (5xx, connection errors, timeouts);
+    # a 4xx, rate limiting or a sign-in redirect proves the site answered.
+    # outage_minutes is the patience before announcing — below it a hiccup
+    # or a game deploy never reaches the channel. Each transition is
+    # announced once and survives a bot restart.
+    enabled: true
+    outage_minutes: 15
   sanctions:
     # Sanction manager (!sanction add/list/stats/revoke + game-log review).
     # A Mute sanction sets the REAL in-game chat ban once
