@@ -121,6 +121,15 @@ class BoardRequestService:
         """
         raise NotImplementedError
 
+    async def _on_unmatched_post(self, post: BoardPost) -> None:
+        """A fresh member post that :meth:`parse_request` rejected.
+
+        Default: do nothing — a post that matches nothing is chatter, and
+        the reference bot never answered chatter. Overridden where the
+        silence is worse than the noise (the training board, where a
+        mistyped course name used to vanish without a word)."""
+        return None
+
     async def execute_request(self, request: aiosqlite.Row, *, announce: bool) -> None:
         """Drive a claimed request to a terminal or 'waiting' state.
 
@@ -308,7 +317,7 @@ class BoardRequestService:
 
                 # Atomic: mark the post seen and (if it's a request)
                 # create its 'pending' row together.
-                _, request_id = await self.requests.record_post_and_request(
+                post_was_new, request_id = await self.requests.record_post_and_request(
                     self.thread_id,
                     {
                         "post_id": post.post_id,
@@ -322,6 +331,18 @@ class BoardRequestService:
                 )
                 if request_id is not None:
                     detected += 1
+                elif post_was_new and not baseline and not is_own and not is_bot_reply:
+                    # A member post we could not turn into a request. The
+                    # post is recorded (so this fires exactly once) and the
+                    # subclass decides whether silence is right: chatter is
+                    # ignored by default, trainings answer with a hint.
+                    try:
+                        await self._on_unmatched_post(post)
+                    except Exception:
+                        log.exception(
+                            "%s: unmatched-post hook failed for post %s",
+                            self.kind, post.post_id,
+                        )
             except Exception:
                 log.exception(
                     "%s: error detecting post %s (left unrecorded, will retry)",

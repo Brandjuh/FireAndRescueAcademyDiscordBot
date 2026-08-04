@@ -143,6 +143,11 @@ class TrainingAutomationConfig:
     interval: int
     min_contribution_rate: float
     preferred_academies: dict[str, int]
+    #: Answer a board post in which no course name was recognized with a
+    #: short hint (plus the closest names) instead of ignoring it. On by
+    #: default: a mistyped course used to disappear without a word. Turn
+    #: it off if the topic gets chatty enough for the hint to be noise.
+    hint_when_unmatched: bool = True
 
 
 @dataclass(frozen=True)
@@ -623,6 +628,10 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                         or {}
                     ).items()
                 },
+                hint_when_unmatched=bool(
+                    _get(raw, "automation", "training", "hint_when_unmatched",
+                         default=True)
+                ),
             ),
             building=BuildingAutomationConfig(
                 enabled=bool(_get(raw, "automation", "building", "enabled", default=False)),

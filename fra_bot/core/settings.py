@@ -155,6 +155,8 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("automation.training.interval", "int", False, "Training poll interval (min)", minimum=2),
     Setting("automation.training.min_contribution_rate", "float", True,
             "Minimum contribution %% for training requests", minimum=0, maximum=100),
+    Setting("automation.training.hint_when_unmatched", "bool", True,
+            "Reply on the training board when no course name is recognized"),
     Setting("automation.building.enabled", "bool", True, "Building auto-build"),
     Setting("automation.building.thread_id", "int", True, "Building board thread"),
     Setting("automation.building.interval", "int", False, "Building poll interval (min)", minimum=2),

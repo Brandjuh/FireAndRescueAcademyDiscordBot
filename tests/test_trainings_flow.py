@@ -43,15 +43,16 @@ async def db(tmp_path):
     await database.close()
 
 
-def _cfg(dry_run):
+def _cfg(dry_run, *, reply_to_board=False, hint_when_unmatched=True):
     return SimpleNamespace(
         automation=SimpleNamespace(
             dry_run=dry_run,
-            reply_to_board=False,
+            reply_to_board=reply_to_board,
             training=SimpleNamespace(
                 enabled=True, thread_id=5935, interval=5,
                 min_contribution_rate=5.0,
                 preferred_academies={"fire": 4951748},
+                hint_when_unmatched=hint_when_unmatched,
             ),
         )
     )
@@ -1213,3 +1214,130 @@ async def test_board_gate_fails_closed_on_missing_or_unknown_rate(db):
     assert row["status"] == "waiting"
     assert "not on the stored roster" in row["status_detail"]
     assert row["attempts"] == 1 and row["next_attempt_at"] is not None
+
+
+# -- unmatched board posts: a hint instead of silence -----------------------
+
+class _ReplyBoard(_SeqBoard):
+    """_SeqBoard that also records the bot's own replies. Guide upkeep runs
+    for real here (it only runs with reply_to_board on), so the guide calls
+    are stubbed — and kept OUT of ``replies``."""
+
+    def __init__(self):
+        super().__init__()
+        self.replies: list[str] = []
+        self.guide_posts: list[str] = []
+
+    async def post_reply(self, thread_id, content):
+        self.replies.append(content)
+        return True
+
+    async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+        return None
+
+    async def find_bot_posts(self, thread_id, markers, *, max_pages=None):
+        return {m: 100 + i for i, m in enumerate(markers)}
+
+    async def create_post_get_id(self, thread_id, content):
+        self.guide_posts.append(content)
+        return 77
+
+    async def edit_post(self, post_id, content):
+        return True
+
+
+def _hint_service(db, **cfg_kwargs):
+    svc, _ = _service(db, dry_run=True)
+    cfg = _cfg(True, reply_to_board=True, **cfg_kwargs)
+    svc.cfg = cfg
+    svc._auto = cfg.automation.training
+    board = _ReplyBoard()
+    svc.board = board
+    return svc, board
+
+
+async def _post(board, svc, *, content, post_id=101, author="Bob", mc_id=7):
+    board.posts.append(SimpleNamespace(
+        post_id=post_id, author_name=author, author_mc_id=mc_id,
+        raw_timestamp="t", content=content,
+    ))
+    await svc.poll()
+
+
+async def test_unrecognized_post_gets_a_hint_with_suggestions(db):
+    """The live failure: 'X2 SWOT' produced no request, no reply and no log
+    — the member simply never heard back. Now an unmatched post is answered
+    once, with the closest course names when we can name them."""
+    svc, board = _hint_service(db)
+    await svc.poll()                                   # baseline (empty)
+    await _post(board, svc, content="x2 Advanced Sandwich Making")
+
+    assert len(board.replies) == 1
+    assert "not recognized" in board.replies[0]
+    assert "Bob" in board.replies[0]
+    # Recorded, so the next poll never repeats the hint.
+    await svc.poll()
+    assert len(board.replies) == 1
+
+
+async def test_hint_names_the_course_the_member_probably_meant(db):
+    # Close enough to name (the suggestion floor is far below the match
+    # threshold), far enough that the matcher itself refuses to guess.
+    svc, board = _hint_service(db)
+    await svc.poll()
+    await _post(board, svc, content="hazmad course")
+    assert "Did you mean" in board.replies[0]
+    assert "HazMat" in board.replies[0]
+    assert await svc.requests.recent() == []           # still no request
+
+
+async def test_recognized_post_gets_no_hint(db):
+    svc, board = _hint_service(db)
+    await svc.poll()
+    await _post(board, svc, content="X2 SWOT")         # matches SWAT now
+    assert not any("not recognized" in r for r in board.replies)
+    rows = await svc.requests.recent()
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload"])
+    assert payload["trainings"] == [{
+        "discipline": "police", "name": "SWAT", "duration": 5, "count": 2,
+    }]
+
+
+async def test_hint_can_be_switched_off(db):
+    svc, board = _hint_service(db, hint_when_unmatched=False)
+    await svc.poll()
+    await _post(board, svc, content="total nonsense here")
+    assert board.replies == []
+
+
+async def test_hint_skips_the_baseline_pass_and_bot_replies(db):
+    """History must not be answered retroactively, and the bot must never
+    reply to its own [FRA] posts (that would loop)."""
+    svc, board = _hint_service(db)
+    board.posts.append(SimpleNamespace(
+        post_id=50, author_name="Old", author_mc_id=7,
+        raw_timestamp="t", content="ancient chatter",
+    ))
+    await svc.poll()                                   # baseline: records only
+    assert board.replies == []
+
+    await _post(board, svc, post_id=51,
+                content="[FRA] Training request processed for Alice.")
+    assert board.replies == []
+
+
+async def test_guide_documents_every_accepted_count_form():
+    """The guide is the ONLY place members learn the syntax; it must match
+    what the parser accepts (it used to show 3x only, while the board is
+    full of x2), and must not claim one class per training now that copies
+    are honoured."""
+    from fra_bot.mc.trainings_catalog import match_trainings
+    from fra_bot.services.trainings import _overview_guide
+
+    guide = _overview_guide(5.0)
+    for form in ("x2 SWAT", "2x SWAT", "SWAT x2"):
+        assert form in guide, form
+        matches, _ = match_trainings(form)
+        assert [(m.name, m.count) for m in matches] == [("SWAT", 2)], form
+    assert "1 class per recognized training" not in guide

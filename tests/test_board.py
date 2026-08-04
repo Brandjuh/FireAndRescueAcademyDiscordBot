@@ -4,7 +4,11 @@ from fra_bot.mc.parsers.academy import (
     parse_alliance_buildings_page,
 )
 from fra_bot.mc.parsers.board import parse_board_thread_page
-from fra_bot.mc.trainings_catalog import ambiguous_names, match_trainings
+from fra_bot.mc.trainings_catalog import (
+    ambiguous_names,
+    match_trainings,
+    suggest_courses,
+)
 from fra_bot.services.buildings import detect_building_type
 
 BOARD_HTML = """
@@ -357,6 +361,67 @@ def test_copy_counts_parse_and_cap():
         "3x technical rescue training\n3x technical rescue training", live
     )
     assert matches[0].count == 4
+
+
+def test_copy_count_accepts_the_x_first_form():
+    # Members write "x4 SWAT" at least as often as "4x SWAT". The x-first
+    # form used to fall through with count=1 while the leftover "x4 "
+    # still matched the name — so the request opened ONE class.
+    for text, expected in (
+        ("x4 SWAT", 4),
+        ("X2 SWAT", 2),          # capital X, as posted on the live board
+        ("×2 SWAT", 2),          # unicode multiplication sign
+        ("x4 SWAT (5 days)", 4),  # the "(N days)" label members copy along
+        ("x9 SWAT", 4),          # capped at the per-request maximum
+        ("4x SWAT", 4),          # the old form still works
+        ("SWAT x3", 3),
+        ("SWAT", 1),
+    ):
+        matches, _ = match_trainings(text)
+        assert [(m.name, m.count) for m in matches] == [("SWAT", expected)], text
+
+
+def test_copy_count_leaves_ambiguous_text_alone():
+    # A bare leading number is NOT a count (course text carries stray
+    # numbers), and a lone count with no course must not match anything.
+    matches, _ = match_trainings("4 SWAT")
+    assert [(m.name, m.count) for m in matches] == [("SWAT", 1)]
+    assert match_trainings("X2") == ([], [])
+    # A discipline prefix still resolves in front of the count.
+    matches, _ = match_trainings("Water Rescue - x2 Lifeguard Training")
+    assert [(m.discipline, m.name, m.count) for m in matches] == [
+        ("coastal", "Lifeguard Training", 2)
+    ]
+
+
+def test_known_typos_match_through_the_alias_table():
+    # "swot" vs "swat" scores 0.5 — far below the fuzz threshold — so the
+    # live board typo needs an explicit alias. This is the exact post that
+    # was ignored: count and course both have to land.
+    matches, _ = match_trainings("X2 SWOT")
+    assert [(m.discipline, m.name, m.count) for m in matches] == [
+        ("police", "SWAT", 2)
+    ]
+    matches, _ = match_trainings("S.W.A.T.")
+    assert [(m.name, m.count) for m in matches] == [("SWAT", 1)]
+
+
+def test_aliases_do_not_loosen_matching_for_unknown_courses():
+    # The alias table is exact-match sugar, not a lower threshold: an
+    # unknown course must still match nothing at all.
+    assert match_trainings("swotting for exams") == ([], [])
+    assert match_trainings("rope rescue training") == ([], [])
+
+
+def test_suggest_courses_names_near_misses_only():
+    assert "SWAT" in suggest_courses("swot")
+    assert "HazMat" in suggest_courses("hazmatt please")
+    assert suggest_courses("thanks guys") == []
+    assert suggest_courses("") == []
+    # Suggestions come from the live catalog when one is given.
+    assert suggest_courses("technical rescu", {"fire": {"Technical Rescue Training": 4}}) == [
+        "Technical Rescue Training"
+    ]
 
 
 def test_typo_tolerance_survives_the_stricter_fuzz():
