@@ -109,9 +109,24 @@ def _static_days(discipline, name):
 
 
 async def merged_course_catalog(state):
-    """Courses per agency for the Discord chooser: the live-harvested list
-    where one exists (it is what the academies actually offer right now),
-    the built-in catalog for agencies without a harvest yet."""
+    """Courses per agency: the built-in catalog PLUS whatever the live
+    harvest has seen.
+
+    The harvest used to REPLACE an agency's list, on the reasoning that
+    the academies' education dropdowns are what the game really offers.
+    They are — but only for the academies that were readable on that walk,
+    and only for what their dropdown showed at that moment. One fire
+    academy whose dropdown didn't carry HazMat was enough to make the
+    board answer a plain "Hazmat" post with "no known course name was
+    found in this post".
+
+    So the harvest ADDS courses (which is what it was for: the game keeps
+    introducing them) and refreshes durations it actually observed, while
+    the built-in catalog is a floor a partial walk can never cut into. A
+    course the game has genuinely retired lingers as a name that fails at
+    open time with a real reason — far cheaper than refusing a valid
+    request on the board.
+    """
     merged = {key: dict(DISCIPLINES.get(key, {})) for key in _AGENCY_ORDER}
     raw = await state.get(TRAINING_COURSES_STATE_KEY)
     if not raw:
@@ -125,8 +140,14 @@ async def merged_course_catalog(state):
         return merged
     for key in _AGENCY_ORDER:
         live = courses.get(key)
-        if isinstance(live, dict) and live:
-            merged[key] = {str(n): int(d or 0) for n, d in live.items()}
+        if not isinstance(live, dict):
+            continue
+        for name, days in live.items():
+            name, days = str(name), int(days or 0)
+            # A harvested 0 means the dropdown carried no duration; it
+            # must not erase one the catalog already knows.
+            if days or name not in merged[key]:
+                merged[key][name] = days
     return merged
 
 # Display order + labels for the per-agency guide posts (the reference bot's

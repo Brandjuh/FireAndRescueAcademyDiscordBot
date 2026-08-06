@@ -825,7 +825,7 @@ async def test_saved_mission_names_empty_without_cache(db):
 # Training chooser: live course list + pagination past Discord's 25-option cap
 # ---------------------------------------------------------------------------
 
-async def test_courses_for_prefers_the_live_harvest(db):
+async def test_courses_for_adds_the_live_harvest_to_the_catalogue(db):
     from fra_bot.db.repos import StateRepo
     from fra_bot.services.trainings import TRAINING_COURSES_STATE_KEY
 
@@ -837,9 +837,10 @@ async def test_courses_for_prefers_the_live_harvest(db):
     try:
         fire = dict(await cog.courses_for("fire"))
         assert "Brand-New Course" in fire
-        # The live list is authoritative: a built-in course absent from the
-        # harvest is NOT shown.
-        assert "Technical Rescue Training" not in fire
+        # The harvest ADDS what the game introduced; it never removes a
+        # built-in course. One academy's dropdown is what THAT academy
+        # showed on ONE walk, not the alliance's whole course list.
+        assert "Technical Rescue Training" in fire
         police = await cog.courses_for("police")
         assert police  # no harvest yet -> built-in catalog fallback
         assert await cog.course_days("fire", "HazMat") == 3
