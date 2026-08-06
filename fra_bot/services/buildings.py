@@ -48,6 +48,7 @@ from ..mc.errors import MissionChiefError
 from ..mc.parsers.board import BoardPost
 from ..mc.parsers.funds import parse_total_funds
 from .board_requests import BoardRequestService
+from .intake import donation_instructions
 
 log = logging.getLogger(__name__)
 
@@ -294,7 +295,8 @@ def _building_guide(min_funds: int, min_rate: float = 0.0) -> str:
         f"per {REQUEST_LIMIT_WINDOW_HOURS} hours.",
         *(
             [f"- Requests require an alliance contribution of at least "
-             f"{min_rate:g}%."]
+             f"{min_rate:g}%. Set it in the game: menu > Show Alliance > "
+             "Alliance Funds > donation percentage."]
             if min_rate > 0 else []
         ),
         "- One link per post.",
@@ -428,7 +430,8 @@ class BuildingsService(BoardRequestService):
                         requester,
                         f"Your alliance contribution is {rate:g}%; the "
                         f"minimum required for building requests is "
-                        f"{minimum:g}%.",
+                        f"{minimum:g}%.\n\n"
+                        + donation_instructions(minimum),
                     ))
                     return
 

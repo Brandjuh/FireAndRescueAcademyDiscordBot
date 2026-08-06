@@ -33,6 +33,33 @@ from ..db.repos import LinksRepo, MembersRepo, RunsRepo
 INTAKE_REJECTED_FLAG = "intake_rejected"
 
 
+def donation_instructions(min_rate: float) -> str:
+    """The click path to the setting the gate reads, as a numbered block.
+
+    Telling a member their donation is too low without telling them where
+    to change it just moves the question to an admin. The wording matches
+    the tax-warning PMs (:mod:`fra_bot.services.tax_warnings`, ported from
+    the reference bot) so a member who gets both reads one instruction,
+    not two that disagree.
+    """
+    return (
+        "How to update your alliance donation:\n"
+        "1. Open the menu.\n"
+        "2. Click on Show Alliance.\n"
+        "3. Go to Alliance Funds.\n"
+        f"4. Set your donation percentage to at least {min_rate:g}%."
+    )
+
+
+def donation_hint(min_rate: float) -> str:
+    """One-line version of :func:`donation_instructions` for Discord, where
+    the refusal is already a paragraph and a numbered list would bury it."""
+    return (
+        "You set this in the game: **menu → Show Alliance → Alliance "
+        f"Funds** → donation percentage, at least {min_rate:g}%."
+    )
+
+
 @dataclass(frozen=True)
 class IntakeVerdict:
     ok: bool
@@ -56,6 +83,7 @@ class IntakeVerdict:
                 f"your alliance contribution is **{self.rate:g}%**, the "
                 f"minimum for requests is **{self.min_rate:g}%**."
             )
+            text += "\n" + donation_hint(self.min_rate)
             if self.retry_at:
                 text += (
                     " Just raised your alliance tax in the game? My roster "
@@ -63,7 +91,7 @@ class IntakeVerdict:
                     "again after that."
                 )
             else:
-                text += " Donate more credits to the alliance and try again."
+                text += " Then try again."
             return text
         return (
             "I couldn't find your MissionChief account. Set your Discord "

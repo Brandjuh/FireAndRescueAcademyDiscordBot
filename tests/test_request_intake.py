@@ -227,6 +227,9 @@ async def test_gate_rejects_low_contribution_with_numbers_and_retry_eta(db):
     assert verdict.retry_at is not None and verdict.retry_at > now
     assert f"<t:{verdict.retry_at}:R>" in verdict.rejection_text
     assert "try again" in verdict.rejection_text
+    # Telling somebody the number is too low without saying where to change
+    # it just moves the question to an admin.
+    assert "Alliance Funds" in verdict.rejection_text
 
 
 async def test_gate_treats_missing_rate_as_zero(db):
