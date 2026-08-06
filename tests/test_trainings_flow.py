@@ -928,9 +928,13 @@ async def test_availability_walk_harvests_the_live_course_list(db):
     assert raw is not None
     catalog = await merged_course_catalog(StateRepo(db))
     fire = catalog["fire"]
-    # The live dropdown replaces the built-in fire list entirely.
-    assert set(fire) == {"HazMat", "Brand New Course",
-                         "Foam Firefighting Training"}
+    # The live dropdown ADDS to the built-in fire list — it never cuts
+    # into it. A dropdown is only what ONE academy showed on ONE walk;
+    # treating it as the whole truth made a plain "Hazmat" post
+    # unrecognised the moment an academy left HazMat out.
+    assert {"HazMat", "Brand New Course",
+            "Foam Firefighting Training"} <= set(fire)
+    assert "Technical Rescue Training" in fire     # built-in, not in the dropdown
     assert fire["HazMat"] == 3                     # days from the built-in catalog
     assert fire["Foam Firefighting Training"] == 2  # days from the "(2 days)" label
     assert fire["Brand New Course"] == 0            # brand new: unknown duration
@@ -972,6 +976,53 @@ async def test_board_parse_uses_the_live_catalog_and_counts(db):
         "discipline": "fire", "name": "Technical Rescue Training",
         "duration": 4, "count": 3,
     }]
+
+
+async def test_a_partial_harvest_cannot_unlearn_a_built_in_course(db):
+    """The live bug: one fire academy's dropdown listed Lifeguard Training
+    and Mobile command but not HazMat, and because the harvest REPLACED
+    the fire list, a plain "Hazmat" board post came back as "Training
+    request not recognized" with three unrelated suggestions."""
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.trainings import TRAINING_COURSES_STATE_KEY
+
+    await StateRepo(db).set(TRAINING_COURSES_STATE_KEY, json.dumps({
+        "courses": {"fire": {"Lifeguard Training": 3, "Mobile command": 3}},
+        "at": 1,
+    }))
+    svc, _ = _service(db, dry_run=True)
+    request = await svc.parse_request(BoardPost(
+        post_id=1, author_name="Gregsmith001222", author_mc_id=42,
+        raw_timestamp="", content="Hazmat",
+    ))
+    assert request is not None
+    payload = json.loads(request["payload"])
+    assert payload["trainings"] == [{
+        "discipline": "fire", "name": "HazMat", "duration": 3, "count": 1,
+    }]
+
+
+async def test_every_guide_course_survives_any_harvest(db):
+    """The reply that started this said "the guide posts above list the
+    exact names to use" — while refusing a name off that very guide. The
+    guide is built from the built-in catalogue, so the parser's catalogue
+    must always contain it, whatever a walk happened to see."""
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.mc.trainings_catalog import DISCIPLINES
+    from fra_bot.services.trainings import (
+        TRAINING_COURSES_STATE_KEY,
+        merged_course_catalog,
+    )
+
+    # A harvest that saw exactly one course per agency — the worst case.
+    await StateRepo(db).set(TRAINING_COURSES_STATE_KEY, json.dumps({
+        "courses": {key: {next(iter(courses)): 1}
+                    for key, courses in DISCIPLINES.items()},
+        "at": 1,
+    }))
+    catalog = await merged_course_catalog(StateRepo(db))
+    for key, courses in DISCIPLINES.items():
+        assert set(courses) <= set(catalog[key])
 
 
 async def test_find_academies_uses_api_type_id(db):
