@@ -364,6 +364,12 @@ reports:
   daily_delay_minutes: 10
   timezone: America/New_York
 
+  # Built-in overview digests: every morning the finished game day's
+  # member overview posts to channels.reports and the admin overview to
+  # the admin log; on the 1st the finished month posts too (with
+  # projections). `!fra report overview-member week` renders one ad hoc.
+  overviews: true
+
   # Scheduled reports. Each entry renders a registered report to a channel
   # on the given cadence, shortly after the daily reset. Run `!fra report
   # list` in Discord to see the available report names and their periods.

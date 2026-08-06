@@ -120,6 +120,18 @@ class MembersRepo:
             row = await cur.fetchone()
         return row["n"]
 
+    async def low_contributor_count(self, minimum: float) -> int:
+        """Active members whose donation sits below ``minimum`` percent.
+        An empty rate column IS 0% (never-set donation), same rule as the
+        request gates."""
+        async with self._db.conn.execute(
+            "SELECT COUNT(*) AS n FROM members WHERE is_active = 1 "
+            "AND COALESCE(contribution_rate, 0) < ?",
+            (minimum,),
+        ) as cur:
+            row = await cur.fetchone()
+        return row["n"]
+
     async def apply_roster(
         self, run_id: int, roster: list[dict[str, Any]], *, detect_changes: bool
     ) -> list[dict[str, Any]]:
@@ -666,6 +678,30 @@ class LogsRepo:
         async with self._db.conn.execute(query, params) as cur:
             return {row["action_key"]: row["n"] for row in await cur.fetchall()}
 
+    async def executor_counts(
+        self, start_iso: str | None, end_iso: str, actions: tuple[str, ...],
+        *, limit: int = 5,
+    ) -> list[tuple[str, int]]:
+        """Who performed the given log actions in the period, busiest
+        first — the overview's 'most active admin' line."""
+        placeholders = ", ".join("?" for _ in actions)
+        query = (
+            f"SELECT executed_name, COUNT(*) AS n FROM alliance_logs "
+            f"WHERE action_key IN ({placeholders}) "
+            f"AND executed_name IS NOT NULL"
+        )
+        params: list[Any] = list(actions)
+        if start_iso:
+            query += " AND event_at >= ? AND event_at < ?"
+            params += [start_iso, end_iso]
+        else:
+            query += " AND COALESCE(event_at, scraped_at) < ?"
+            params.append(end_iso)
+        query += " GROUP BY executed_name ORDER BY n DESC LIMIT ?"
+        params.append(limit)
+        async with self._db.conn.execute(query, params) as cur:
+            return [(row["executed_name"], row["n"]) for row in await cur.fetchall()]
+
 
 class TreasuryRepo:
     def __init__(self, db: Database) -> None:
@@ -682,6 +718,16 @@ class TreasuryRepo:
     async def latest_balance(self) -> aiosqlite.Row | None:
         async with self._db.conn.execute(
             "SELECT * FROM treasury_balance ORDER BY id DESC LIMIT 1"
+        ) as cur:
+            return await cur.fetchone()
+
+    async def balance_at(self, cutoff_iso: str) -> aiosqlite.Row | None:
+        """The newest balance recorded at or before ``cutoff_iso`` — the
+        overview reports' 'balance at period start' and forecast anchor."""
+        async with self._db.conn.execute(
+            "SELECT * FROM treasury_balance WHERE scraped_at <= ? "
+            "ORDER BY scraped_at DESC LIMIT 1",
+            (cutoff_iso,),
         ) as cur:
             return await cur.fetchone()
 
@@ -1981,6 +2027,23 @@ class LinksRepo:
 
     def __init__(self, db: Database) -> None:
         self._db = db
+
+    async def approved_count_between(
+        self, start_iso: str | None, end_iso: str
+    ) -> int:
+        """Verifications that reached 'approved' in the period (the
+        overview reports' verification line)."""
+        query = "SELECT COUNT(*) AS n FROM member_links WHERE status = 'approved'"
+        params: list[Any] = []
+        if start_iso:
+            query += " AND updated_at >= ? AND updated_at < ?"
+            params += [start_iso, end_iso]
+        else:
+            query += " AND updated_at < ?"
+            params.append(end_iso)
+        async with self._db.conn.execute(query, params) as cur:
+            row = await cur.fetchone()
+        return row["n"]
 
     async def get_by_discord(self, discord_id: int) -> aiosqlite.Row | None:
         async with self._db.conn.execute(

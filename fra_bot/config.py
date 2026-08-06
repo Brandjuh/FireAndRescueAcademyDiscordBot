@@ -407,6 +407,9 @@ class ReportsConfig:
     daily_delay_minutes: int
     timezone: str
     scheduled: tuple[ScheduledReport, ...] = field(default_factory=tuple)
+    # The built-in daily/monthly overview digests (member -> reports
+    # channel, admin -> admin log).
+    overviews: bool = True
 
 
 @dataclass(frozen=True)
@@ -910,6 +913,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         ),
         reports=ReportsConfig(
             daily_delay_minutes=int(_get(raw, "reports", "daily_delay_minutes", default=10)),
+            overviews=bool(_get(raw, "reports", "overviews", default=True)),
             timezone=_valid_timezone(
                 str(_get(raw, "reports", "timezone", default="America/New_York"))
             ),

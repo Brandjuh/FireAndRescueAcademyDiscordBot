@@ -284,6 +284,8 @@ SETTINGS: tuple[Setting, ...] = (
     # -- reports / geocoding / logging ---------------------------------------
     Setting("reports.daily_delay_minutes", "int", True,
             "Minutes after the daily reset before reports post", minimum=1, maximum=120),
+    Setting("reports.overviews", "bool", True,
+            "Daily/monthly overview digests (member + admin)"),
     Setting("reports.timezone", "str", False, "Reports timezone (IANA name)"),
     Setting("geocoding.base_url", "str", False, "Geocoder base URL"),
     Setting("geocoding.api_key_param", "str", False, "Geocoder API-key query param"),
