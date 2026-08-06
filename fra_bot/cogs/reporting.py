@@ -146,6 +146,7 @@ class ReportingCog(commands.Cog):
                 await asyncio.sleep(300)
 
     async def _run_scheduled(self, fired_at: dt.datetime) -> None:
+        await self._post_overviews(fired_at)
         for sched in self.bot.cfg.reports.scheduled:
             # Per-entry isolation: one broken builder must not abort every
             # remaining scheduled report for the day.
@@ -168,6 +169,35 @@ class ReportingCog(commands.Cog):
                     getattr(sched, "report", "?"),
                 )
             await asyncio.sleep(1.0)
+
+    async def _post_overviews(self, fired_at: dt.datetime) -> None:
+        """The built-in overview posts: member digest to the reports
+        channel, admin digest to the admin log — every morning for the
+        finished game day, plus the finished month on the NY 1st. Needs
+        no per-entry config (the channels are already part of the bot's
+        setup); ``reports.overviews`` turns the pair off."""
+        if not getattr(self.bot.cfg.reports, "overviews", True):
+            return
+        targets = (
+            ("overview-member", self.bot.channel_for("reports")),
+            ("overview-admin", self.bot.channel_for("admin_log")),
+        )
+        periods = ["yesterday"]
+        if fired_at.day == 1:
+            periods.append("prev-month")
+        for period in periods:
+            for name, channel in targets:
+                if channel is None:
+                    continue
+                try:
+                    embed = await self.build(name, period)
+                    if isinstance(embed, str):
+                        log.warning("Overview %s error: %s", name, embed)
+                        continue
+                    await channel.send(embed=embed)
+                except Exception:
+                    log.exception("Overview report %s (%s) failed", name, period)
+                await asyncio.sleep(1.0)
 
     @staticmethod
     def _is_due(sched, fired_at: dt.datetime) -> bool:

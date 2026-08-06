@@ -52,6 +52,9 @@ _MEMBER_EVENT_LABELS = {
 
 
 def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
+    from .overview import register_overview_reports
+
+    register_overview_reports(registry, db)
     members = MembersRepo(db)
     apps = ApplicationsRepo(db)
     logs = LogsRepo(db)
