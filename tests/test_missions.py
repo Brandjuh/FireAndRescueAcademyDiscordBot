@@ -560,10 +560,17 @@ async def test_board_contribution_gate_skips(db):
         15293, 700, {"kind": "large", "mission_source": "preset", "location_text": "NYC"},
         requester_name="Bob", requester_mc_id=7,
     )
+    sched.board = FakeBoard([])
     await sched._advance()
     row = await sched.missions.get(mid)
     assert row["status"] == "skipped"
     assert "contribution" in row["status_detail"]
+    # The board reply names the number AND where to change it, so the
+    # member doesn't have to ask an admin where the setting lives.
+    text = "\n".join(content for _, content in sched.board.replies)
+    assert "below the required 5.0%" in text
+    assert "How to update your alliance donation" in text
+    assert "Show Alliance" in text and "Alliance Funds" in text
 
 
 # -- priority: member first, then rotation ----------------------------------

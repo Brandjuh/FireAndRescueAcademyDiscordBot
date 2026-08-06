@@ -1216,6 +1216,43 @@ async def test_board_gate_fails_closed_on_missing_or_unknown_rate(db):
     assert row["attempts"] == 1 and row["next_attempt_at"] is not None
 
 
+async def test_low_contribution_reply_says_where_to_change_it(db):
+    # A refusal that only names the number sends the member to an admin to
+    # ask where the setting lives — the reply carries the click path.
+    svc, _ = _service(db, dry_run=True)
+    svc.cfg.automation.reply_to_board = True
+    replies: list[str] = []
+
+    class _Recorder:
+        async def post_reply(self, thread_id, content):
+            replies.append(content)
+            return True
+
+        async def find_bot_post(self, thread_id, marker, *, max_pages=None):
+            return None
+
+    svc.board = _Recorder()
+    await db.execute(
+        "UPDATE members SET contribution_rate = 0 WHERE mc_user_id = 42"
+    )
+    rid = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=9,
+        requester_name="Alice", requester_mc_id=42,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat", "duration": 3}],
+            "ambiguous": [],
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+
+    text = "\n".join(replies)
+    assert "the minimum is 5%" in text
+    assert "How to update your alliance donation" in text
+    assert "Show Alliance" in text and "Alliance Funds" in text
+    assert "at least 5%" in text
+
+
 # -- unmatched board posts: a hint instead of silence -----------------------
 
 class _ReplyBoard(_SeqBoard):

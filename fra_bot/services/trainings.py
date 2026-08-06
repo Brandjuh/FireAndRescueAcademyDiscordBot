@@ -39,6 +39,7 @@ from ..mc.trainings_catalog import (
     suggest_courses,
 )
 from .board_requests import BoardRequestService
+from .intake import donation_instructions
 
 log = logging.getLogger(__name__)
 
@@ -753,7 +754,8 @@ class TrainingsService(BoardRequestService):
                         request,
                         f"@{request['requester_name']}: your training request "
                         f"was not processed — your alliance contribution is "
-                        f"{rate:g}%, the minimum is {minimum:g}%."
+                        f"{rate:g}%, the minimum is {minimum:g}%.\n\n"
+                        + donation_instructions(minimum)
                     )
                     return
 
@@ -1283,7 +1285,8 @@ def _overview_guide(min_rate: float) -> str:
         "you asked for.",
         "- A class stays open to the whole alliance for 1 hour to join.",
         f"- If your alliance contribution is below {min_rate:g}%, the class "
-        "will not be opened automatically.",
+        "will not be opened automatically. Set it in the game: menu > "
+        "Show Alliance > Alliance Funds > donation percentage.",
         "",
         "[b]Discord requests[/b]",
         "You can also request trainings through the Discord request panel "

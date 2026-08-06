@@ -79,6 +79,7 @@ from ..mc.parsers.mission_spec import (
     parse_board_request,
 )
 from .board_cleanup import deletion_due_at, schedule_reply_cleanup
+from .intake import donation_instructions
 
 log = logging.getLogger(__name__)
 
@@ -934,7 +935,8 @@ class MissionScheduler:
                     await self._notify_board(mission, _event_error_reply(
                         requester,
                         f"Latest alliance donation is {rate:.1f}%, below the "
-                        f"required {minimum:.1f}%.",
+                        f"required {minimum:.1f}%.\n\n"
+                        + donation_instructions(minimum),
                     ))
                     return None
             try:
@@ -1718,7 +1720,8 @@ def _board_guide(default_kind: str, min_rate: float) -> str:
             "- One event per post. It starts at the next free alliance "
             "event slot, so it can take a while.",
             f"- If your alliance contribution is below {min_rate:g}%, the "
-            "request is skipped.",
+            "request is skipped. Set it in the game: menu > Show "
+            "Alliance > Alliance Funds > donation percentage.",
             "",
             "[b]Optional lines to fine-tune[/b]",
             "- event: Storm (or Civil Unrest, Storm Surge, Fall weather, "
@@ -1750,7 +1753,8 @@ def _board_guide(default_kind: str, min_rate: float) -> str:
         "- One mission per post. It starts at the next free alliance slot, "
         "so it can take a while.",
         f"- If your alliance contribution is below {min_rate:g}%, the "
-        "request is skipped.",
+        "request is skipped. Set it in the game: menu > Show Alliance > "
+        "Alliance Funds > donation percentage.",
         "",
         "[b]Own mission — copy the template below[/b]",
         "- Copy the whole list, fill in your location, a name and your "

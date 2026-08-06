@@ -331,6 +331,9 @@ async def test_board_building_gate_fails_closed(db):
     assert "contribution rate 0% is below the required 5%" in row["status_detail"]
     assert any("minimum required for building requests" in r
                for r in svc.replies)
+    # …and where to change it, so the member isn't left asking an admin.
+    assert any("How to update your alliance donation" in r
+               and "Alliance Funds" in r for r in svc.replies)
 
     rid = await _board_row(repo, post_id=2, name="Stranger", mc_id=777,
                            status="pending")
