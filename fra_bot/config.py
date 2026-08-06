@@ -206,6 +206,11 @@ class MissionAutomationConfig:
     interval: int
     panel_channel_id: int
     min_contribution_rate: float
+    #: Where a mission outcome ("queued", "started", "failed") is posted:
+    #: ``off`` (the default — the request channel is a member channel and
+    #: the running commentary belonged nowhere), ``admin`` (the admin log
+    #: only) or ``request`` (back into the channel the request came from).
+    announce: str = "off"
 
 
 @dataclass(frozen=True)
@@ -475,6 +480,25 @@ def _get(data: dict, *keys: str, default=None, required: bool = False):
     return node
 
 
+#: Where mission outcomes may be posted.
+ANNOUNCE_MODES = ("off", "admin", "request")
+
+
+def _announce_mode(value) -> str:
+    """Normalise ``automation.mission.announce``.
+
+    YAML reads a bare ``off`` as the boolean False (and ``no``/``n`` too),
+    so a plain ``announce: off`` would arrive here as ``False`` and, taken
+    literally, fall through to "post it somewhere" — the exact opposite of
+    what it says. Anything falsy or unrecognised means OFF."""
+    if isinstance(value, bool):
+        return "off" if not value else "request"
+    text = str(value or "").strip().lower()
+    if text in ("", "false", "no", "none", "0"):
+        return "off"
+    return text if text in ANNOUNCE_MODES else "off"
+
+
 def _valid_timezone(name: str) -> str:
     """Validate an IANA timezone at LOAD time. A typo'd YAML value used to
     pass through untouched and only blow up later inside the report loops
@@ -708,6 +732,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 min_contribution_rate=float(
                     _get(raw, "automation", "mission", "min_contribution_rate", default=5.0)
+                ),
+                announce=_announce_mode(
+                    _get(raw, "automation", "mission", "announce", default="off")
                 ),
             ),
             missions_forum=MissionsForumConfig(

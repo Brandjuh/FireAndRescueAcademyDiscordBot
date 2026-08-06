@@ -278,6 +278,9 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("automation.mission.panel_channel_id", "int", True, "Mission panel channel"),
     Setting("automation.mission.min_contribution_rate", "float", True,
             "Minimum contribution %% for mission requests", minimum=0, maximum=100),
+    Setting("automation.mission.announce", "str", True,
+            "Where mission outcomes are posted",
+            choices=("off", "admin", "request")),
     # -- reports / geocoding / logging ---------------------------------------
     Setting("reports.daily_delay_minutes", "int", True,
             "Minutes after the daily reset before reports post", minimum=1, maximum=120),

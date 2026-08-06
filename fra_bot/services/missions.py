@@ -1092,7 +1092,13 @@ class MissionScheduler:
             f"[b]Started[/b]: {kind_label} at "
             f"{address or 'the requested location'}"
         )
-        if mission["source"] == "board" and not self.dry_run:
+        # The personal "it started" PM is for a ONE-OFF request only. A
+        # recurring request keeps starting — from the rotation, several
+        # times a day, forever — and the requester would get a private
+        # message every single time. They asked for it to keep coming
+        # back; they did not ask to be told each time it does.
+        recurring = bool(mission["recurring"] or mission["rotation_id"])
+        if mission["source"] == "board" and not self.dry_run and not recurring:
             await self._notify_ingame_started(
                 requester, kind_label, address or "the requested location"
             )

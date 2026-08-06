@@ -652,10 +652,19 @@ class MissionsCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _publish_outcomes(self) -> None:
+        # Where outcomes go, if anywhere. The request channel is a member
+        # channel: a queued/started running commentary for every mission
+        # (and every recurrence of a recurring one) is noise there, so the
+        # default is to post nowhere. Rows are still drained, or the queue
+        # would grow forever and flood the day someone turns this on.
+        mode = getattr(self.bot.cfg.automation.mission, "announce", "off")
         admin_channel = self.bot.channel_for("admin_log")
         for row in await self.repo.pending_announcements():
+            if mode == "off":
+                await self.repo.mark_posted(row["id"])
+                continue
             channel = None
-            if row["channel_id"]:
+            if mode == "request" and row["channel_id"]:
                 channel = self.bot.get_channel(int(row["channel_id"]))
             channel = channel or admin_channel
             if channel is None:
