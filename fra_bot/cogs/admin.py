@@ -417,7 +417,9 @@ class AdminCog(commands.Cog):
         backfill, trainings, buildings, events."""
         # (func, canonical job name shared with the scheduler's lock).
         jobs = {
-            "members": (self.bot.members_sync.run, "members"),
+            # The same chained job the scheduler runs: roster sweep first,
+            # then the clean-up of requests whose author has left.
+            "members": (self.bot._members_sync_job, "members"),
             "applications": (self.bot.applications_sync.run, "applications"),
             "logs": (self.bot.logs_sync.run, "logs"),
             "treasury": (self.bot.treasury_sync.sync_balance_and_income, "treasury"),

@@ -854,6 +854,39 @@ async def test_next_up_none_when_empty(db):
     assert await sched.next_up() is None
 
 
+async def test_one_off_board_request_gets_the_ingame_pm(db, monkeypatch):
+    sent = []
+
+    async def fake_send(client, recipient, subject, body):
+        sent.append((recipient, subject, body))
+        return True
+
+    monkeypatch.setattr("fra_bot.mc.messages.send_ingame_message", fake_send)
+    sched = _scheduler(_cfg(dry_run=False, min_rate=0), FakeClient(_ELIGIBLE), db)
+    sched.board = FakeBoard([])
+    await _enqueue(sched, source="board", requester_name="Alice")
+    await sched._advance()
+    assert [s[0] for s in sent] == ["Alice"]
+
+
+async def test_recurring_board_request_never_pms_the_requester(db, monkeypatch):
+    # A recurring request keeps starting from the rotation, several times a
+    # day, forever — a private message per start would be spam.
+    sent = []
+
+    async def fake_send(client, recipient, subject, body):
+        sent.append((recipient, subject, body))
+        return True
+
+    monkeypatch.setattr("fra_bot.mc.messages.send_ingame_message", fake_send)
+    sched = _scheduler(_cfg(dry_run=False, min_rate=0), FakeClient(_ELIGIBLE), db)
+    sched.board = FakeBoard([])
+    mid = await _enqueue(sched, source="board", requester_name="Alice", recurring=1)
+    await sched._advance()
+    assert (await sched.missions.get(mid))["status"] == "done"
+    assert sent == []
+
+
 # -- owner-only paid (coins) path -------------------------------------------
 
 async def test_coin_mission_preview_never_posts_even_when_live(db):

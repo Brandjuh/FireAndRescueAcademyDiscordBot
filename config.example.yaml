@@ -263,6 +263,12 @@ automation:
     panel_channel_id: 1425234755842080890
     # Board requests are self-serve; skip members below this contribution.
     min_contribution_rate: 5.0
+    # Where a mission outcome ("queued" / "started" / "failed") is posted:
+    #   off     - nowhere (default; the request channel is a member channel
+    #             and the running commentary belongs nowhere)
+    #   admin   - the admin log only
+    #   request - back into the channel the request came from
+    announce: off
   missions_forum:
     # Missions-database forum: every mission from missionchief.com's
     # einsaetze.json gets its own tagged forum post (all information, in

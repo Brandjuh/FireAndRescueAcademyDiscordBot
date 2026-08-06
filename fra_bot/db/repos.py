@@ -104,6 +104,15 @@ class MembersRepo:
         ) as cur:
             return {row["mc_user_id"]: row for row in await cur.fetchall()}
 
+    async def former_members(self) -> dict[int, aiosqlite.Row]:
+        """Everyone the roster has seen leave. Positive proof that a name
+        belonged to a real member who is gone — an absence from
+        :meth:`active_members` alone could just as well be a stranger."""
+        async with self._db.conn.execute(
+            "SELECT * FROM members WHERE is_active = 0"
+        ) as cur:
+            return {row["mc_user_id"]: row for row in await cur.fetchall()}
+
     async def active_count(self) -> int:
         async with self._db.conn.execute(
             "SELECT COUNT(*) AS n FROM members WHERE is_active = 1"
@@ -1213,6 +1222,29 @@ class AutomationRepo:
         ) as cur:
             return list(await cur.fetchall())
 
+    async def open_requests(self, limit: int = 200) -> list[aiosqlite.Row]:
+        """Queued requests nobody has started yet. 'processing' is left out
+        on purpose: that row is mid-flight in the executor and cancelling it
+        would race a real MissionChief action."""
+        async with self._db.conn.execute(
+            "SELECT * FROM automation_requests "
+            "WHERE status IN ('pending', 'waiting') ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def cancel(self, request_id: int, detail: str = "cancelled") -> bool:
+        """Drop a not-yet-started request. Returns True if it was open.
+        'cancelled' is outside :meth:`pending_announcements`' status set, so
+        this never produces an outcome embed or a requester DM."""
+        n = await self._db.execute(
+            "UPDATE automation_requests SET status = 'cancelled', "
+            "status_detail = ?, updated_at = ? "
+            "WHERE id = ? AND status IN ('pending', 'waiting')",
+            (detail, utcnow_iso(), request_id),
+        )
+        return n == 1
+
     async def pending_announcements(self, limit: int = 20) -> list[aiosqlite.Row]:
         """Terminal-state requests not yet announced in Discord."""
         async with self._db.conn.execute(
@@ -1456,13 +1488,15 @@ class MissionsRepo:
             (rotation_id, utcnow_iso(), mission_id),
         )
 
-    async def cancel(self, mission_id: int) -> bool:
+    async def cancel(
+        self, mission_id: int, detail: str = "cancelled by admin"
+    ) -> bool:
         """Cancel a not-yet-started mission. Returns True if it was open."""
         n = await self._db.execute(
             "UPDATE scheduled_missions SET status = 'cancelled', "
-            "status_detail = 'cancelled by admin', posted_at = NULL, updated_at = ? "
+            "status_detail = ?, posted_at = NULL, updated_at = ? "
             "WHERE id = ? AND status IN ('pending', 'waiting')",
-            (utcnow_iso(), mission_id),
+            (detail, utcnow_iso(), mission_id),
         )
         return n == 1
 
@@ -1543,6 +1577,16 @@ class MissionsRepo:
             "WHERE recurring = 1 AND rotation_id IS NULL "
             "AND status IN ('pending', 'waiting', 'processing') "
             "ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ) as cur:
+            return list(await cur.fetchall())
+
+    async def open_all(self, *, limit: int = 200) -> list[aiosqlite.Row]:
+        """Every queued request of every kind, oldest first. 'processing' is
+        excluded: that row is inside the start engine right now."""
+        async with self._db.conn.execute(
+            "SELECT * FROM scheduled_missions "
+            "WHERE status IN ('pending', 'waiting') ORDER BY id ASC LIMIT ?",
             (limit,),
         ) as cur:
             return list(await cur.fetchall())

@@ -176,6 +176,11 @@ class FRABot(commands.Bot):
         from .services.rank_roles import RankRolesService
 
         self.rank_roles = RankRolesService(cfg, self.db, self)
+        # Open requests of members who left the alliance — cleaned up right
+        # after each successful roster sweep (see _members_sync_job).
+        from .services.leaver_cleanup import LeaverCleanupService
+
+        self.leaver_cleanup = LeaverCleanupService(self.db, self)
 
         self._jobs_started = False
 
@@ -392,7 +397,7 @@ class FRABot(commands.Bot):
             initial_delay_seconds=20.0,
         )
         sched.add_interval_job(
-            self._guarded(self.members_sync.run, "members"),
+            self._guarded(self._members_sync_job, "members"),
             minutes=sync.members_interval,
             name="members",
             initial_delay_seconds=90.0,
@@ -736,6 +741,21 @@ class FRABot(commands.Bot):
             automation.building.enabled, automation.events.enabled,
             automation.mission.enabled,
         )
+
+    async def _members_sync_job(self) -> None:
+        """The roster sweep, plus the clean-up that depends on its result.
+
+        Chained rather than scheduled on its own so the clean-up always
+        reads a FRESH roster: a scrape that raised (or was blocked by the
+        retention guard) never reaches the removals, which is exactly what
+        should happen — a half-read members page must not look like half
+        the alliance walked out.
+        """
+        await self.members_sync.run()
+        try:
+            await self.leaver_cleanup.run()
+        except Exception:
+            log.exception("leaver request cleanup failed")
 
     async def _missions_forum_pass(self) -> None:
         """One missions-forum sync, with anything noteworthy (new posts,
