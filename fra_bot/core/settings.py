@@ -121,6 +121,8 @@ SETTINGS: tuple[Setting, ...] = (
             "Member-action feed channel (0 = feed off)"),
     Setting("discord.channels.game_sync", "int", True,
             "PRIVATE profile-sync webhook intake channel (0 = off)"),
+    Setting("discord.channels.profile_sync_panel", "int", True,
+            "Profile-sync info/privacy panel channel (0 = off)"),
     Setting("discord.channels.system_messages", "int", True,
             "In-game system messages land here as embeds (0 = ignore them)"),
     Setting("discord.channels.mc_status", "int", True,

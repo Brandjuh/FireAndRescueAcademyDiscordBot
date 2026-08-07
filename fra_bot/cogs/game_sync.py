@@ -42,6 +42,115 @@ MAX_ATTACHMENT_BYTES = 512 * 1024
 VEHICLE_NAMES_KEY = "game_sync:vehicle_names"
 VEHICLE_NAMES_MAX_AGE_DAYS = 7
 
+#: The intake webhook URL. Stored in STATE, never in config/git: the repo
+#: is public and `!fra settings` prints config values unmasked — a webhook
+#: URL is a write-credential. Set via `!fra syncwebhook`, or discovered.
+WEBHOOK_URL_KEY = "game_sync:webhook_url"
+#: Name of the auto-discovered/created webhook on the intake channel.
+WEBHOOK_NAME = "FRA Profile Sync"
+#: The shareable install link — a raw .user.js URL opens straight in
+#: Tampermonkey, and doubles as the script's auto-update source.
+RAW_INSTALL_URL = (
+    "https://raw.githubusercontent.com/Brandjuh/"
+    "FireAndRescueAcademyDiscordBot/main/tools/fra-profile-sync.user.js"
+)
+#: Stable custom_ids so the panel's buttons survive restarts.
+_CUSTOM_ID = {
+    "link": "fra:gamesync:link",
+    "how": "fra:gamesync:how",
+    "delete": "fra:gamesync:delete",
+}
+
+_HOW_IT_WORKS = (
+    "**ℹ️ How the profile sync works, in detail**\n\n"
+    "**When you press 🔄 Sync to FRA in the game** the script reads two "
+    "pages of YOUR OWN account with your own browser session — "
+    "`/api/buildings` and `/api/vehicles`, the same data you see in the "
+    "game — and builds a summary:\n"
+    "• your MC user id and name\n"
+    "• building count per type, plus each building's coordinates rounded "
+    "to ~100 m\n"
+    "• vehicle count per type\n"
+    "It shows you that exact summary first; nothing is sent until you "
+    "confirm. It never reads or sends passwords, cookies, sessions, "
+    "credits, chat, or anyone else's data.\n\n"
+    "**After your first sync** the script refreshes automatically about "
+    "once a day while you have MissionChief open — same data, no popups. "
+    "The 🔄 button always forces a fresh sync on the spot.\n\n"
+    "**Where it goes:** into a private intake channel of the FRA bot, "
+    "which stores one record per MC account (a new sync overwrites the "
+    "old one). It powers your `/profile` card and the alliance-wide "
+    "hotspot map, fleet card and infographic — always aggregated, never "
+    "listing your individual bases.\n\n"
+    "**Your control:** 🗑️ *Delete my data* on this panel removes your "
+    "record instantly, no admin needed. Removing the userscript from "
+    "Tampermonkey stops all future syncs (deleting alone does not — the "
+    "daily auto-sync would simply re-add the data)."
+)
+
+
+class GameSyncPanelView(discord.ui.View):
+    """Persistent panel; re-registered at startup so its buttons survive
+    restarts (``timeout=None`` + a stable ``custom_id`` per button)."""
+
+    def __init__(self, cog: "GameSyncCog") -> None:
+        super().__init__(timeout=None)
+        self._cog = cog
+        # Link buttons carry no custom_id and are never dispatched — the
+        # URL opens client-side, which is exactly what an install needs.
+        self.add_item(discord.ui.Button(
+            label="Install userscript", emoji="📥",
+            style=discord.ButtonStyle.link, url=RAW_INSTALL_URL,
+        ))
+
+    @discord.ui.button(label="Get sync link", emoji="🔑",
+                       style=discord.ButtonStyle.primary,
+                       custom_id=_CUSTOM_ID["link"])
+    async def sync_link(self, interaction: discord.Interaction,
+                        button: discord.ui.Button) -> None:
+        await self._cog.send_sync_link(interaction)
+
+    @discord.ui.button(label="How it works", emoji="ℹ️",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id=_CUSTOM_ID["how"])
+    async def how_it_works(self, interaction: discord.Interaction,
+                           button: discord.ui.Button) -> None:
+        await interaction.response.send_message(_HOW_IT_WORKS, ephemeral=True)
+
+    @discord.ui.button(label="Delete my data", emoji="🗑️",
+                       style=discord.ButtonStyle.danger,
+                       custom_id=_CUSTOM_ID["delete"])
+    async def delete_data(self, interaction: discord.Interaction,
+                          button: discord.ui.Button) -> None:
+        await interaction.response.send_message(
+            "This removes everything the profile sync has stored about "
+            "your account. Are you sure?",
+            view=_DeleteConfirmView(self._cog), ephemeral=True,
+        )
+
+
+class _DeleteConfirmView(discord.ui.View):
+    """Ephemeral confirm step — a one-click destructive button on a
+    persistent panel invites accidental taps. Short-lived, so it needs no
+    ``add_view`` registration and no custom_ids."""
+
+    def __init__(self, cog: "GameSyncCog") -> None:
+        super().__init__(timeout=60)
+        self._cog = cog
+
+    @discord.ui.button(label="Yes, delete my data",
+                       style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction,
+                      button: discord.ui.Button) -> None:
+        await self._cog.perform_delete(interaction)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction,
+                     button: discord.ui.Button) -> None:
+        await interaction.response.send_message(
+            "Nothing was deleted.", ephemeral=True
+        )
+
 
 class GameSyncCog(commands.Cog):
     def __init__(self, bot) -> None:
@@ -127,6 +236,140 @@ class GameSyncCog(commands.Cog):
             await message.add_reaction(emoji)
         except discord.HTTPException:
             pass
+
+    # -- the member panel (install / explain / delete) -----------------------
+
+    async def webhook_url(self) -> str | None:
+        """The sync webhook URL: the stored override first, else discover
+        (or create) a webhook named ``WEBHOOK_NAME`` on the intake channel
+        and cache it. None when neither path works — the caller tells the
+        member to ask an admin."""
+        from ..db.repos import StateRepo
+
+        state = StateRepo(self.bot.db)
+        stored = await state.get(WEBHOOK_URL_KEY)
+        if stored:
+            return stored
+        channel = self.bot.get_channel(self._intake_channel_id())
+        if channel is None:
+            return None
+        try:
+            webhooks = await channel.webhooks()
+            hook = next(
+                (w for w in webhooks if w.name == WEBHOOK_NAME and w.url), None
+            )
+            if hook is None:
+                hook = await channel.create_webhook(
+                    name=WEBHOOK_NAME,
+                    reason="Profile-sync intake (panel sync link)",
+                )
+        except discord.HTTPException as exc:
+            log.warning("game sync: webhook discovery failed: %s", exc)
+            return None
+        await state.set(WEBHOOK_URL_KEY, hook.url)
+        return hook.url
+
+    async def send_sync_link(self, interaction: discord.Interaction) -> None:
+        url = await self.webhook_url()
+        if url is None:
+            await interaction.response.send_message(
+                "⚠️ The sync link isn't configured yet — please ping an "
+                "admin.", ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "**Your FRA sync link** — the script asks for it once, on "
+            "your first sync:\n"
+            f"```{url}```\n"
+            "**Setup:**\n"
+            "1. Install the userscript with the 📥 button on the panel "
+            "(Tampermonkey/Greasemonkey needed).\n"
+            "2. Open the missionchief.com **main page** and click "
+            "**🔄 Sync to FRA** in the navbar.\n"
+            "3. Paste the link above when the script asks, check the "
+            "summary, confirm.\n"
+            "4. After that first sync the script refreshes automatically "
+            "about once a day.\n\n"
+            "-# Run `!verify` first so the data attaches to your Discord "
+            "profile. Please keep the link within the alliance.",
+            ephemeral=True,
+        )
+
+    async def perform_delete(self, interaction: discord.Interaction) -> None:
+        """The confirm button's action: remove every game-sync row that is
+        provably this member's — attached to their Discord id, or owned by
+        the MC account of their APPROVED verify link (which also catches a
+        row synced before they verified, stored with a NULL discord id)."""
+        user = interaction.user
+        mc_ids: set[int] = set()
+        row = await self.repo.get_by_discord(user.id)
+        if row is not None:
+            mc_ids.add(int(row["mc_user_id"]))
+        link = await LinksRepo(self.bot.db).get_by_discord(user.id)
+        if link is not None and link["status"] == "approved":
+            mc_ids.add(int(link["mc_user_id"]))
+        deleted = 0
+        for mc_id in mc_ids:
+            if await self.repo.delete(mc_id):
+                deleted += 1
+        deleted += await self.repo.delete_by_discord(user.id)
+        if not deleted:
+            await interaction.response.send_message(
+                "I have no synced game data stored for you. (Data only "
+                "attaches to your Discord account after `!verify` — if "
+                "you synced without verifying, ask an admin to remove it "
+                "by MC account.)",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "🗑️ Your synced game data has been deleted. Note: the "
+            "userscript syncs again automatically — remove it from "
+            "Tampermonkey to stop future syncs.",
+            ephemeral=True,
+        )
+        first_mc = next(iter(mc_ids), None)
+        await self.bot.log_member_action(
+            action="game_sync_deleted",
+            detail=f"self-service via panel (MC {sorted(mc_ids) or '?'})",
+            discord_user_id=user.id,
+            mc_user_id=first_mc,
+            actor_name=user.display_name,
+        )
+
+    def panel_embed(self) -> discord.Embed:
+        return discord.Embed(
+            title="🔄 MissionChief Profile Sync",
+            colour=discord.Colour.blue(),
+            description=(
+                "Share your own buildings and vehicles with the FRA bot — "
+                "they power your `/profile` card and the alliance's "
+                "hotspot map, fleet card and infographic.\n\n"
+                "**What is collected**\n"
+                "Only your own game data, read with your own browser "
+                "session: building counts per type with coordinates "
+                "rounded to ~100 m, vehicle counts per type, and your MC "
+                "id + name. **Never** passwords, cookies, sessions or "
+                "other players' data — the script shows you the exact "
+                "summary before your first send. After your first manual "
+                "sync it refreshes automatically about once a day while "
+                "you play.\n\n"
+                "**What it's used for**\n"
+                "Your personal `/profile` card, and aggregated alliance "
+                "statistics (hotspots, fleet, infographic). Individual "
+                "bases are never listed publicly.\n\n"
+                "**Your data, your control**\n"
+                "🗑️ **Delete my data** below removes everything stored, "
+                "instantly, no admin needed. Removing the userscript from "
+                "Tampermonkey stops future syncs.\n\n"
+                "**Get started**\n"
+                "📥 install the script → 🔑 get your sync link → open "
+                "missionchief.com and click **🔄 Sync to FRA**."
+            ),
+        )
+
+    def panel_view(self) -> discord.ui.View:
+        return GameSyncPanelView(self)
 
     # -- hotspots (admins) -----------------------------------------------------
 

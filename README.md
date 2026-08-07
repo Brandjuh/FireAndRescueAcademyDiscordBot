@@ -203,6 +203,32 @@ can tell at a glance that it's alive:
 Updates are driven by a background reconciler that stays well under
 Discord's presence rate limit.
 
+## Profile sync (the userscript)
+
+Members can share their own MissionChief buildings/vehicles with the bot
+via a Tampermonkey userscript — **`tools/fra-profile-sync.user.js`** —
+which feeds `/profile`, `!hotspots`, `!infographic` and `!fleet`.
+
+* **Install link** (shareable; also the script's auto-update source):
+  `https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/main/tools/fra-profile-sync.user.js`
+* **How it works**: on a sync the script reads the member's own
+  `/api/buildings` + `/api/vehicles` with their own browser session and
+  posts counts per type + ~100 m-rounded coordinates as a JSON attachment
+  to a Discord webhook in the private intake channel
+  (`discord.channels.game_sync`). The first sync is manual (the member
+  confirms the exact summary); after that it refreshes automatically
+  about once a day. Never sends passwords, cookies or sessions.
+* **Member panel** (`discord.channels.profile_sync_panel`): explains the
+  above and carries 📥 install, 🔑 get sync link (hands out the webhook
+  URL), ℹ️ how it works, and 🗑️ delete my data (self-service deletion of
+  the member's `game_sync` row). Repost with `!fra syncpanel`.
+* **Webhook URL**: stored in the state table, never in git (public
+  repo!). `!fra syncwebhook` shows a masked status, `!fra syncwebhook
+  <url>` stores one (and deletes the invoking message), `!fra
+  syncwebhook clear` falls back to auto-discovery: the 🔑 button reuses
+  or creates a webhook named "FRA Profile Sync" on the intake channel
+  (needs Manage Webhooks).
+
 ## Admin commands
 
 Requires Discord administrator permission or a role listed in
