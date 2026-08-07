@@ -208,3 +208,23 @@ def test_panel_digest_tracks_title_and_description():
     b = discord.Embed(title="T", description="two")
     assert panel_digest(a) != panel_digest(b)
     assert panel_digest(a) == panel_digest(discord.Embed(title="T", description="one"))
+
+
+async def test_real_specs_include_gamesync(db):
+    # The registry itself (not a fake): the profile-sync panel is wired to
+    # its channel key.
+    keeper = PanelKeeperCog.__new__(PanelKeeperCog)
+    keeper.bot = SimpleNamespace(
+        cfg=SimpleNamespace(
+            automation=SimpleNamespace(
+                mission=SimpleNamespace(panel_channel_id=0)
+            ),
+            discord=SimpleNamespace(
+                channels=SimpleNamespace(profile_sync_panel=555)
+            ),
+        ),
+    )
+    specs = {spec.key: spec for spec in keeper._specs()}
+    assert "gamesync" in specs
+    assert specs["gamesync"].cog_name == "GameSyncCog"
+    assert specs["gamesync"].channel_id() == 555

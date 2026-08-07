@@ -74,6 +74,11 @@ discord:
                           # feeding /profile and !hotspots. 0 = off.
                           # (Omitting the key falls back to the FRA intake
                           # channel baked into config.py, like academy_panel.)
+    profile_sync_panel: 0 # public panel explaining profile sync: install
+                          # link, what the bot collects, and the
+                          # self-service "Delete my data" button. 0 = off.
+                          # (Omitting the key falls back to the FRA channel
+                          # baked into config.py.)
     admin_approvals: 0    # approve/deny embeds for requests needing a decision
     member_panel: 0       # member-management panel (dossier button)
     request_panel: 0      # training/building request panel

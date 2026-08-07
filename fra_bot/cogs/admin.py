@@ -962,6 +962,72 @@ class AdminCog(commands.Cog):
         outcome = await keeper.ensure("academy", channel=channel, force=True)
         await ctx.send(f"✅ Academy panel {outcome} in <#{channel.id}>.")
 
+    @fra.command(name="syncpanel")
+    async def sync_panel(self, ctx: commands.Context) -> None:
+        """(Re)post the profile-sync info panel (configured channel, else
+        this one). The keeper maintains it automatically afterwards."""
+        keeper = self.bot.get_cog("PanelKeeperCog")
+        if keeper is None:
+            await ctx.send("Panel keeper not loaded.")
+            return
+        channel_id = getattr(
+            self.bot.cfg.discord.channels, "profile_sync_panel", 0
+        )
+        channel = self.bot.get_channel(channel_id) if channel_id else ctx.channel
+        if channel is None:
+            channel = ctx.channel
+        outcome = await keeper.ensure("gamesync", channel=channel, force=True)
+        await ctx.send(f"✅ Profile-sync panel {outcome} in <#{channel.id}>.")
+
+    @fra.command(name="syncwebhook")
+    async def sync_webhook(
+        self, ctx: commands.Context, *, value: str = ""
+    ) -> None:
+        """Manage the profile-sync webhook URL: bare = masked status,
+        `clear` = drop the stored override (auto-discovery takes over),
+        a URL = store it. Deliberately NOT an `!fra set` setting — those
+        echo unmasked, and a webhook URL is a write-credential."""
+        import re as _re
+
+        from ..cogs.game_sync import WEBHOOK_URL_KEY
+        from ..db.repos import StateRepo
+
+        state = StateRepo(self.bot.db)
+        value = value.strip()
+
+        def masked(url: str) -> str:
+            match = _re.match(r"(https://\S+/webhooks/\d{4})\d*/\S+", url)
+            return f"{match.group(1)}…/••••" if match else "•••• (unrecognised)"
+
+        if not value:
+            stored = await state.get(WEBHOOK_URL_KEY)
+            if stored:
+                await ctx.send(f"🔑 Sync webhook: set ({masked(stored)}).")
+            else:
+                await ctx.send(
+                    "🔑 Sync webhook: not stored — the panel button "
+                    "auto-discovers one on the intake channel (needs "
+                    "Manage Webhooks there)."
+                )
+            return
+        if value.lower() == "clear":
+            await state.delete(WEBHOOK_URL_KEY)
+            await ctx.send("🔑 Stored sync webhook cleared.")
+            return
+        if not _re.match(
+            r"^https://(?:ptb\.|canary\.)?discord(?:app)?\.com"
+            r"/api/webhooks/\d+/[\w-]+$", value,
+        ):
+            await ctx.send("⚠️ That doesn't look like a Discord webhook URL.")
+            return
+        await state.set(WEBHOOK_URL_KEY, value)
+        # The secret must not linger in the channel history.
+        try:
+            await ctx.message.delete()
+        except discord.HTTPException:
+            pass
+        await ctx.send(f"✅ Sync webhook stored ({masked(value)}).")
+
     @fra.command(name="classpanel", aliases=["classespanel"])
     async def class_panel(self, ctx: commands.Context) -> None:
         """(Re)post the class-availability panel (configured channel, else

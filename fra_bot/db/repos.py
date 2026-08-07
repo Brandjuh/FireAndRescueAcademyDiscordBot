@@ -2307,6 +2307,22 @@ class GameSyncRepo:
         ) as cur:
             return list(await cur.fetchall())
 
+    async def delete(self, mc_user_id: int) -> bool:
+        """Self-service deletion (the panel's 'Delete my data' button).
+        Returns True when a row was actually removed."""
+        n = await self._db.execute(
+            "DELETE FROM game_sync WHERE mc_user_id = ?", (mc_user_id,)
+        )
+        return n > 0
+
+    async def delete_by_discord(self, discord_user_id: int) -> int:
+        """Sweep companion to :meth:`delete`: any rows attached to this
+        Discord account (returns the number removed)."""
+        return await self._db.execute(
+            "DELETE FROM game_sync WHERE discord_user_id = ?",
+            (discord_user_id,),
+        )
+
 
 class FaqRepo:
     """Custom FAQ entries (reference bot: faqmanager). Soft-deleted rows

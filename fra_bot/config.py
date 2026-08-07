@@ -100,6 +100,9 @@ class DiscordChannels:
     # PRIVATE intake channel for the profile-sync userscript webhook;
     # 0 = game sync off.
     game_sync: int = 1527609874551410698
+    # Public panel explaining profile sync (install link, what is
+    # collected, self-service deletion); 0 = no panel.
+    profile_sync_panel: int = 543936110213070858
     # In-game SYSTEM messages (the /messages/system_message/<id> entries
     # the DM mirror used to ignore) land here as embeds; 0 = keep
     # ignoring them.
@@ -628,6 +631,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 mc_status=int(channels.get("mc_status", 543935264708362251)),
                 game_sync=int(
                     channels.get("game_sync", 1527609874551410698)
+                ),
+                profile_sync_panel=int(
+                    channels.get("profile_sync_panel", 543936110213070858)
                 ),
             ),
             admin_role_ids=tuple(

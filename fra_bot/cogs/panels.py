@@ -92,6 +92,10 @@ class PanelKeeperCog(commands.Cog):
                 "sanctions", "SanctionsCog",
                 lambda: int(getattr(cfg.discord.channels, "sanction_panel", 0) or 0),
             ),
+            PanelSpec(
+                "gamesync", "GameSyncCog",
+                lambda: int(getattr(cfg.discord.channels, "profile_sync_panel", 0) or 0),
+            ),
         ]
 
     def _spec(self, key: str) -> PanelSpec | None:

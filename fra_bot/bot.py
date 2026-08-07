@@ -290,6 +290,11 @@ class FRABot(commands.Bot):
         academy_cog = self.get_cog("AcademyCog")
         if academy_cog is not None:
             self.add_view(AcademyPanelView(academy_cog))
+        game_sync_cog = self.get_cog("GameSyncCog")
+        if game_sync_cog is not None:
+            from .cogs.game_sync import GameSyncPanelView
+
+            self.add_view(GameSyncPanelView(game_sync_cog))
         dm_cog = self.get_cog("DmMirrorCog")
         if dm_cog is not None:
             from .cogs.dm_mirror import DmPanelView

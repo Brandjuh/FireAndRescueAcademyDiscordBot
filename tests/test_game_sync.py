@@ -120,6 +120,7 @@ def _cog(db, *, channel_id=500):
             channels=SimpleNamespace(game_sync=channel_id),
         )),
         log_member_action=_log,
+        get_channel=lambda cid: None,
     )
     cog.repo = GameSyncRepo(db)
     return cog, actions
@@ -268,3 +269,145 @@ async def test_place_name_picks_locality_and_region():
     assert place_name(None) is None
     # Locality == region (city-states): no "Hamburg, Hamburg".
     assert place_name({"city": "Hamburg", "state": "Hamburg"}) == "Hamburg"
+
+
+# -- the member panel: sync link, deletion, explanation ---------------------------
+
+class FakeInteractionResponse:
+    def __init__(self, sink):
+        self._sink = sink
+
+    async def send_message(self, content=None, *, ephemeral=False, view=None):
+        self._sink.append(
+            {"content": content, "ephemeral": ephemeral, "view": view}
+        )
+
+
+class FakeInteraction:
+    def __init__(self, user_id=9001, name="Tester"):
+        self.user = SimpleNamespace(id=user_id, display_name=name)
+        self.sent: list[dict] = []
+        self.response = FakeInteractionResponse(self.sent)
+
+
+async def test_repo_delete_removes_row(db):
+    repo = GameSyncRepo(db)
+    await repo.upsert(
+        mc_user_id=101, discord_user_id=9001, mc_name="Alice",
+        building_count=3, vehicle_count=12,
+        buildings_json="{}", vehicles_json="{}",
+    )
+    assert await repo.delete(101) is True
+    assert await repo.get_by_mc(101) is None
+    assert await repo.delete(101) is False          # already gone
+    await repo.upsert(
+        mc_user_id=102, discord_user_id=9002, mc_name="Bob",
+        building_count=1, vehicle_count=1,
+        buildings_json="{}", vehicles_json="{}",
+    )
+    assert await repo.delete_by_discord(9002) == 1
+    assert await repo.delete_by_discord(9002) == 0
+
+
+async def test_delete_flow_removes_linked_row_and_logs(db):
+    await LinksRepo(db).upsert(9001, 101, status="approved")
+    cog, actions = _cog(db)
+    await GameSyncRepo(db).upsert(
+        mc_user_id=101, discord_user_id=9001, mc_name="Alice",
+        building_count=3, vehicle_count=12,
+        buildings_json="{}", vehicles_json="{}",
+    )
+    interaction = FakeInteraction(user_id=9001)
+    await cog.perform_delete(interaction)
+    assert await GameSyncRepo(db).get_by_mc(101) is None
+    assert actions[-1]["action"] == "game_sync_deleted"
+    reply = interaction.sent[0]
+    assert reply["ephemeral"] is True
+    assert "userscript" in reply["content"]         # delete ≠ stop syncing
+
+
+async def test_delete_flow_covers_pre_verify_row(db):
+    # Synced BEFORE verifying: the row carries no discord id, but the
+    # approved link proves which MC account is theirs.
+    await LinksRepo(db).upsert(9001, 101, status="approved")
+    cog, _ = _cog(db)
+    await GameSyncRepo(db).upsert(
+        mc_user_id=101, discord_user_id=None, mc_name="Alice",
+        building_count=3, vehicle_count=12,
+        buildings_json="{}", vehicles_json="{}",
+    )
+    await cog.perform_delete(FakeInteraction(user_id=9001))
+    assert await GameSyncRepo(db).get_by_mc(101) is None
+
+
+async def test_delete_flow_without_data_is_friendly(db):
+    cog, actions = _cog(db)
+    interaction = FakeInteraction(user_id=9001)
+    await cog.perform_delete(interaction)
+    assert "no synced game data" in interaction.sent[0]["content"]
+    assert actions == []                            # nothing to log
+
+
+async def test_delete_ignores_unapproved_links(db):
+    # A pending/rejected link must never delete somebody's row.
+    await LinksRepo(db).upsert(9001, 101, status="pending")
+    cog, _ = _cog(db)
+    await GameSyncRepo(db).upsert(
+        mc_user_id=101, discord_user_id=None, mc_name="Alice",
+        building_count=3, vehicle_count=12,
+        buildings_json="{}", vehicles_json="{}",
+    )
+    await cog.perform_delete(FakeInteraction(user_id=9001))
+    assert await GameSyncRepo(db).get_by_mc(101) is not None
+
+
+async def test_webhook_url_prefers_stored_override(db):
+    from fra_bot.cogs.game_sync import WEBHOOK_URL_KEY
+    from fra_bot.db.repos import StateRepo
+
+    url = "https://discord.com/api/webhooks/123/abc"
+    await StateRepo(db).set(WEBHOOK_URL_KEY, url)
+    cog, _ = _cog(db)
+    assert await cog.webhook_url() == url
+
+
+async def test_sync_link_unconfigured_asks_admin(db):
+    cog, _ = _cog(db)
+    interaction = FakeInteraction()
+    await cog.send_sync_link(interaction)
+    reply = interaction.sent[0]
+    assert reply["ephemeral"] is True and "admin" in reply["content"]
+
+
+async def test_sync_link_hands_out_url_with_steps(db):
+    from fra_bot.cogs.game_sync import WEBHOOK_URL_KEY
+    from fra_bot.db.repos import StateRepo
+
+    url = "https://discord.com/api/webhooks/123/abc"
+    await StateRepo(db).set(WEBHOOK_URL_KEY, url)
+    cog, _ = _cog(db)
+    interaction = FakeInteraction()
+    await cog.send_sync_link(interaction)
+    reply = interaction.sent[0]
+    assert url in reply["content"] and "!verify" in reply["content"]
+
+
+async def test_panel_embed_names_collection_and_deletion(db):
+    from fra_bot.cogs.panels import panel_digest
+
+    cog, _ = _cog(db)
+    embed = cog.panel_embed()
+    text = embed.description
+    assert "coordinates" in text and "passwords" in text.lower()
+    assert "Delete my data" in text
+    assert "once a day" in text                     # the auto-sync, honestly
+    assert panel_digest(embed) == panel_digest(cog.panel_embed())
+
+
+async def test_how_it_works_names_the_payload_and_auto_sync():
+    from fra_bot.cogs.game_sync import _HOW_IT_WORKS
+
+    assert "/api/buildings" in _HOW_IT_WORKS
+    assert "once a day" in _HOW_IT_WORKS
+    assert "Removing the userscript" in _HOW_IT_WORKS
+    assert "passwords" in _HOW_IT_WORKS
