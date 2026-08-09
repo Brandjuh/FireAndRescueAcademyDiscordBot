@@ -100,6 +100,56 @@ def test_ambiguous_names_catalog():
     assert "ocean navigation" in ambiguous
 
 
+def test_bare_ems_mobile_command_opens_the_ems_course():
+    # The live bug: "EMS Mobile Command" exists in fire AND ems, so the
+    # exact hit was diverted to the ambiguity list — and the shorter
+    # "Mobile command" inside the same words then won with a
+    # word-boundary 1.0. The member got a fire Mobile command class.
+    matches, ambiguous = match_trainings("EMS Mobile Command")
+    assert not ambiguous
+    assert [(m.discipline, m.name) for m in matches] == [
+        ("ems", "EMS Mobile Command")
+    ]
+    assert matches[0].duration_days == 7
+
+
+def test_ems_mobile_command_keeps_its_copy_count():
+    matches, _ = match_trainings("2x EMS Mobile Command")
+    assert matches[0].count == 2 and matches[0].discipline == "ems"
+
+
+def test_explicit_prefix_beats_the_ems_preference():
+    matches, ambiguous = match_trainings("Fire Station - EMS Mobile Command")
+    assert not ambiguous
+    assert [(m.discipline, m.name) for m in matches] == [
+        ("fire", "EMS Mobile Command")
+    ]
+    matches, _ = match_trainings("EMS - EMS Mobile Command")
+    assert matches[0].discipline == "ems"
+
+
+def test_bare_mobile_command_still_opens_fire():
+    matches, ambiguous = match_trainings("Mobile command")
+    assert not ambiguous
+    assert [(m.discipline, m.name) for m in matches] == [
+        ("fire", "Mobile command")
+    ]
+
+
+def test_longest_name_wins_over_a_contained_shorter_name():
+    # Same hijack class: both full names CONTAIN another course's name on
+    # a word boundary ("mobile command", "hazmat") — the most specific
+    # match must take the chunk, not whichever name iterates first.
+    matches, _ = match_trainings("Wildland Mobile Command Center Training")
+    assert [(m.discipline, m.name) for m in matches] == [
+        ("fire", "Wildland Mobile Command Center Training")
+    ]
+    matches, _ = match_trainings("Hazmat Medic Training")
+    assert [(m.discipline, m.name) for m in matches] == [
+        ("ems", "Hazmat Medic Training")
+    ]
+
+
 def test_no_match_for_chatter():
     matches, ambiguous = match_trainings("thanks everyone, great work today!")
     assert not matches

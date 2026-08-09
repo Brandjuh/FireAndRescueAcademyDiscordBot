@@ -473,6 +473,14 @@ async def test_training_guide_creates_all_sections_then_skips(db):
     assert fire_post.startswith("[FRA] 📋 Fire Station training request text")
     assert "- HazMat (3 days)" in fire_post
     assert "- Fire Station - Lifeguard Training (5 days) - opens Lifeguard Training" in fire_post
+    # EMS Mobile Command resolves to the EMS academy by preference, so
+    # the fire section keeps the prefix form while the EMS section lists
+    # the bare name.
+    assert "- Fire Station - EMS Mobile Command (7 days)" in fire_post
+    ems_post = board.created[3][1]
+    assert ems_post.startswith("[FRA] 📋 EMS training request text")
+    assert "- EMS Mobile Command (7 days)" in ems_post
+    assert "- EMS - EMS Mobile Command" not in ems_post
     assert all(len(content) < 2000 for _, content in board.created)
     assert await svc.state.get(svc._guide_id_key()) == "77"
     assert await svc.state.get(svc._section_id_key("fire")) == "77"

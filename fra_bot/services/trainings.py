@@ -1339,9 +1339,15 @@ def _discipline_guide(key: str) -> str:
         "",
         "Use one of these names in this topic to request a class:",
     ]
+    from ..mc.trainings_catalog import PREFERRED_DISCIPLINE, _normalize
+
     for name, days in sorted(DISCIPLINES.get(key, {}).items()):
         unit = "day" if days == 1 else "days"
-        if name in ambiguous:
+        if name in ambiguous and PREFERRED_DISCIPLINE.get(_normalize(name)) == key:
+            # The bare name resolves HERE by preference (it names its own
+            # academy) — no prefix needed in this section.
+            lines.append(f"- {name} ({days} {unit})")
+        elif name in ambiguous:
             lines.append(f"- {prefix} - {name} ({days} {unit}) - opens {name}")
         else:
             lines.append(f"- {name} ({days} {unit})")
