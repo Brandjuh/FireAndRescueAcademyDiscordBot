@@ -688,7 +688,8 @@ class TrainingsService(BoardRequestService):
             f"Training request not recognized for {post.author_name or 'member'}.",
             "",
             "No known course name was found in this post. The guide posts "
-            "above list the exact names to use.",
+            "above list the exact names to use — or just type a course's "
+            "[code] on its own (e.g. HAZ).",
         ]
         if suggestions:
             lines.append("Did you mean: " + ", ".join(suggestions) + "?")
@@ -1293,6 +1294,9 @@ def _overview_guide(min_rate: float) -> str:
         "",
         "[b]How to request[/b]",
         "- Type one or more training names from the agency posts below.",
+        "- Even quicker: every course has a short [code] — type it on its "
+        "own (HAZ, swat, [Emc]: any capitalisation, brackets optional) and "
+        "that exact class opens, no prefixes needed.",
         "- You can request multiple classes in one post, one per line or "
         "separated by commas.",
         "- Want several copies of one course? Add a count: x2 SWAT, 2x SWAT "
@@ -1320,35 +1324,48 @@ def _overview_guide(min_rate: float) -> str:
         "",
         "[b]Examples[/b]",
         "HazMat",
+        "HAZ",
         "x2 SWAT",
         "SWAT, K-9",
+        "2x EMC",
         "Fire Station - Lifeguard Training",
-        "Water Rescue - Lifeguard Training",
+        "LGTC",
     ])
 
 
 def _discipline_guide(key: str) -> str:
     """One agency's request-text post (the old bot's per-agency guide):
-    every course with its duration, with the disambiguating prefix spelled
-    out for courses that exist in several academy types."""
+    every course with its shorthand code and duration, with the
+    disambiguating prefix spelled out for courses that exist in several
+    academy types (the code itself never needs one)."""
     ambiguous = _ambiguous_course_names()
     prefix = _AGENCY_PREFIX[key]
     lines = [
         _section_marker(key),
         f"[b]{_AGENCY_TITLES[key]} trainings[/b]",
         "",
-        "Use one of these names in this topic to request a class:",
+        "Use one of these names in this topic to request a class — or "
+        "just type the [code] on its own (any capitalisation, brackets "
+        "optional):",
     ]
-    from ..mc.trainings_catalog import PREFERRED_DISCIPLINE, _normalize
+    from ..mc.trainings_catalog import (
+        PREFERRED_DISCIPLINE,
+        _normalize,
+        course_code,
+    )
 
     for name, days in sorted(DISCIPLINES.get(key, {}).items()):
         unit = "day" if days == 1 else "days"
+        code = course_code(key, name)
+        tag = f"[{code}] " if code else ""
         if name in ambiguous and PREFERRED_DISCIPLINE.get(_normalize(name)) == key:
             # The bare name resolves HERE by preference (it names its own
             # academy) — no prefix needed in this section.
-            lines.append(f"- {name} ({days} {unit})")
+            lines.append(f"- {tag}{name} ({days} {unit})")
         elif name in ambiguous:
-            lines.append(f"- {prefix} - {name} ({days} {unit}) - opens {name}")
+            lines.append(
+                f"- {tag}{prefix} - {name} ({days} {unit}) - opens {name}"
+            )
         else:
-            lines.append(f"- {name} ({days} {unit})")
+            lines.append(f"- {tag}{name} ({days} {unit})")
     return "\n".join(lines)

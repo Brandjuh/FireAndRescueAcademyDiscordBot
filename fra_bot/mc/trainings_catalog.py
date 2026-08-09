@@ -152,6 +152,94 @@ PREFERRED_DISCIPLINE: dict[str, str] = {
     "ems mobile command": "ems",
 }
 
+#: Board shorthand codes: one per (discipline, course), shown as
+#: ``[CODE]`` before each guide line and typed by members in any casing
+#: (with or without the brackets — normalization strips them). A code
+#: names its academy too, so duplicated courses get an academy letter
+#: (CCF/CCE, LGTF/LGTC) and a bare code never needs a discipline prefix.
+#: Word-like codes (RIOT, BOMB, DRONE) are deliberate: someone typing
+#: that word alone on the TRAINING board means exactly that course.
+#: "MOB" not "MC" (members use MC for MissionChief); "ABF" not "AIR"
+#: (too generic a word). Codes are STABLE — never repurpose one, or an
+#: old guide screenshot opens the wrong class.
+TRAINING_CODES: tuple[tuple[str, str, str], ...] = (
+    ("fire", "ALS Medical Training for Fire Apparatus", "ALSF"),
+    ("fire", "ARFF-Training", "ARFF"),
+    ("fire", "Airborne firefighting", "ABF"),
+    ("fire", "Critical Care", "CCF"),
+    ("fire", "EMS Mobile Command", "EMCF"),
+    ("fire", "HazMat", "HAZ"),
+    ("fire", "Heavy Machinery Operating", "HMO"),
+    ("fire", "Hooklift Truck Driving", "HTD"),
+    ("fire", "Hotshot Crew Training", "HSC"),
+    ("fire", "Law Enforcement for Arson Investigation", "ARSON"),
+    ("fire", "Lifeguard Supervisor", "LGSF"),
+    ("fire", "Lifeguard Training", "LGTF"),
+    ("fire", "Mobile command", "MOB"),
+    ("fire", "Ocean Navigation", "ONF"),
+    ("fire", "Search and Rescue Training", "SAR"),
+    ("fire", "Smoke Jumper Training", "SJT"),
+    ("fire", "Swift water rescue", "SWRF"),
+    ("fire", "Tactical Medic Training", "TMF"),
+    ("fire", "Technical Rescue Training", "TRT"),
+    ("fire", "Traffic Control Training", "TCF"),
+    ("fire", "Truck Driver's License", "TDLF"),
+    ("fire", "Wildland Lead Pilot Training", "WLP"),
+    ("fire", "Wildland Mobile Command Center Training", "WMC"),
+    ("police", "Drone Operator", "DRONE"),
+    ("police", "Environmental Game Warden", "EGW"),
+    ("police", "FBI Bomb Technician", "BOMB"),
+    ("police", "FBI Mobile Center Commander", "FBIMC"),
+    ("police", "K-9", "K9"),
+    ("police", "Ocean Navigation", "ONP"),
+    ("police", "Police Aviation", "AVI"),
+    ("police", "Police Motorcycle", "MOTO"),
+    ("police", "Police Operations Management", "POM"),
+    ("police", "Police Supervisor / Sheriff", "SHER"),
+    ("police", "Riot Police Training", "RIOT"),
+    ("police", "SWAT", "SWAT"),
+    ("police", "Sharpshooter Training", "SSP"),
+    ("police", "Swift water rescue", "SWRP"),
+    ("police", "Tactical Rescue Training", "TACR"),
+    ("police", "Traffic Control Training", "TCP"),
+    ("ems", "ALS Medical Training for Fire Apparatus", "ALSE"),
+    ("ems", "Critical Care", "CCE"),
+    ("ems", "EMS Mobile Command", "EMC"),
+    ("ems", "Hazmat Medic Training", "HMT"),
+    ("ems", "Mountain Dog Training", "MDT"),
+    ("ems", "Mountain Rescue Certificate", "MRC"),
+    ("ems", "Tactical Medic Training", "TME"),
+    ("ems", "Truck Driver's License", "TDLE"),
+    ("coastal", "Coastal Air Rescue Operations", "CARO"),
+    ("coastal", "Lifeguard Supervisor", "LGSC"),
+    ("coastal", "Lifeguard Training", "LGTC"),
+    ("coastal", "Ocean Navigation", "ONC"),
+    ("coastal", "Sharpshooter Training", "SSC"),
+    ("coastal", "Swift water rescue", "SWRC"),
+    ("coastal", "TACLET", "TACLET"),
+)
+
+
+def _build_code_lookup() -> dict[str, tuple[str, str]]:
+    lookup: dict[str, tuple[str, str]] = {}
+    for discipline, name, code in TRAINING_CODES:
+        lookup[_normalize(code)] = (discipline, name)
+    return lookup
+
+
+_CODE_LOOKUP = _build_code_lookup()
+
+
+def course_code(discipline: str, name: str) -> str | None:
+    """The board shorthand for one course, for the guide renderer.
+    Normalized name comparison, so a live-harvested spelling that only
+    differs in casing still finds its code."""
+    key = _normalize(name)
+    for code_discipline, code_name, code in TRAINING_CODES:
+        if code_discipline == discipline and _normalize(code_name) == key:
+            return code
+    return None
+
 
 def _strip_suffixes(variant: str) -> list[str]:
     out = [variant]
@@ -269,6 +357,44 @@ def match_trainings(
         remainder, count = _extract_count(remainder)
         normalized_chunk = _normalize(remainder)
         if not normalized_chunk:
+            continue
+
+        # Board codes first: an exact whole-word code resolves straight
+        # to its (discipline, course) — never fuzzed, like the
+        # exact_only aliases. When a chunk carries a code the chunk is
+        # DONE: a copied guide line "[HAZ] HazMat (3 days)" holds the
+        # code AND the name of the same course, and letting both paths
+        # score would double the copy count. Distinct courses dedupe on
+        # (discipline, name) for the same reason.
+        coded: dict[tuple[str, str], int] = {}
+        for word in normalized_chunk.split():
+            resolved = _CODE_LOOKUP.get(word)
+            if resolved is None:
+                continue
+            discipline, name = resolved
+            if forced_discipline and discipline != forced_discipline:
+                continue
+            entry = next(
+                (
+                    (cname, cdays)
+                    for cname, cdays in catalog.get(discipline, {}).items()
+                    if _normalize(cname) == _normalize(name)
+                ),
+                None,
+            )
+            if entry is None:  # course gone from the active catalog
+                continue
+            coded[(discipline, entry[0])] = entry[1]
+        if coded:
+            for (discipline, name), days in coded.items():
+                existing = matches.get((discipline, name))
+                chunk_count = count
+                if existing is not None:
+                    chunk_count = min(_MAX_COUNT, existing.count + count)
+                matches[(discipline, name)] = TrainingMatch(
+                    discipline=discipline, name=name, duration_days=days,
+                    count=chunk_count,
+                )
             continue
 
         # Every candidate first, the verdict after: ambiguous names used
