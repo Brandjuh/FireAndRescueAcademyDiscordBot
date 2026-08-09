@@ -142,6 +142,16 @@ COURSE_ALIASES: dict[str, tuple[str, ...]] = {
     "swat": ("SWOT", "S.W.A.T."),
 }
 
+#: Ambiguous names (same course in several academies) that a BARE post
+#: may still resolve, keyed by normalized name → discipline. Reserved for
+#: names that literally name their academy: "EMS Mobile Command" says
+#: EMS, so demanding "EMS - EMS Mobile Command" only produced fire's
+#: plain "Mobile command" by accident. An explicit prefix always wins
+#: over this preference; every other ambiguous name keeps requiring one.
+PREFERRED_DISCIPLINE: dict[str, str] = {
+    "ems mobile command": "ems",
+}
+
 
 def _strip_suffixes(variant: str) -> list[str]:
     out = [variant]
@@ -261,14 +271,20 @@ def match_trainings(
         if not normalized_chunk:
             continue
 
-        best: tuple[float, str, str, int] | None = None  # score, disc, name, days
+        # Every candidate first, the verdict after: ambiguous names used
+        # to be diverted to the warnings the moment they hit, which let a
+        # SHORTER name contained in the same text ("mobile command" ⊂
+        # "ems mobile command") take the chunk with a word-boundary 1.0
+        # — the member got a fire "Mobile command" instead of the course
+        # they named. (score, matched-variant length, disc, name, days):
+        # the length breaks score ties toward the most specific name, so
+        # "Wildland Mobile Command Center Training" beats "Mobile
+        # command" instead of losing on dict order.
+        best: tuple[float, int, str, str, int] | None = None
         for discipline, trainings in catalog.items():
             if forced_discipline and discipline != forced_discipline:
                 continue
             for name, days in trainings.items():
-                is_ambiguous = (
-                    forced_discipline is None and _normalize(name) in ambiguous
-                )
                 for variant, exact_only in _match_variants(name):
                     compact = variant.replace(" ", "")
                     score = 0.0
@@ -304,16 +320,41 @@ def match_trainings(
                         score = min(ratio, token_ratio)
                     if score < MATCH_THRESHOLD:
                         continue
-                    if is_ambiguous:
-                        key = _normalize(name)
-                        ambiguities[key] = AmbiguousMatch(
-                            name=name, disciplines=ambiguous[key]
-                        )
-                        continue
-                    if best is None or score > best[0]:
-                        best = (score, discipline, name, days)
+                    candidate = (score, len(variant), discipline, name, days)
+                    if best is None or candidate[:2] > best[:2]:
+                        best = candidate
         if best is not None:
-            _, discipline, name, days = best
+            _, _, discipline, name, days = best
+            key = _normalize(name)
+            if forced_discipline is None and key in ambiguous:
+                # The winner exists in several academies. A name that
+                # literally names its academy resolves by preference;
+                # everything else stays an explicit-prefix question — and
+                # deliberately does NOT fall back to a lesser candidate
+                # (a worse reading of the same words was the old hijack).
+                preferred = PREFERRED_DISCIPLINE.get(key)
+                # Normalized lookup: a live-harvested catalog may spell
+                # the same course with different casing per agency.
+                preferred_entry = (
+                    next(
+                        (
+                            (pname, pdays)
+                            for pname, pdays in catalog[preferred].items()
+                            if _normalize(pname) == key
+                        ),
+                        None,
+                    )
+                    if preferred and preferred in ambiguous[key]
+                    else None
+                )
+                if preferred_entry is not None:
+                    discipline = preferred
+                    name, days = preferred_entry
+                else:
+                    ambiguities[key] = AmbiguousMatch(
+                        name=name, disciplines=ambiguous[key]
+                    )
+                    continue
             existing = matches.get((discipline, name))
             if existing is not None:
                 count = min(_MAX_COUNT, existing.count + count)
