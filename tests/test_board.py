@@ -136,6 +136,75 @@ def test_bare_mobile_command_still_opens_fire():
     ]
 
 
+def test_training_codes_are_complete_and_unique():
+    # Every catalog course has exactly one code; every code names a real
+    # course; no two codes collide after normalization ("[HaZ]" → "haz").
+    from fra_bot.mc.trainings_catalog import (
+        DISCIPLINES,
+        TRAINING_CODES,
+        _normalize,
+    )
+
+    coded = {(d, n) for d, n, _ in TRAINING_CODES}
+    catalog = {
+        (d, n) for d, courses in DISCIPLINES.items() for n in courses
+    }
+    assert coded == catalog
+    normalized = [_normalize(code) for _, _, code in TRAINING_CODES]
+    assert len(normalized) == len(set(normalized))
+    assert all(normalized)
+
+
+def test_code_matches_in_any_casing_with_or_without_brackets():
+    for text in ("HAZ", "haz", "Haz", "[HaZ]"):
+        matches, ambiguous = match_trainings(text)
+        assert not ambiguous
+        assert [(m.discipline, m.name) for m in matches] == [
+            ("fire", "HazMat")
+        ], text
+
+
+def test_code_carries_the_copy_count_and_the_academy():
+    matches, _ = match_trainings("2x EMC")
+    assert [(m.discipline, m.name, m.count) for m in matches] == [
+        ("ems", "EMS Mobile Command", 2)
+    ]
+    matches, _ = match_trainings("EMCF")
+    assert matches[0].discipline == "fire"
+
+
+def test_code_resolves_an_ambiguous_course_without_prefix():
+    matches, ambiguous = match_trainings("LGTC")
+    assert not ambiguous
+    assert [(m.discipline, m.name) for m in matches] == [
+        ("coastal", "Lifeguard Training")
+    ]
+
+
+def test_copied_guide_line_counts_once():
+    # A guide line carries the code AND the course name — one class, not
+    # a doubled copy count.
+    matches, _ = match_trainings("[HAZ] HazMat (3 days)")
+    assert [(m.name, m.count) for m in matches] == [("HazMat", 1)]
+    matches, _ = match_trainings("2x [HAZ] HazMat (3 days)")
+    assert [(m.name, m.count) for m in matches] == [("HazMat", 2)]
+
+
+def test_codes_and_names_mix_across_chunks():
+    matches, _ = match_trainings("HAZ and SWAT")
+    assert {(m.discipline, m.name) for m in matches} == {
+        ("fire", "HazMat"), ("police", "SWAT")
+    }
+
+
+def test_code_of_a_course_missing_from_the_live_catalog_is_silent():
+    # The active (harvested) catalog no longer carries the course → the
+    # code opens nothing instead of a class the academy can't teach.
+    slim = {"fire": {"Mobile command": 5}, "police": {}, "ems": {}, "coastal": {}}
+    matches, ambiguous = match_trainings("HAZ", slim)
+    assert matches == [] and ambiguous == []
+
+
 def test_longest_name_wins_over_a_contained_shorter_name():
     # Same hijack class: both full names CONTAIN another course's name on
     # a word boundary ("mobile command", "hazmat") — the most specific
