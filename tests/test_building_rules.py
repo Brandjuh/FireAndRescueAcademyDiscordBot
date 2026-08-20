@@ -662,3 +662,67 @@ async def test_overpass_client_bounds_the_tcp_handshake():
         aiohttp.ClientSession = real_session
     assert seen["timeout"].sock_connect == CONNECT_TIMEOUT
     assert seen["timeout"].total >= CONNECT_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# A finished request must never build a second building
+# ---------------------------------------------------------------------------
+
+async def test_a_built_request_refuses_to_build_again(db):
+    """Live incident: one board request placed THREE prisons and sent
+    three confirmations. Whatever re-armed the row, nothing in the
+    executor noticed it had already finished — and the cached-coordinates
+    fast path skips both the contribution gate and the per-member quota,
+    so a re-armed row had no brake left at all."""
+    repo = AutomationRepo(db)
+    svc = _service(db)
+    svc.cfg.automation.dry_run = False
+    alerts = []
+
+    async def _notify(text):
+        alerts.append(text)
+
+    svc.notify_admin = _notify
+
+    built = 0
+
+    class _Builder:
+        async def build(self, **kwargs):
+            nonlocal built
+            built += 1
+            raise AssertionError("must not build again")
+
+    svc._builder = _Builder()
+
+    rid = await _board_row(repo, post_id=1, status="pending")
+    await repo.set_status(rid, "pending", payload=json.dumps({
+        "link": "https://maps.app.goo.gl/x",
+        "latitude": 42.96, "longitude": -85.67, "address": "1 Main St",
+        "building_type": "prison",
+        "building_id": 5561931,
+        "built_at": "2026-08-20T18:00:00+00:00",
+    }))
+    await repo.claim(rid)
+    await svc.execute_request(await repo.get(rid), announce=True)
+
+    assert built == 0
+    row = await repo.get(rid)
+    assert row["status"] == "done"
+    assert "already built" in row["status_detail"]
+    assert "5561931" in row["status_detail"]
+    assert alerts and "already been built" in alerts[0]
+
+
+async def test_a_completed_build_stamps_built_at(db):
+    """The guard keys off built_at, which must be stamped even when the
+    game never told us a building id."""
+    repo = AutomationRepo(db)
+    svc = _service(db)
+    rid = await _board_row(repo, post_id=1, status="processing")
+    payload = {"latitude": 42.96, "longitude": -85.67}
+    await svc._finish_build_done(
+        await repo.get(rid), "Alice", payload, "prison", "1 Main St", None,
+    )
+    stored = json.loads((await repo.get(rid))["payload"])
+    assert stored["built_at"]
+    assert stored["building_id"] is None      # id unknown, still guarded

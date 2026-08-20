@@ -179,6 +179,9 @@ class FRABot(commands.Bot):
         # Board building overrides are admin-only; the service is
         # Discord-free, so the guild lookup is injected here.
         self.buildings.is_admin_mc_id = self._mc_id_is_admin
+        # So the service can raise the alarm when it refuses a duplicate
+        # build without depending on Discord itself.
+        self.buildings.notify_admin = self.notify_admin
         # Credit rank roles (the old bot's RoleBasedCredits, ported).
         from .services.rank_roles import RankRolesService
 
