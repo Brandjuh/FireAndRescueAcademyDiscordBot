@@ -518,18 +518,29 @@ def test_explain_ranks_the_failure_reasons():
     )
 
 
+async def test_auto_build_stops_walking_cities_when_overpass_is_down(db):
+    """An outage is not a per-city problem: retrying all six cities just
+    repeats it while holding the daily-build job lock — and with silently
+    dropped packets each attempt costs a full timeout."""
+    from fra_bot.services.buildings import MAX_OVERPASS_FAILURES
+
+    overpass = FakeOverpass(error=OverpassError("Cannot connect to host"))
+    svc = _fund_the_service(_service(db, overpass=overpass))
+    svc._geocoder.search = _fake_search
+    await svc._auto_build_one("hospital", [])
+    assert len(overpass.queries) == MAX_OVERPASS_FAILURES
+
+
 async def test_auto_build_reports_an_overpass_outage_as_such(db):
     """The live report said "all nearby ones already built, or Overpass
     unavailable" for both types — one line covering three unrelated
     causes. Each must now name itself."""
-    from fra_bot.services.buildings import MAX_CITY_ATTEMPTS
-
     svc = _fund_the_service(
         _service(db, overpass=FakeOverpass(error=OverpassError("HTTP 504")))
     )
     svc._geocoder.search = _fake_search
     line = await svc._auto_build_one("hospital", [])
-    assert f"no location found in {MAX_CITY_ATTEMPTS} tries" in line
+    assert "no location found" in line
     assert "Overpass unavailable" in line
     assert "HTTP 504" in line
 
@@ -620,3 +631,34 @@ def test_query_server_timeout_fits_under_the_client_timeout():
     from fra_bot.geo.overpass import build_candidate_query
 
     assert "[out:json][timeout:60]" in build_candidate_query(1, 1, 2, 2)
+
+
+async def test_overpass_client_bounds_the_tcp_handshake():
+    """A host whose packets are silently dropped must fail on the connect
+    timeout, not burn the whole request budget before the next mirror."""
+    import aiohttp
+
+    from fra_bot.geo.overpass import CONNECT_TIMEOUT, OverpassClient
+
+    seen = {}
+    real_session = aiohttp.ClientSession
+
+    class _Spy(real_session):
+        def __init__(self, *args, timeout=None, **kwargs):
+            seen["timeout"] = timeout
+            super().__init__(*args, timeout=timeout, **kwargs)
+
+    aiohttp.ClientSession = _Spy
+    try:
+        client = OverpassClient(urls=["https://x.example/api"])
+
+        async def _fetch_one(session, url, query):
+            raise aiohttp.ClientError("nope")
+
+        client._fetch_one = _fetch_one
+        with pytest.raises(Exception):
+            await client.fetch("[out:json];")
+    finally:
+        aiohttp.ClientSession = real_session
+    assert seen["timeout"].sock_connect == CONNECT_TIMEOUT
+    assert seen["timeout"].total >= CONNECT_TIMEOUT

@@ -75,6 +75,10 @@ AUTO_BUILD_TYPES = ("hospital", "prison")     # one of each, every day
 DUPLICATE_RADIUS_M = 250                      # skip a spot within this of a same-type building
 OVERPASS_BBOX_DELTA = 0.18                    # ~20 km box around a chosen city
 MAX_CITY_ATTEMPTS = 6                         # cities to try before giving up on a type
+# Overpass failing is an OUTAGE, not a property of the city we happened to
+# pick — retrying every remaining city just repeats it while holding the
+# daily-build job lock.
+MAX_OVERPASS_FAILURES = 2
 DAILY_BUILD_STATE_KEY = "daily_build_last_date"
 # Fresh builds the finisher keeps revisiting (prison extensions unlock
 # only after the previous one finishes real-time construction).
@@ -1359,6 +1363,7 @@ class BuildingsService(BoardRequestService):
         fixes, reported identically.
         """
         why: dict[str, int] = {}
+        overpass_failures = 0
 
         def _note(reason: str) -> None:
             why[reason] = why.get(reason, 0) + 1
@@ -1384,6 +1389,16 @@ class BuildingsService(BoardRequestService):
             except (OverpassError, asyncio.TimeoutError) as exc:
                 log.warning("daily build: Overpass failed for %s (%s)", city, exc)
                 _note(f"Overpass unavailable ({exc})")
+                overpass_failures += 1
+                if overpass_failures >= MAX_OVERPASS_FAILURES:
+                    # Overpass being down is not a per-city problem —
+                    # walking the remaining cities just repeats the same
+                    # outage while holding the job lock.
+                    log.warning(
+                        "daily build: giving up after %d Overpass failures",
+                        overpass_failures,
+                    )
+                    break
                 continue
             candidates = parse_candidates(data, want=building_type)
             fresh = [

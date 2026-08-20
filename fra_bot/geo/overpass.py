@@ -29,6 +29,10 @@ DEFAULT_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 #: (Reachability of the mirrors cannot be verified from the dev sandbox;
 #: they are the well-known public endpoints. Override via
 #: ``geocoding.overpass_urls`` in config.yaml.)
+#: Seconds to wait for the TCP handshake alone. An unreachable endpoint
+#: must fail FAST so the next mirror gets its turn.
+CONNECT_TIMEOUT = 10.0
+
 DEFAULT_OVERPASS_URLS: tuple[str, ...] = (
     DEFAULT_OVERPASS_URL,
     "https://overpass.kumi.systems/api/interpreter",
@@ -196,7 +200,14 @@ class OverpassClient:
             return await resp.json(content_type=None)
 
     async def fetch(self, query: str) -> dict:
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        # sock_connect bounds the TCP handshake separately from the total
+        # budget. Without it an endpoint whose packets are silently
+        # DROPPED (no RST) burns the whole 90 s before the next mirror is
+        # tried — 3 mirrors x 6 city attempts x 2 building types is most
+        # of an hour with the daily-build job lock held.
+        timeout = aiohttp.ClientTimeout(
+            total=self._timeout, sock_connect=CONNECT_TIMEOUT
+        )
         problems: list[str] = []
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             for url in self._urls:
