@@ -37,6 +37,10 @@ STALE_PROCESSING_MINUTES = 15
 STALE_SWEEP_INTERVAL_MINUTES = 5
 # The 12h board tidy-up checks for due deletions this often (live mode only).
 BOARD_CLEANUP_INTERVAL_MINUTES = 10
+#: Last alliance-wide upgrade sweep (ISO). The job ticks every 30 min and
+#: compares against ``upgrade_sweep_hours`` so the interval is live-settable
+#: without rescheduling, and a restart can't replay the sweep.
+UPGRADE_SWEEP_STATE_KEY = "building_upgrade:last_sweep"
 
 
 def _parse_hhmm(value: str, *, default: tuple[int, int] = (3, 0)) -> tuple[int, int]:
@@ -172,6 +176,9 @@ class FRABot(commands.Bot):
         # reference bot): outgoing-only conversations live in the game's
         # SENT box and may never show on the inbox page the scan reads.
         self.tax_warnings.mirror = self.dm_mirror.mirror_now
+        # Board building overrides are admin-only; the service is
+        # Discord-free, so the guild lookup is injected here.
+        self.buildings.is_admin_mc_id = self._mc_id_is_admin
         # Credit rank roles (the old bot's RoleBasedCredits, ported).
         from .services.rank_roles import RankRolesService
 
@@ -594,17 +601,73 @@ class FRABot(commands.Bot):
             name="academy-autoscale",
             initial_delay_seconds=1200.0,
         )
+        # Alliance-wide level/extension catch-up. The per-build finisher
+        # only follows a FRESH build for a while; anything left half-done
+        # during a low-treasury spell used to stay that way forever. This
+        # sweep re-walks every alliance hospital/prison and buys what has
+        # become affordable, bounded per run and gated on the funds floor.
+        # Registered unconditionally with the interval read LIVE, so
+        # `!fra set automation.building.upgrade_sweep_hours` needs no
+        # restart; 0 turns it off.
+        async def _upgrade_sweep_if_due() -> None:
+            hours = int(
+                getattr(self.cfg.automation.building, "upgrade_sweep_hours", 0) or 0
+            )
+            if hours <= 0 or not self.cfg.automation.building.enabled:
+                return
+            state = StateRepo(self.db)
+            now = dt.datetime.now(dt.timezone.utc)
+            last_raw = await state.get(UPGRADE_SWEEP_STATE_KEY)
+            if last_raw:
+                try:
+                    if now - dt.datetime.fromisoformat(last_raw) < dt.timedelta(
+                        hours=hours
+                    ):
+                        return
+                except ValueError:
+                    pass
+            await state.set(UPGRADE_SWEEP_STATE_KEY, now.isoformat())
+            report = await self.building_upgrade.upgrade_all(
+                execute=not self.cfg.automation.dry_run
+            )
+            if report.actions or report.errors or report.funds_blocked:
+                await self.notify_admin(
+                    "🏗️ **Building upgrade sweep**\n"
+                    + report.summary(floor=self.cfg.automation.building.min_alliance_funds)[:1800]
+                )
+
+        sched.add_interval_job(
+            self._guarded(_upgrade_sweep_if_due, "building-upgrade-sweep"),
+            minutes=30,
+            name="building-upgrade-sweep",
+            initial_delay_seconds=900.0,
+        )
         # Daily worldwide auto-build: one hospital + one prison at a real OSM
         # location. Scheduled even in dry-run (it reports what it would build);
         # the build itself honours dry_run and the funds floor.
-        if automation.building.daily_build_enabled:
-            hour, minute = _parse_hhmm(automation.building.daily_build_time)
-            sched.add_daily_job(
-                self._guarded(self.buildings.daily_build, "daily-build"),
-                at=dt.time(hour, minute),
-                timezone=self.cfg.reports.timezone,
-                name="daily-build",
-            )
+        # Registered UNCONDITIONALLY — daily_build() reads the enabled
+        # switch itself, so `!fra set …daily_build_enabled on` takes effect
+        # without a restart. (Conditional registration silently made that
+        # setting a no-op until the next reboot.) The run reports to the
+        # admin channel: a build that is skipped for funds, a missing
+        # browser or an exhausted Overpass search must be VISIBLE, not
+        # buried in the log file.
+        hour, minute = _parse_hhmm(automation.building.daily_build_time)
+
+        async def _daily_build_and_report() -> None:
+            summary = await self.buildings.daily_build()
+            if summary:
+                await self.notify_admin(
+                    "🏗️ **Daily worldwide auto-build**\n"
+                    + "\n".join(summary)[:1800]
+                )
+
+        sched.add_daily_job(
+            self._guarded(_daily_build_and_report, "daily-build"),
+            at=dt.time(hour, minute),
+            timezone=self.cfg.reports.timezone,
+            name="daily-build",
+        )
         # The unified mission scheduler handles BOTH request boards — the
         # events board (kind=event) and the mission board (kind=large) — plus
         # the Discord queue and the rotation. Always registered; the poll
@@ -983,6 +1046,32 @@ class FRABot(commands.Bot):
             await channel.send(message[:1900])
         except discord.HTTPException as exc:
             log.warning("Could not post to admin channel: %s", exc)
+
+    async def _mc_id_is_admin(self, mc_user_id: int | None) -> bool:
+        """Is this MissionChief account an alliance admin on Discord?
+
+        Resolves MC id → APPROVED verification link → guild member → the
+        administrator permission or a role in ``discord.admin_role_ids``.
+        Used by the board building override, which spends alliance credits
+        on an unverified location and must therefore be admin-only.
+        """
+        if not mc_user_id:
+            return False
+        from .db.repos import LinksRepo
+
+        link = await LinksRepo(self.db).get_by_mc(int(mc_user_id))
+        if link is None or link["status"] != "approved":
+            return False
+        guild = self.get_guild(self.cfg.discord.guild_id)
+        if guild is None:
+            return False
+        member = guild.get_member(int(link["discord_id"]))
+        if member is None:
+            return False
+        if member.guild_permissions.administrator:
+            return True
+        allowed = set(self.cfg.discord.admin_role_ids)
+        return any(role.id in allowed for role in member.roles)
 
     async def log_member_action(
         self, *, action: str, detail: str | None = None,

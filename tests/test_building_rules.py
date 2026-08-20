@@ -389,3 +389,99 @@ async def test_executor_still_refuses_when_osm_is_empty(db):
     row = await repo.get(rid)
     assert row["status"] == "skipped"
     assert "refused: location is not a hospital or prison" in row["status_detail"]
+
+
+# ---------------------------------------------------------------------------
+# Admin override on the board + the finisher's funds handling
+# ---------------------------------------------------------------------------
+
+def test_force_keyword_needs_both_a_force_word_and_one_type():
+    from fra_bot.services.buildings import forced_type_from_post as forced
+
+    assert forced("Prison: https://maps.app.goo.gl/x force") == "prison"
+    assert forced("FORCE Hospital: https://maps.app.goo.gl/x") == "hospital"
+    assert forced("forceer jail https://x") == "prison"
+    # No force word, an ordinary request — verified as usual.
+    assert forced("Prison: https://maps.app.goo.gl/x") is None
+    # Both types named: nothing unambiguous to force.
+    assert forced("force hospital and prison") is None
+    # The word must stand alone, never inside another word.
+    assert forced("Reinforcement near the prison https://x") is None
+
+
+async def _override_service(db, *, admin: bool):
+    svc = _service(db, geocoder_result=_loc(address="1 Nowhere Rd"))
+
+    async def _is_admin(mc_user_id):
+        return admin
+
+    svc.is_admin_mc_id = _is_admin
+    return svc
+
+
+async def test_board_override_builds_the_named_type_for_an_admin(db):
+    repo = AutomationRepo(db)
+    svc = await _override_service(db, admin=True)
+    rid = await _board_row(repo, post_id=1, status="pending")
+    await repo.set_status(rid, "pending", payload=json.dumps(
+        {"link": "https://maps.app.goo.gl/x", "forced_type": "prison"}
+    ))
+    row = await repo.get(rid)
+    assert await svc._forced_type_allowed(row) == "prison"
+
+
+async def test_board_override_is_ignored_for_a_non_admin(db):
+    repo = AutomationRepo(db)
+    svc = await _override_service(db, admin=False)
+    rid = await _board_row(repo, post_id=1, status="pending")
+    await repo.set_status(rid, "pending", payload=json.dumps(
+        {"link": "https://maps.app.goo.gl/x", "forced_type": "prison"}
+    ))
+    assert await svc._forced_type_allowed(await repo.get(rid)) is None
+
+
+async def test_override_absent_without_the_keyword(db):
+    repo = AutomationRepo(db)
+    svc = await _override_service(db, admin=True)
+    rid = await _board_row(repo, post_id=1, status="pending")
+    assert await svc._forced_type_allowed(await repo.get(rid)) is None
+
+
+async def test_finisher_keeps_a_building_while_funds_are_blocked(db):
+    """The live bug: 12h of alliance funds under the floor retired a
+    half-built hospital as "complete", and nothing ever finished it."""
+    from fra_bot.services.buildings import (
+        COMPLETION_IDLE_LIMIT,
+        PENDING_COMPLETION_KEY,
+    )
+    from fra_bot.services.building_upgrade import UpgradeReport
+
+    svc = _service(db)
+    svc.cfg.automation.dry_run = False
+    svc._auto = svc.cfg.automation.building
+
+    class _Upgrader:
+        def __init__(self, blocked):
+            self.blocked = blocked
+
+        async def upgrade_one(self, building_id, *, kind, name):
+            report = UpgradeReport(mode="LIVE")
+            report.funds_blocked = self.blocked
+            return report
+
+    await svc.state.set(PENDING_COMPLETION_KEY, json.dumps({
+        "555": {"kind": "hospital", "name": "St Mary", "tax_done": True,
+                "idle": COMPLETION_IDLE_LIMIT - 1},
+    }))
+
+    svc._upgrader = _Upgrader(blocked=True)
+    for _ in range(3):                      # would have retired it 3x over
+        await svc.finish_pending()
+    still = json.loads(await svc.state.get(PENDING_COMPLETION_KEY))
+    assert "555" in still, "a funds-blocked pass must not retire the building"
+    assert still["555"]["idle"] == COMPLETION_IDLE_LIMIT - 1   # untouched
+
+    # Funds recover and there is genuinely nothing left to buy — now it retires.
+    svc._upgrader = _Upgrader(blocked=False)
+    await svc.finish_pending()
+    assert json.loads(await svc.state.get(PENDING_COMPLETION_KEY)) == {}

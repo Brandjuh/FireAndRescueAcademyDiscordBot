@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import random
+import re
 from dataclasses import replace
 from zoneinfo import ZoneInfo
 
@@ -114,6 +115,29 @@ _INACTIVE_TERMS = ("museum", "memorial", "historic", "former ", "abandoned",
 
 def _has_any(text: str, terms) -> bool:
     return any(term in text for term in terms)
+
+
+#: Board override: an admin post carrying this word AND a building type
+#: skips verification entirely and builds what it says. Deliberately a
+#: whole word, so "reinforcement" or an address can never trigger it.
+_FORCE_RE = re.compile(r"\b(?:force|forceer|override)\b", re.IGNORECASE)
+
+
+def forced_type_from_post(content: str) -> str | None:
+    """The building type an admin explicitly forced in a board post, or
+    None. Requires BOTH the force word and a type word, so a post that
+    merely mentions "prison" is still verified normally."""
+    text = content or ""
+    if not _FORCE_RE.search(text):
+        return None
+    lowered = text.lower()
+    hospital = "hospital" in lowered
+    prison = "prison" in lowered or "jail" in lowered
+    if hospital and not prison:
+        return "hospital"
+    if prison and not hospital:
+        return "prison"
+    return None  # neither, or both — nothing unambiguous to force
 
 
 def detect_building_type(
@@ -365,7 +389,42 @@ class BuildingsService(BoardRequestService):
         links = find_maps_links(post.content)
         if not links:
             return None  # no location shared
-        return self.request_data(post, {"link": links[0]})
+        data = {"link": links[0]}
+        forced = forced_type_from_post(post.content)
+        if forced is not None:
+            # Only RECORDED here — whether it is honoured depends on the
+            # author being an admin, which is checked at execute time
+            # against the roster/verification data (a board parser has no
+            # Discord context).
+            data["forced_type"] = forced
+        return self.request_data(post, data)
+
+    async def _forced_type_allowed(self, request: aiosqlite.Row) -> str | None:
+        """The admin-forced building type for this request, or None.
+
+        A member typing "force" gets no special treatment: the override is
+        deliberately gated on the poster being an alliance admin, because
+        it spends alliance credits on a location nothing verified.
+        """
+        payload = json.loads(request["payload"] or "{}")
+        forced = payload.get("forced_type")
+        if forced not in ("hospital", "prison"):
+            return None
+        check = getattr(self, "is_admin_mc_id", None)
+        if check is None:
+            return None
+        try:
+            allowed = await check(request["requester_mc_id"])
+        except Exception:  # noqa: BLE001 - an override must never crash intake
+            log.exception("building override: admin check failed")
+            return None
+        if not allowed:
+            log.info(
+                "building override ignored: %s is not an admin",
+                request["requester_name"] or request["requester_mc_id"],
+            )
+            return None
+        return forced
 
     async def execute_request(self, request: aiosqlite.Row, *, announce: bool) -> None:
         from ..geo.geocoder import GeocodeResult
@@ -479,7 +538,15 @@ class BuildingsService(BoardRequestService):
                 ))
                 return
 
-            building_type = await self.resolve_building_type(location)
+            forced = await self._forced_type_allowed(request)
+            if forced is not None:
+                log.info(
+                    "building override: %s forced %s for request %s",
+                    request["requester_name"] or "?", forced, request["id"],
+                )
+                building_type = forced
+            else:
+                building_type = await self.resolve_building_type(location)
             payload.update(
                 {
                     "latitude": location.latitude,
@@ -823,6 +890,18 @@ class BuildingsService(BoardRequestService):
                     f"#{building_id}: +{report.levels_raised} levels, "
                     f"+{report.extensions_bought} extensions"
                 )
+            if report.funds_blocked:
+                # "No progress" and "no money" are NOT the same thing. The
+                # idle counter used to advance either way, so ~12h of
+                # alliance funds under the floor silently retired a
+                # half-built hospital as "complete" — and nothing ever
+                # picked it up again once the treasury recovered. A
+                # funds-blocked pass simply doesn't count.
+                lines.append(
+                    f"#{building_id}: ⏳ alliance funds below the floor — "
+                    "kept on the list"
+                )
+                continue
             entry["idle"] = 0 if progressed else entry.get("idle", 0) + 1
             if entry["idle"] >= COMPLETION_IDLE_LIMIT and entry.get("tax_done"):
                 del data[key]

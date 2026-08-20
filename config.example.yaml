@@ -228,6 +228,13 @@ automation:
     # Honours dry_run (reports what it would build). Off by default.
     daily_build_enabled: false
     daily_build_time: "03:00"   # HH:MM in reports.timezone
+    # Alliance-wide catch-up sweep: every N hours, re-walk EVERY alliance
+    # hospital/prison and buy the levels/extensions that have become
+    # affordable. The per-build finisher only follows a fresh build for a
+    # while, so without this a building left half-done during a
+    # low-treasury spell stays that way. Funds-floor gated, bounded per
+    # run, and skipped entirely in dry-run. 0 = off.
+    upgrade_sweep_hours: 6
   academy:
     # Discord-panel academy builds at a FIXED address (duplicates allowed).
     # Staff click Fire/Police/Rescue/Coastal; the bot builds "[AA] <type>

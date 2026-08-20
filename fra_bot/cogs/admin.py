@@ -1993,15 +1993,17 @@ class AdminCog(commands.Cog):
             kwargs[aliases.get(key, key)] = value.strip()
         return build_spec(location=location, **kwargs)
 
-    @fra.command(name="testbuild")
+    @fra.command(name="testbuild", aliases=["forcebuild", "buildhere"])
     async def testbuild(self, ctx: commands.Context, *, args: str = "") -> None:
-        """Test the building flow for a location without a board post.
+        """Build at a location without a board post — the type override.
 
-        `!fra testbuild <address or maps link>` — the type is auto-detected
-        from the address (hospital/prison). `!fra testbuild hospital <loc>`
-        forces the type. In dry-run this drives the real form (type, pin,
-        address, alliance button) but does NOT submit; with dry_run off it
-        actually builds.
+        `!fra forcebuild hospital <address or maps link>` builds THAT type
+        no matter what the verification says: naming the type skips the
+        hospital/prison detection entirely. Without a type
+        (`!fra testbuild <loc>`) it is auto-detected as usual.
+
+        In dry-run this drives the real form (type, pin, address, alliance
+        button) but does NOT submit; with dry_run off it actually builds.
         """
         args = args.strip()
         parts = args.split(maxsplit=1)
@@ -2012,7 +2014,8 @@ class AdminCog(commands.Cog):
             location = parts[1].strip() if len(parts) > 1 else ""
         if not location:
             await ctx.send(
-                "Usage: `!fra testbuild [hospital|prison] <address or maps link>`"
+                "Usage: `!fra forcebuild [hospital|prison] <address or maps "
+                "link>` — naming the type overrides the verification."
             )
             return
         await ctx.send(
