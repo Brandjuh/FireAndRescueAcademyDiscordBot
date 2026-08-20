@@ -100,6 +100,22 @@ async def _seed_roster(db, mc_id, name, rate):
     )
 
 
+def _fund_the_service(svc, funds=99_000_000):
+    """Stub the live funds read — _auto_build_one checks the treasury
+    before it ever looks for a location."""
+    async def _funds():
+        return funds, None
+
+    svc._live_funds = _funds
+    return svc
+
+
+async def _fake_search(query):
+    """A geocoder that always resolves a city, so a test can isolate the
+    Overpass side of the daily-build search."""
+    return _loc(address=str(query), lat=42.96, lng=-85.67)
+
+
 def _service(db, geocoder_result=None, overpass=None,
              min_contribution_rate=0.0):
     svc = BuildingsService(
@@ -485,3 +501,53 @@ async def test_finisher_keeps_a_building_while_funds_are_blocked(db):
     svc._upgrader = _Upgrader(blocked=False)
     await svc.finish_pending()
     assert json.loads(await svc.state.get(PENDING_COMPLETION_KEY)) == {}
+
+
+# ---------------------------------------------------------------------------
+# The daily auto-build says WHY it found nothing
+# ---------------------------------------------------------------------------
+
+def test_explain_ranks_the_failure_reasons():
+    from fra_bot.services.buildings import BuildingsService
+
+    assert BuildingsService._explain({}) == "no attempts were made"
+    assert BuildingsService._explain({"Overpass unavailable (504)": 4,
+                                      "geocode failed (quota)": 2}) == (
+        "4x Overpass unavailable (504), 2x geocode failed (quota)"
+    )
+
+
+async def test_auto_build_reports_an_overpass_outage_as_such(db):
+    """The live report said "all nearby ones already built, or Overpass
+    unavailable" for both types — one line covering three unrelated
+    causes. Each must now name itself."""
+    from fra_bot.services.buildings import MAX_CITY_ATTEMPTS
+
+    svc = _fund_the_service(
+        _service(db, overpass=FakeOverpass(error=OverpassError("HTTP 504")))
+    )
+    svc._geocoder.search = _fake_search
+    line = await svc._auto_build_one("hospital", [])
+    assert f"no location found in {MAX_CITY_ATTEMPTS} tries" in line
+    assert "Overpass unavailable" in line
+    assert "HTTP 504" in line
+
+
+async def test_auto_build_reports_a_geocoder_outage_as_such(db):
+    from fra_bot.geo.geocoder import GeocodeError
+
+    svc = _fund_the_service(_service(db, overpass=FakeOverpass()))
+
+    async def _boom(query):
+        raise GeocodeError("quota exceeded")
+
+    svc._geocoder.search = _boom
+    line = await svc._auto_build_one("prison", [])
+    assert "geocode failed" in line and "quota exceeded" in line
+    assert "Overpass" not in line          # never blamed the wrong layer
+
+
+async def test_auto_build_distinguishes_empty_osm_from_already_built(db):
+    svc = _fund_the_service(_service(db, overpass=FakeOverpass()))  # zero elements
+    svc._geocoder.search = _fake_search
+    assert "none in OSM near the city" in await svc._auto_build_one("prison", [])
