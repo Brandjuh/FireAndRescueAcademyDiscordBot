@@ -201,14 +201,19 @@ class ReportingCog(commands.Cog):
                 log.exception("Overview report admin (%s) failed", period)
             await asyncio.sleep(1.0)
 
-    async def _post_member_card(self, period_name: str) -> None:
+    async def _post_member_card(self, period_name: str, channel=None) -> None:
         """The member-facing half as ONE message: a rendered card with a
         compact embed under it. The morning used to arrive as a handful of
-        separate embeds, which is what made it feel scattered."""
+        separate embeds, which is what made it feel scattered.
+
+        ``channel`` overrides the reports channel, so `!fra reportcard`
+        can preview the real thing where it is typed instead of posting
+        to the members.
+        """
         from ..reporting.analytics import gather_overview
         from ..services.report_card import card_from_overview, render_daily_card
 
-        channel = self.bot.channel_for("reports")
+        channel = channel or self.bot.channel_for("reports")
         if channel is None:
             return
         period = resolve_period(period_name)

@@ -1267,11 +1267,11 @@ class BuildingsService(BoardRequestService):
                 f"{self._auto.min_alliance_funds:,} — skipped until tomorrow"
             )
 
-        candidate = await self._find_osm_candidate(building_type, existing)
+        candidate, why = await self._find_osm_candidate(building_type, existing)
         if candidate is None:
             return (
-                f"❔ {building_type}: no fresh real location found this run "
-                "(all nearby ones already built, or Overpass unavailable)"
+                f"❔ {building_type}: no location found in "
+                f"{MAX_CITY_ATTEMPTS} tries — {self._explain(why)}"
             )
 
         where = candidate.address or candidate.name
@@ -1345,29 +1345,46 @@ class BuildingsService(BoardRequestService):
         """Pick a random worldwide city, ask Overpass for real facilities of
         the type around it, drop ones within the dedup radius of an existing
         same-type building, and return a random survivor. Retries other
-        cities. Returns an :class:`OsmCandidate` or None."""
+        cities.
+
+        Returns ``(candidate_or_None, why)`` — ``why`` counts what went
+        wrong per city attempt. Every failure here used to be swallowed
+        into one "all nearby ones already built, or Overpass unavailable"
+        line, which conflates a geocoder outage, an Overpass outage and a
+        genuinely exhausted search: three problems with three different
+        fixes, reported identically.
+        """
+        why: dict[str, int] = {}
+
+        def _note(reason: str) -> None:
+            why[reason] = why.get(reason, 0) + 1
+
         for _ in range(MAX_CITY_ATTEMPTS):
             city = random_world_location(self._rng)
             try:
                 loc = await self._geocoder.search(city)
             except GeocodeError as exc:
-                log.debug("daily build: geocode of %r failed (%s)", city, exc)
+                log.warning("daily build: geocode of %r failed (%s)", city, exc)
+                _note(f"geocode failed ({exc})")
                 continue
             south = max(-90.0, loc.latitude - OVERPASS_BBOX_DELTA)
             north = min(90.0, loc.latitude + OVERPASS_BBOX_DELTA)
             west = max(-180.0, loc.longitude - OVERPASS_BBOX_DELTA)
             east = min(180.0, loc.longitude + OVERPASS_BBOX_DELTA)
             if south >= north or west >= east:
+                _note("degenerate bounding box")
                 continue
             query = build_candidate_query(south, west, north, east, building_type)
             try:
                 data = await self._overpass.fetch(query)
-            except OverpassError as exc:
+            except (OverpassError, asyncio.TimeoutError) as exc:
                 log.warning("daily build: Overpass failed for %s (%s)", city, exc)
+                _note(f"Overpass unavailable ({exc})")
                 continue
+            candidates = parse_candidates(data, want=building_type)
             fresh = [
                 c
-                for c in parse_candidates(data, want=building_type)
+                for c in candidates
                 if nearest_duplicate(
                     c.latitude, c.longitude, building_type, existing,
                     radius_m=DUPLICATE_RADIUS_M,
@@ -1378,10 +1395,24 @@ class BuildingsService(BoardRequestService):
                 log.info(
                     "daily build: chose %s '%s' near %s (%d candidates, %d fresh)",
                     building_type, chosen.name, city,
-                    len(parse_candidates(data, want=building_type)), len(fresh),
+                    len(candidates), len(fresh),
                 )
-                return await self._with_address(chosen, city)
-        return None
+                return await self._with_address(chosen, city), why
+            _note(
+                "none in OSM near the city" if not candidates
+                else "all already built"
+            )
+        return None, why
+
+    @staticmethod
+    def _explain(why: dict[str, int]) -> str:
+        """The per-attempt failure counts as one readable clause."""
+        if not why:
+            return "no attempts were made"
+        return ", ".join(
+            f"{count}x {reason}"
+            for reason, count in sorted(why.items(), key=lambda kv: -kv[1])
+        )
 
     async def _with_address(self, candidate, city: str):
         """Guarantee the candidate carries an address — most OSM facilities
