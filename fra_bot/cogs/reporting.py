@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import io
 import logging
 
 import discord
@@ -178,26 +179,85 @@ class ReportingCog(commands.Cog):
         setup); ``reports.overviews`` turns the pair off."""
         if not getattr(self.bot.cfg.reports, "overviews", True):
             return
-        targets = (
-            ("overview-member", self.bot.channel_for("reports")),
-            ("overview-admin", self.bot.channel_for("admin_log")),
-        )
         periods = ["yesterday"]
         if fired_at.day == 1:
             periods.append("prev-month")
         for period in periods:
-            for name, channel in targets:
-                if channel is None:
+            try:
+                await self._post_member_card(period)
+            except Exception:
+                log.exception("Member overview card (%s) failed", period)
+            await asyncio.sleep(1.0)
+            channel = self.bot.channel_for("admin_log")
+            if channel is None:
+                continue
+            try:
+                embed = await self.build("overview-admin", period)
+                if isinstance(embed, str):
+                    log.warning("Overview admin error: %s", embed)
                     continue
-                try:
-                    embed = await self.build(name, period)
-                    if isinstance(embed, str):
-                        log.warning("Overview %s error: %s", name, embed)
-                        continue
-                    await channel.send(embed=embed)
-                except Exception:
-                    log.exception("Overview report %s (%s) failed", name, period)
-                await asyncio.sleep(1.0)
+                await channel.send(embed=embed)
+            except Exception:
+                log.exception("Overview report admin (%s) failed", period)
+            await asyncio.sleep(1.0)
+
+    async def _post_member_card(self, period_name: str) -> None:
+        """The member-facing half as ONE message: a rendered card with a
+        compact embed under it. The morning used to arrive as a handful of
+        separate embeds, which is what made it feel scattered."""
+        from ..reporting.analytics import gather_overview
+        from ..services.report_card import card_from_overview, render_daily_card
+
+        channel = self.bot.channel_for("reports")
+        if channel is None:
+            return
+        period = resolve_period(period_name)
+        data = await gather_overview(self.bot.db, period, admin=False)
+        label = (
+            period.start.astimezone(NY).strftime("%d %b %Y")
+            if period.start is not None else period.label
+        )
+        heading = (
+            "Monthly overview" if period_name == "prev-month"
+            else "Daily overview"
+        )
+        card = card_from_overview(data, label)
+        card.heading = heading
+        png = render_daily_card(card)
+
+        embed = discord.Embed(
+            title=f"{heading} — {label}",
+            colour=discord.Colour(0xF0521F),
+            timestamp=dt.datetime.now(dt.timezone.utc),
+        )
+        if data.outlook:
+            embed.add_field(
+                name="🔮 Outlook",
+                value="\n".join(f"• {line}" for line in data.outlook)[:_FIELD_LIMIT],
+                inline=False,
+            )
+        if data.fun_facts:
+            embed.add_field(
+                name="✨ Fun facts",
+                value="\n".join(data.fun_facts)[:_FIELD_LIMIT],
+                inline=False,
+            )
+        if png is None:
+            # Pillow missing — fall back to the full text report rather
+            # than posting an embed with no numbers in it at all.
+            fallback = await self.build("overview-member", period_name)
+            if not isinstance(fallback, str):
+                await channel.send(embed=fallback)
+                return
+        file = (
+            discord.File(io.BytesIO(png), "daily-overview.png")
+            if png is not None else None
+        )
+        if file is not None:
+            embed.set_image(url="attachment://daily-overview.png")
+            await channel.send(embed=embed, file=file)
+        else:
+            await channel.send(embed=embed)
 
     @staticmethod
     def _is_due(sched, fired_at: dt.datetime) -> bool:

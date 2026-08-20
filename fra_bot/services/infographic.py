@@ -84,9 +84,14 @@ def _stat_tiles(draw, y: int, tiles: list[tuple[str, int]]) -> int:
     return y + tile_height + 28
 
 
-def _bar_panel(draw, y: int, title: str, rows: list[tuple[str, int]]) -> int:
+def _bar_panel(draw, y: int, title: str, rows: list[tuple[str, int]],
+               *, cap: bool = True) -> int:
     """A rounded panel with one single-hue horizontal bar per row and the
-    value direct-labeled at the bar end; the new cursor y."""
+    value direct-labeled at the bar end; the new cursor y.
+
+    ``cap`` title-cases the row label — right for building/vehicle types
+    ("fire station"), wrong for member names, which must be printed
+    exactly as the player spells them ("BrandjuhNL")."""
     if not rows:
         return y
     bar_height, bar_gap = 26, 20
@@ -97,8 +102,11 @@ def _bar_panel(draw, y: int, title: str, rows: list[tuple[str, int]]) -> int:
     draw.text((_PAD + _PANEL_PAD, y + _PANEL_PAD), title,
               font=_font(18), fill=_INK_MUTED)
     label_font, value_font = _font(20), _font(20)
+    def _label(name: str) -> str:
+        return name.capitalize() if cap else name
+
     label_col = max(
-        int(draw.textlength(name.capitalize(), font=label_font))
+        int(draw.textlength(_label(name), font=label_font))
         for name, _ in rows
     ) + 24
     bar_x = _PAD + _PANEL_PAD + label_col
@@ -107,7 +115,7 @@ def _bar_panel(draw, y: int, title: str, rows: list[tuple[str, int]]) -> int:
     row_y = y + _PANEL_PAD + 40
     for name, count in rows:
         middle = row_y + bar_height // 2
-        draw.text((_PAD + _PANEL_PAD, middle), name.capitalize(),
+        draw.text((_PAD + _PANEL_PAD, middle), _label(name),
                   font=label_font, fill=_INK_SOFT, anchor="lm")
         bar = max(6, int(bar_room * count / heaviest))
         draw.rounded_rectangle(
