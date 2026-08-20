@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 
 from ..config import Config
-from ..db.database import Database
+from ..db.database import Database, utcnow_iso
 from ..geo.geocoder import GeocodeError, Geocoder
 from ..geo.maps_links import find_maps_links
 from ..geo.overpass import (
@@ -597,6 +597,37 @@ class BuildingsService(BoardRequestService):
     ) -> None:
         request_id = request["id"]
 
+        # A request that ALREADY produced a building must never build a
+        # second one, whatever put it back in the queue. Live incident: one
+        # board request placed three prisons and sent three confirmations,
+        # and nothing in this method noticed it had already finished. The
+        # cached-coordinates fast path skips the contribution gate and the
+        # per-member quota (both settled on the first attempt), so a
+        # re-armed row had no brake left at all.
+        if payload.get("built_at"):
+            built = payload.get("building_id")
+            log.error(
+                "building request %s was re-queued after it already built "
+                "%s — refusing to build again",
+                request_id, f"#{built}" if built else "(id unknown)",
+            )
+            await self.requests.set_status(
+                request_id, "done",
+                f"already built {payload.get('building_type') or 'building'}"
+                + (f" #{built}" if built else "")
+                + " — refused to build a duplicate",
+                payload=json.dumps(payload),
+            )
+            # Injected from bot.py (the service is Discord-free).
+            notify = getattr(self, "notify_admin", None)
+            if notify is not None:
+                await notify(
+                    f"⚠️ Building request #{request_id} was re-queued after "
+                    "it had already been built; a duplicate build was "
+                    "refused. Please check what re-armed it."
+                )
+            return
+
         # A prior submit whose result couldn't be proven yet: ONLY verify —
         # never rebuild. A second submit could create a duplicate building.
         pending = payload.get("pending_confirm")
@@ -761,6 +792,11 @@ class BuildingsService(BoardRequestService):
         building_type: str, address: str | None, building_id: int | None,
     ) -> None:
         payload["building_id"] = building_id
+        # ALWAYS stamped, even when the game never told us an id: this is
+        # the flag execute_request refuses to build over. Recording only
+        # building_id left "built, id unknown" indistinguishable from
+        # "never built".
+        payload["built_at"] = utcnow_iso()
         name = address.split(",")[0] if address else None
         coords = None
         if payload.get("latitude") is not None:
