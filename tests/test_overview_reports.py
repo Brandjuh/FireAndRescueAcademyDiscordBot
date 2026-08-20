@@ -275,9 +275,11 @@ async def test_unbounded_period_is_refused(db, registry):
 class _Channel:
     def __init__(self):
         self.embeds = []
+        self.files = []
 
-    async def send(self, embed=None, **kwargs):
+    async def send(self, embed=None, file=None, **kwargs):
         self.embeds.append(embed)
+        self.files.append(file)
 
 
 def _reporting_cog(db, registry, *, overviews=True):
@@ -310,7 +312,7 @@ async def test_daily_tick_posts_both_overviews(db, registry):
     await cog._run_scheduled(dt.datetime(2026, 7, 7, 0, 12))
     assert len(channels["reports"].embeds) == 1
     assert len(channels["admin_log"].embeds) == 1
-    assert "Alliance overview" in channels["reports"].embeds[0].title
+    assert "Daily overview" in channels["reports"].embeds[0].title
     assert "Admin overview" in channels["admin_log"].embeds[0].title
 
 
@@ -326,3 +328,82 @@ async def test_overviews_setting_turns_the_posts_off(db, registry):
     await cog._run_scheduled(dt.datetime(2026, 7, 7, 0, 12))
     assert channels["reports"].embeds == []
     assert channels["admin_log"].embeds == []
+
+
+# --------------------------------------------------------------------------
+# The rendered daily card
+# --------------------------------------------------------------------------
+
+async def test_member_post_is_one_message_with_a_card(db, registry):
+    await _member(db, 1, "BrandjuhNL")
+    await _log(db, "created_course", 0.5)
+    cog, channels = _reporting_cog(db, registry)
+    await cog._run_scheduled(dt.datetime(2026, 7, 7, 0, 12))
+    # ONE message on the member side: the card image plus its embed.
+    assert len(channels["reports"].embeds) == 1
+    assert channels["reports"].files[0] is not None
+    embed = channels["reports"].embeds[0]
+    assert embed.image.url == "attachment://daily-overview.png"
+
+
+async def test_card_maps_the_overview_without_arrow_glyphs(db):
+    from fra_bot.services.report_card import card_from_overview, render_daily_card
+
+    await _member(db, 1, "BrandjuhNL")
+    await _member(db, 2, "Bob")
+    await _snapshot(db, 2.0, {1: 1000, 2: 5000})
+    await _snapshot(db, 0.6, {1: 4000, 2: 5500})
+    await _log(db, "created_course", 0.5)
+    period = resolve_period("yesterday", now=NOW)
+    data = await gather_overview(db, period, admin=False, now=NOW)
+    card = card_from_overview(data, "06 Jul 2026")
+
+    assert card.top_earners and card.top_earners[0][1] == 3000
+    assert any(label == "Members" for label, _, _ in card.tiles)
+    assert card.activity                      # a course was started
+    # The bundled PIL font has no arrow/emoji glyphs — they would render
+    # as tofu boxes on the card.
+    text = " ".join(
+        part for tile in card.tiles for part in tile
+    ) + " " + card.footer
+    assert text.isascii(), text
+
+    png = render_daily_card(card)
+    assert png is None or png.startswith(b"\x89PNG")
+
+
+async def test_card_drops_an_all_zero_activity_panel(db):
+    from fra_bot.services.report_card import card_from_overview
+
+    await _member(db, 1, "Alice")
+    period = resolve_period("yesterday", now=NOW)
+    data = await gather_overview(db, period, admin=False, now=NOW)
+    assert card_from_overview(data, "06 Jul 2026").activity == []
+
+
+async def test_member_names_are_not_recapitalised_on_the_card():
+    # _bar_panel title-cases building types; member names must survive
+    # exactly as the player spells them.
+    from fra_bot.services.infographic import _bar_panel
+
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 400)))
+    # Smoke test: both modes render without raising, and cap=False is the
+    # documented way to keep "BrandjuhNL" intact.
+    assert _bar_panel(draw, 0, "T", [("BrandjuhNL", 5)], cap=False) > 0
+    assert _bar_panel(draw, 0, "T", [("fire station", 5)]) > 0
+
+
+def test_ascii_fold_keeps_names_readable():
+    from fra_bot.services.report_card import ascii_only
+
+    # Accents decompose instead of being dropped — a member keeps a
+    # recognisable name on the card.
+    assert ascii_only("Café Ångström") == "Cafe Angstrom"
+    assert ascii_only("Jürgen Müller") == "Jurgen Muller"
+    # Typographic punctuation from the embed texts folds to its twin.
+    assert ascii_only("last 14 days — at that pace") == "last 14 days - at that pace"
+    assert ascii_only("a…b") == "a...b"

@@ -72,6 +72,17 @@ class Metric:
         arrow = "↑" if delta > 0 else "↓"
         return f" ({arrow} {delta:+,} vs previous)"
 
+    def trend_plain(self, unit: str = "") -> str:
+        """ASCII-only trend for the rendered card. The bundled PIL font
+        has no arrow glyphs — they come out as tofu boxes."""
+        if self.previous is None:
+            return ""
+        delta = self.value - self.previous
+        suffix = f" {unit}" if unit else ""
+        if delta == 0:
+            return f"same as previous{suffix}"
+        return f"{delta:+,}{suffix} vs previous"
+
 
 @dataclass
 class OverviewData:
@@ -89,6 +100,7 @@ class OverviewData:
     donations_total: int | None = None
     donations_contributors: int | None = None
     top_donor: tuple[str, int] | None = None
+    top_donors: list[tuple[str, int]] = field(default_factory=list)
 
     # Treasury
     balance: int | None = None
@@ -184,6 +196,9 @@ async def gather_overview(
         data.donations_contributors = len(rows)
         if rows:
             data.top_donor = (rows[0]["username"], rows[0]["amount"])
+            data.top_donors = [
+                (row["username"], row["amount"]) for row in rows[:5]
+            ]
 
     # -- treasury -------------------------------------------------------
     balance_row = await treasury.balance_at(period.end_iso)

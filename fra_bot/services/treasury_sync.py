@@ -86,13 +86,35 @@ class TreasurySyncService:
         else:
             log.warning("Could not parse total alliance funds from kasse page")
 
+        # …and re-read them AFTER. Taking the keys up front fixed one race
+        # (a pre-reset sync filing under the new day) but created its
+        # mirror image: a sync that STARTS just before the NY reset and
+        # finishes just after it fetches the NEW day's near-empty list and
+        # would file it under the FINISHED day's key — overwriting that
+        # day's final standings with a couple of early birds. When the
+        # period rolled over mid-sync we cannot tell which day the page
+        # showed, so we store nothing and let the next run (minutes later,
+        # unambiguously in the new period) capture it.
+        day_key_after, month_key_after = ny_period_keys()
+
         daily_entries = parse_income_table(daily_html)
-        if daily_entries:
+        if daily_entries and day_key_after != day_key:
+            log.warning(
+                "treasury: NY day rolled over mid-sync (%s -> %s); daily "
+                "income snapshot skipped rather than filed under the wrong day",
+                day_key, day_key_after,
+            )
+        elif daily_entries:
             await self._treasury.store_income_snapshot("daily", day_key, daily_entries)
             rows += len(daily_entries)
 
         monthly_entries = parse_income_table(monthly_html)
-        if monthly_entries:
+        if monthly_entries and month_key_after != month_key:
+            log.warning(
+                "treasury: NY month rolled over mid-sync (%s -> %s); monthly "
+                "income snapshot skipped", month_key, month_key_after,
+            )
+        elif monthly_entries:
             await self._treasury.store_income_snapshot("monthly", month_key, monthly_entries)
             rows += len(monthly_entries)
 

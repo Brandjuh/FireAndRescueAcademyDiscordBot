@@ -112,7 +112,12 @@ class ReportsCog(commands.Cog):
     async def _post_for(self, fired_at: dt.datetime) -> None:
         """Post the finished NY game day (and month, on the NY 1st)."""
         yesterday = (fired_at - dt.timedelta(days=1)).date()
-        await self.post_daily_report(yesterday)
+        # The daily top-10 lives on the overview card now (TOP DONORS
+        # panel). Posting it separately as well is exactly the scatter
+        # that made the morning feel fragmented, so it only goes out on
+        # its own when the overview card is switched off.
+        if not getattr(self.bot.cfg.reports, "overviews", True):
+            await self.post_daily_report(yesterday)
         if fired_at.day == 1:
             last_month = (fired_at - dt.timedelta(days=2)).strftime("%Y-%m")
             await self.post_monthly_report(last_month)
