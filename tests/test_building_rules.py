@@ -11,6 +11,7 @@ import datetime as dt
 import json
 from types import SimpleNamespace
 
+import pytest
 import pytest_asyncio
 
 from fra_bot.db.database import Database
@@ -551,3 +552,71 @@ async def test_auto_build_distinguishes_empty_osm_from_already_built(db):
     svc = _fund_the_service(_service(db, overpass=FakeOverpass()))  # zero elements
     svc._geocoder.search = _fake_search
     assert "none in OSM near the city" in await svc._auto_build_one("prison", [])
+
+
+# ---------------------------------------------------------------------------
+# Overpass endpoint failover
+# ---------------------------------------------------------------------------
+
+async def test_overpass_falls_over_to_the_next_mirror():
+    """One unreachable host must not disable the whole feature — that is
+    exactly what took out the daily build ("Cannot connect to host
+    overpass-api.de:443")."""
+    import aiohttp
+
+    from fra_bot.geo.overpass import OverpassClient
+
+    client = OverpassClient(urls=["https://down.example/api",
+                                  "https://up.example/api"])
+    tried: list[str] = []
+
+    async def _fetch_one(session, url, query):
+        tried.append(url)
+        if "down" in url:
+            raise aiohttp.ClientError("Cannot connect to host down.example:443")
+        return {"elements": [{"type": "node", "id": 1, "lat": 1.0, "lon": 2.0,
+                              "tags": {"amenity": "prison", "name": "X"}}]}
+
+    client._fetch_one = _fetch_one
+    data = await client.fetch("[out:json];")
+    assert [u.split("/")[2] for u in tried] == ["down.example", "up.example"]
+    assert data["elements"][0]["tags"]["name"] == "X"
+
+
+async def test_overpass_names_every_endpoint_that_failed():
+    import aiohttp
+
+    from fra_bot.geo.overpass import OverpassClient, OverpassError
+
+    client = OverpassClient(urls=["https://a.example/api", "https://b.example/api"])
+
+    async def _fetch_one(session, url, query):
+        raise aiohttp.ClientError("boom")
+
+    client._fetch_one = _fetch_one
+    with pytest.raises(OverpassError) as excinfo:
+        await client.fetch("[out:json];")
+    assert "a.example" in str(excinfo.value) and "b.example" in str(excinfo.value)
+
+
+async def test_overpass_timeout_becomes_an_overpass_error():
+    # asyncio.TimeoutError is not an aiohttp.ClientError, so it used to
+    # escape OverpassError and surface as an unhandled exception.
+    import asyncio as _asyncio
+
+    from fra_bot.geo.overpass import OverpassClient, OverpassError
+
+    client = OverpassClient(urls=["https://slow.example/api"])
+
+    async def _fetch_one(session, url, query):
+        raise _asyncio.TimeoutError()
+
+    client._fetch_one = _fetch_one
+    with pytest.raises(OverpassError):
+        await client.fetch("[out:json];")
+
+
+def test_query_server_timeout_fits_under_the_client_timeout():
+    from fra_bot.geo.overpass import build_candidate_query
+
+    assert "[out:json][timeout:60]" in build_candidate_query(1, 1, 2, 2)

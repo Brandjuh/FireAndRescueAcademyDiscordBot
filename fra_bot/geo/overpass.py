@@ -11,6 +11,7 @@ the network fetch is a thin wrapper so tests can feed canned JSON.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -19,6 +20,20 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 DEFAULT_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
+#: Public Overpass instances, tried in order. The main instance is
+#: regularly overloaded and — as seen live — can be simply unreachable
+#: from a given network ("Cannot connect to host overpass-api.de:443"),
+#: which silently disabled BOTH the daily auto-build and the building
+#: type fallback. One host being down must not take the feature with it.
+#: (Reachability of the mirrors cannot be verified from the dev sandbox;
+#: they are the well-known public endpoints. Override via
+#: ``geocoding.overpass_urls`` in config.yaml.)
+DEFAULT_OVERPASS_URLS: tuple[str, ...] = (
+    DEFAULT_OVERPASS_URL,
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+)
 
 # Tags that mean the facility isn't a live one to build on.
 _DISUSED_TAG_KEYS = ("disused:amenity", "abandoned:amenity", "historic")
@@ -98,7 +113,10 @@ def build_candidate_query(
         clauses.append(f'  nwr["amenity"="prison"]({bbox});')
     if not clauses:
         raise ValueError("building_type must be 'hospital', 'prison', or 'both'")
-    return "\n".join(["[out:json][timeout:180];", "(", *clauses, ");", "out center tags;"])
+    # Server-side budget kept UNDER the client timeout (90 s): at 180 the
+    # client always gave up first, so a slow query looked like a network
+    # failure instead of a slow one.
+    return "\n".join(["[out:json][timeout:60];", "(", *clauses, ");", "out center tags;"])
 
 
 def parse_candidates(data: dict, *, want: str | None = None) -> list[OsmCandidate]:
@@ -144,20 +162,54 @@ def parse_candidates(data: dict, *, want: str | None = None) -> list[OsmCandidat
 
 
 class OverpassClient:
-    """Thin async wrapper over an Overpass endpoint (the only network part)."""
+    """Thin async wrapper over the Overpass endpoints (the only network part).
 
-    def __init__(self, *, url: str = DEFAULT_OVERPASS_URL, timeout: float = 90.0) -> None:
-        self._url = url
+    Tries each configured mirror in turn and only raises once they have
+    all failed, naming what each one said. A single unreachable host used
+    to disable the daily auto-build and the building type fallback
+    outright.
+    """
+
+    def __init__(
+        self, *, url: str | None = None,
+        urls: tuple[str, ...] | list[str] | None = None,
+        timeout: float = 90.0,
+    ) -> None:
+        # ``url=`` stays supported for callers (and tests) that pin one
+        # endpoint; ``urls=`` is the mirror list.
+        if url is not None:
+            self._urls: tuple[str, ...] = (url,)
+        else:
+            self._urls = tuple(urls or DEFAULT_OVERPASS_URLS)
         self._timeout = timeout
+
+    @property
+    def url(self) -> str:
+        """The primary endpoint (the one tried first)."""
+        return self._urls[0]
+
+    async def _fetch_one(self, session, url: str, query: str) -> dict:
+        async with session.post(url, data={"data": query}) as resp:
+            if resp.status != 200:
+                body = (await resp.text())[:300]
+                raise OverpassError(f"HTTP {resp.status}: {body}")
+            return await resp.json(content_type=None)
 
     async def fetch(self, query: str) -> dict:
         timeout = aiohttp.ClientTimeout(total=self._timeout)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                async with session.post(self._url, data={"data": query}) as resp:
-                    if resp.status != 200:
-                        body = (await resp.text())[:300]
-                        raise OverpassError(f"Overpass HTTP {resp.status}: {body}")
-                    return await resp.json(content_type=None)
-        except aiohttp.ClientError as exc:
-            raise OverpassError(f"Overpass request failed: {exc}") from exc
+        problems: list[str] = []
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            for url in self._urls:
+                try:
+                    return await self._fetch_one(session, url, query)
+                except (aiohttp.ClientError, asyncio.TimeoutError, OverpassError) as exc:
+                    # asyncio.TimeoutError is NOT an aiohttp.ClientError, so
+                    # it used to escape OverpassError entirely and surface as
+                    # an unhandled exception out of the callers' except.
+                    host = url.split("/")[2] if "//" in url else url
+                    reason = str(exc) or exc.__class__.__name__
+                    log.warning("Overpass %s failed: %s", host, reason)
+                    problems.append(f"{host}: {reason}")
+        raise OverpassError(
+            "Overpass request failed on every endpoint — " + "; ".join(problems)
+        )
