@@ -407,3 +407,15 @@ def test_ascii_fold_keeps_names_readable():
     # Typographic punctuation from the embed texts folds to its twin.
     assert ascii_only("last 14 days — at that pace") == "last 14 days - at that pace"
     assert ascii_only("a…b") == "a...b"
+
+
+async def test_report_card_preview_renders_into_the_given_channel(db, registry):
+    """`!fra reportcard` must preview into the channel it was typed in,
+    never into the members' reports channel."""
+    await _member(db, 1, "BrandjuhNL")
+    await _log(db, "created_course", 0.5)
+    cog, channels = _reporting_cog(db, registry)
+    here = _Channel()
+    await cog._post_member_card("yesterday", channel=here)
+    assert len(here.embeds) == 1
+    assert channels["reports"].embeds == []      # members saw nothing

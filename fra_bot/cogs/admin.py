@@ -649,6 +649,30 @@ class AdminCog(commands.Cog):
     # (`!fra report daily`) still works after the framework generalisation.
     _REPORT_ALIASES = {"daily": "income-daily", "monthly": "income-monthly"}
 
+    @fra.command(name="reportcard", aliases=["dailycard", "overviewcard"])
+    async def report_card(
+        self, ctx: commands.Context, period: str = "yesterday"
+    ) -> None:
+        """Preview the daily overview CARD here: `!fra reportcard [period]`.
+
+        The same image + embed the members get every morning, rendered
+        into THIS channel instead of the reports channel — so you can
+        look at it without posting to everyone. `!fra report
+        overview-member` renders the text-only version of the same data.
+        """
+        reporting = self.bot.get_cog("ReportingCog")
+        if reporting is None:
+            await ctx.send("Reporting cog not loaded.")
+            return
+        async with ctx.typing():
+            try:
+                await reporting._post_member_card(period, channel=ctx.channel)
+            except ValueError as exc:          # unknown period name
+                await ctx.send(f"⚠️ {exc}")
+            except Exception as exc:  # noqa: BLE001 - surfaced to the admin
+                log.exception("report card preview failed")
+                await ctx.send(f"❌ Could not render the card: {exc}")
+
     @fra.command(name="report")
     async def report(
         self, ctx: commands.Context, name: str = "list", period: str = ""
