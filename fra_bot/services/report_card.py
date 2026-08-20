@@ -42,41 +42,78 @@ class DailyCard:
     tiles: list[tuple[str, str, str]] = field(default_factory=list)
     top_earners: list[tuple[str, int]] = field(default_factory=list)
     top_donors: list[tuple[str, int]] = field(default_factory=list)
-    activity: list[tuple[str, int]] = field(default_factory=list)
+    #: (label, value, sub) chips. Deliberately NOT bars: 12 courses next
+    #: to 2 events share no unit, so bar length compared nothing.
+    activity: list[tuple[str, str, str]] = field(default_factory=list)
     footer: str = ""
 
 
-def _value_tiles(draw, y: int, tiles: list[tuple[str, str, str]]) -> int:
-    """Like infographic's stat tiles, but the value is pre-formatted text
-    and each tile carries a trend line — the whole point of a daily card
-    is "compared to what"."""
+def _tile_row(draw, y: int, tiles: list[tuple[str, str, str]], *,
+              height: int = 150, value_size: int = 44, pad: int = 28,
+              label_size: int = 17, sub_size: int = 16,
+              accent: bool = True) -> int:
+    """A row of equal-width stat tiles: big value, label, trend line.
+
+    The whole point of a daily card is "compared to what", so every tile
+    carries its own comparison. Used twice at different scales — the
+    headline row and the compact activity chips.
+    """
+    if not tiles:
+        return y
     inner = _WIDTH - 2 * _PAD
     gap = 20
     width = (inner - (len(tiles) - 1) * gap) // len(tiles)
-    height = 150
     for column, (label, value, sub) in enumerate(tiles):
         x = _PAD + column * (width + gap)
         draw.rounded_rectangle(
             (x, y, x + width, y + height), radius=_RADIUS, fill=_PANEL
         )
-        draw.rounded_rectangle(
-            (x, y + 24, x + 5, y + height - 24), radius=2, fill=_ACCENT
-        )
+        if accent:
+            draw.rounded_rectangle(
+                (x, y + 24, x + 5, y + height - 24), radius=2, fill=_ACCENT
+            )
         # Shrink the value font until it fits the tile — a 12-digit credit
         # total must never run into the next tile.
-        size = 44
+        size = value_size
         font = _font(size)
-        room = width - 2 * _PANEL_PAD
-        while size > 20 and draw.textlength(value, font=font) > room:
+        room = width - 2 * pad
+        while size > 16 and draw.textlength(value, font=font) > room:
             size -= 3
             font = _font(size)
-        draw.text((x + _PANEL_PAD, y + 24), value, font=font, fill=_INK)
-        draw.text((x + _PANEL_PAD, y + 84), label, font=_font(17),
+        top = y + (24 if height >= 130 else 18)
+        draw.text((x + pad, top), value, font=font, fill=_INK)
+        draw.text((x + pad, top + size + 14), label, font=_font(label_size),
                   fill=_INK_MUTED)
         if sub:
-            draw.text((x + _PANEL_PAD, y + 110), sub, font=_font(16),
-                      fill=_INK_SOFT)
+            draw.text((x + pad, top + size + 14 + label_size + 9), sub,
+                      font=_font(sub_size), fill=_INK_SOFT)
     return y + height + 28
+
+
+def _two_column_bars(draw, y: int, left: tuple[str, list], right: tuple[str, list]) -> int:
+    """Two bar panels side by side; the cursor below the taller one.
+
+    Top earners and top donors are the same shape of list and are read
+    together — stacked full-width they doubled the card height and made
+    the reader scroll past one to reach the other.
+    """
+    left_title, left_rows = left
+    right_title, right_rows = right
+    if not left_rows and not right_rows:
+        return y
+    if not left_rows or not right_rows:
+        title, rows = (left if left_rows else right)
+        return _bar_panel(draw, y, title, rows, cap=False)
+    gap = 20
+    column = (_WIDTH - 2 * _PAD - gap) // 2
+    bottom_left = _bar_panel(
+        draw, y, left_title, left_rows, cap=False, x=_PAD, width=column
+    )
+    bottom_right = _bar_panel(
+        draw, y, right_title, right_rows, cap=False,
+        x=_PAD + column + gap, width=column,
+    )
+    return max(bottom_left, bottom_right)
 
 
 def render_daily_card(card: DailyCard) -> bytes | None:
@@ -94,13 +131,17 @@ def render_daily_card(card: DailyCard) -> bytes | None:
         date_label=card.date_label,
     )
     if card.tiles:
-        y = _value_tiles(draw, y, card.tiles)
-    if card.top_earners:
-        y = _bar_panel(draw, y, "TOP EARNERS", card.top_earners, cap=False)
-    if card.top_donors:
-        y = _bar_panel(draw, y, "TOP DONORS", card.top_donors, cap=False)
+        y = _tile_row(draw, y, card.tiles)
+    y = _two_column_bars(
+        draw, y,
+        ("TOP EARNERS", card.top_earners),
+        ("TOP DONORS", card.top_donors),
+    )
     if card.activity:
-        y = _bar_panel(draw, y, "ALLIANCE ACTIVITY", card.activity)
+        y = _tile_row(
+            draw, y, card.activity, height=112, value_size=32,
+            label_size=16, sub_size=15, accent=False,
+        )
     return _finish(image, draw, y, card.footer)
 
 
@@ -138,6 +179,15 @@ def _fmt(value: int | None) -> str:
     return "?" if value is None else f"{value:,}"
 
 
+def _short_trend(metric, *, suffix: str = "vs prev") -> str:
+    """A chip-sized comparison. The tile is ~180 px wide, so the embed's
+    "(+3 vs previous)" has to lose weight without losing meaning."""
+    if metric.previous is None:
+        return ""
+    delta = metric.value - metric.previous
+    return f"same {suffix}" if delta == 0 else f"{delta:+,} {suffix}"
+
+
 def card_from_overview(data, date_label: str) -> DailyCard:
     """Build the card from a gathered :class:`OverviewData`.
 
@@ -151,34 +201,50 @@ def card_from_overview(data, date_label: str) -> DailyCard:
         ("Credits earned", _fmt(data.credits_total),
          f"by {data.credits_earners} member(s)" if data.credits_earners else ""),
     ]
-    if data.donations_total is not None:
+    # Alliance funds are a headline number and used to vanish entirely the
+    # moment donations existed (the two shared one tile through an elif),
+    # so on any normal day the card never showed the balance at all.
+    if data.balance is not None:
         tiles.append((
-            "Donated", _fmt(data.donations_total),
-            f"by {data.donations_contributors or 0} member(s)",
+            "Alliance funds", _fmt(data.balance),
+            f"{data.balance_change:+,} today"
+            if data.balance_change is not None else "",
         ))
-    elif data.balance is not None:
-        tiles.append(("Alliance funds", _fmt(data.balance),
-                      f"{data.balance_change:+,} today"
-                      if data.balance_change is not None else ""))
     score_sub = ""
     if data.activity_score_previous is not None:
         delta = data.activity_score - data.activity_score_previous
         score_sub = "same as previous" if delta == 0 else f"{delta:+} vs previous"
     tiles.append(("Activity score", f"{data.activity_score}/100", score_sub))
 
-    activity = [
-        ("Courses started", data.courses_started.value),
-        ("Courses done", data.courses_completed.value),
-        ("Large missions", data.missions_started.value),
-        ("Alliance events", data.events_started.value),
-    ]
+    # Compact chips, not bars: 12 courses beside 2 events share no unit,
+    # so bar length compared nothing while eating a third of the card.
+    activity: list[tuple[str, str, str]] = []
+    if data.donations_total is not None:
+        activity.append((
+            "Donated", _fmt(data.donations_total),
+            f"top {data.donations_contributors or 0} shown"
+            if data.donations_contributors else "",
+        ))
+    for label, metric in (
+        ("Courses started", data.courses_started),
+        ("Courses done", data.courses_completed),
+        ("Large missions", data.missions_started),
+        ("Alliance events", data.events_started),
+    ):
+        activity.append((label, _fmt(metric.value), _short_trend(metric)))
+    # An all-zero row is noise; drop it entirely.
+    if not any(
+        value not in ("0", "?") for _, value, _ in activity
+    ):
+        activity = []
+
     return DailyCard(
         date_label=date_label,
         tiles=tiles,
         top_earners=[(ascii_only(n) or n, v) for n, v in data.top_earners[:5]],
         top_donors=[(ascii_only(n) or n, v) for n, v in data.top_donors[:5]],
         # An all-zero panel is noise; drop it entirely.
-        activity=activity if any(n for _, n in activity) else [],
+        activity=activity,
         # The outlook lines are written for embeds and carry em dashes.
         footer=ascii_only(data.outlook[0]) if data.outlook else "",
     )

@@ -85,21 +85,28 @@ def _stat_tiles(draw, y: int, tiles: list[tuple[str, int]]) -> int:
 
 
 def _bar_panel(draw, y: int, title: str, rows: list[tuple[str, int]],
-               *, cap: bool = True) -> int:
+               *, cap: bool = True, x: int | None = None,
+               width: int | None = None) -> int:
     """A rounded panel with one single-hue horizontal bar per row and the
     value direct-labeled at the bar end; the new cursor y.
 
     ``cap`` title-cases the row label — right for building/vehicle types
     ("fire station"), wrong for member names, which must be printed
-    exactly as the player spells them ("BrandjuhNL")."""
+    exactly as the player spells them ("BrandjuhNL").
+
+    ``x``/``width`` place the panel inside a column instead of spanning
+    the card; omitted, it spans full width exactly as before.
+    """
     if not rows:
         return y
+    left = _PAD if x is None else x
+    right = (_WIDTH - _PAD) if width is None else (left + width)
     bar_height, bar_gap = 26, 20
     panel_height = 2 * _PANEL_PAD + 40 + len(rows) * (bar_height + bar_gap)
     draw.rounded_rectangle(
-        (_PAD, y, _WIDTH - _PAD, y + panel_height), radius=_RADIUS, fill=_PANEL
+        (left, y, right, y + panel_height), radius=_RADIUS, fill=_PANEL
     )
-    draw.text((_PAD + _PANEL_PAD, y + _PANEL_PAD), title,
+    draw.text((left + _PANEL_PAD, y + _PANEL_PAD), title,
               font=_font(18), fill=_INK_MUTED)
     label_font, value_font = _font(20), _font(20)
     def _label(name: str) -> str:
@@ -109,13 +116,19 @@ def _bar_panel(draw, y: int, title: str, rows: list[tuple[str, int]],
         int(draw.textlength(_label(name), font=label_font))
         for name, _ in rows
     ) + 24
-    bar_x = _PAD + _PANEL_PAD + label_col
-    bar_room = (_WIDTH - _PAD - _PANEL_PAD) - bar_x - 90
+    bar_x = left + _PANEL_PAD + label_col
+    # Room for the direct label at the bar end, scaled to the widest value
+    # actually present: a narrow column with 7-digit credit totals needs
+    # far more than the 90 px a full-width panel could assume.
+    value_room = max(
+        int(draw.textlength(f"{count:,}", font=value_font)) for _, count in rows
+    ) + 28
+    bar_room = (right - _PANEL_PAD) - bar_x - value_room
     heaviest = max(count for _, count in rows) or 1
     row_y = y + _PANEL_PAD + 40
     for name, count in rows:
         middle = row_y + bar_height // 2
-        draw.text((_PAD + _PANEL_PAD, middle), _label(name),
+        draw.text((left + _PANEL_PAD, middle), _label(name),
                   font=label_font, fill=_INK_SOFT, anchor="lm")
         bar = max(6, int(bar_room * count / heaviest))
         draw.rounded_rectangle(
