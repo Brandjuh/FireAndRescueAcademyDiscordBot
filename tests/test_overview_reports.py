@@ -419,3 +419,99 @@ async def test_report_card_preview_renders_into_the_given_channel(db, registry):
     await cog._post_member_card("yesterday", channel=here)
     assert len(here.embeds) == 1
     assert channels["reports"].embeds == []      # members saw nothing
+
+
+# --------------------------------------------------------------------------
+# The compact two-column card
+# --------------------------------------------------------------------------
+
+def _filled_overview():
+    """An OverviewData with every card section populated."""
+    from types import SimpleNamespace
+
+    from fra_bot.reporting.analytics import Metric, OverviewData
+
+    data = OverviewData(period=SimpleNamespace(name="yesterday"))
+    data.active_members = 947
+    data.joined, data.left = Metric(5, 2), Metric(2, 4)
+    data.credits_total, data.credits_earners = 18_442_900, 214
+    data.top_earners = [("BrandjuhNL", 812_400), ("MedicOne", 512_800)]
+    data.donations_total, data.donations_contributors = 5_431_200, 10
+    data.top_donors = [("BrandjuhNL", 1_204_000), ("MedicOne", 890_000)]
+    data.balance, data.balance_change = 41_882_400, 1_205_000
+    data.courses_started, data.courses_completed = Metric(12, 9), Metric(9, 11)
+    data.missions_started, data.events_started = Metric(4, 4), Metric(2, 1)
+    data.activity_score, data.activity_score_previous = 62, 58
+    return data
+
+
+def test_alliance_funds_survive_alongside_donations():
+    """The two used to share one tile through an elif, so on any day with
+    donations the balance vanished from the card entirely."""
+    from fra_bot.services.report_card import card_from_overview
+
+    card = card_from_overview(_filled_overview(), "19 Aug 2026")
+    labels = [label for label, _, _ in card.tiles]
+    assert "Alliance funds" in labels
+    funds = next(t for t in card.tiles if t[0] == "Alliance funds")
+    assert funds[1] == "41,882,400" and "+1,205,000" in funds[2]
+    # Donations moved to the compact row rather than displacing it.
+    assert any(label == "Donated" for label, _, _ in card.activity)
+
+
+def test_activity_chips_carry_their_own_comparison():
+    from fra_bot.services.report_card import card_from_overview
+
+    card = card_from_overview(_filled_overview(), "19 Aug 2026")
+    chips = {label: (value, sub) for label, value, sub in card.activity}
+    assert chips["Courses started"] == ("12", "+3 vs prev")
+    assert chips["Courses done"] == ("9", "-2 vs prev")
+    assert chips["Large missions"] == ("4", "same vs prev")
+
+
+def test_the_card_stays_ascii_and_renders():
+    """Every string reaching the renderer must be drawable: the bundled
+    PIL font has no arrow or emoji glyphs."""
+    from fra_bot.services.report_card import card_from_overview, render_daily_card
+
+    card = card_from_overview(_filled_overview(), "19 Aug 2026")
+    text = " ".join(
+        part
+        for group in (card.tiles, card.activity)
+        for row in group
+        for part in row
+    )
+    assert text.isascii(), text
+    png = render_daily_card(card)
+    assert png is None or png.startswith(b"\x89PNG")
+
+
+def test_two_columns_halve_the_card_height():
+    """Top earners and donors are read together; stacked full-width they
+    doubled the height and pushed the reader past one to reach the other."""
+    from fra_bot.services.report_card import card_from_overview, render_daily_card
+
+    png = render_daily_card(card_from_overview(_filled_overview(), "19 Aug 2026"))
+    if png is None:
+        return                                  # Pillow absent
+    import io
+
+    from PIL import Image
+
+    height = Image.open(io.BytesIO(png)).height
+    assert height < 1100, f"card is {height}px tall — the columns regressed"
+
+
+def test_bar_panel_still_spans_the_card_by_default():
+    """The width arguments are opt-in: the infographic and fleet cards
+    share this helper and must be untouched."""
+    from PIL import Image, ImageDraw
+
+    from fra_bot.services.infographic import _PAD, _WIDTH, _bar_panel
+
+    image = Image.new("RGB", (_WIDTH, 400))
+    draw = ImageDraw.Draw(image)
+    _bar_panel(draw, 0, "TOP", [("engine", 410), ("ladder", 150)])
+    # The panel's right edge is painted at _WIDTH - _PAD when unbounded.
+    assert image.getpixel((_WIDTH - _PAD - 4, 60)) != (0, 0, 0)
+    assert image.getpixel((_WIDTH - _PAD // 2, 60)) == (0, 0, 0)
