@@ -369,6 +369,13 @@ geocoding:
   contact_email: ""
   # Minimum seconds between geocode requests (free tiers are ~1 req/s).
   min_interval_seconds: 1.1
+  # Overpass (OpenStreetMap query API) endpoints, tried in order. Used by
+  # the daily worldwide auto-build to find real hospitals/prisons, and as
+  # the fallback that classifies a building request whose pin reverse-
+  # geocodes to a bare street address. The main instance is regularly
+  # overloaded and can be unreachable from a given network, so leaving
+  # this empty uses a built-in list of public mirrors instead of one host.
+  overpass_urls: []
 
 reports:
   # Reports are generated after the MissionChief daily reset (midnight

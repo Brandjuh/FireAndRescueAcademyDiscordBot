@@ -435,6 +435,9 @@ class GeocodingConfig:
     api_key_param: str
     contact_email: str
     min_interval: float
+    #: Overpass endpoints, tried in order (mirrors for when the main
+    #: instance is overloaded or unreachable). Empty = built-in list.
+    overpass_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -924,6 +927,11 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             contact_email=str(_get(raw, "geocoding", "contact_email", default="")).strip(),
             min_interval=float(
                 _get(raw, "geocoding", "min_interval_seconds", default=1.1)
+            ),
+            overpass_urls=tuple(
+                str(u).strip()
+                for u in (_get(raw, "geocoding", "overpass_urls", default=[]) or [])
+                if str(u).strip()
             ),
         ),
         reports=ReportsConfig(

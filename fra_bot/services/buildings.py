@@ -348,7 +348,11 @@ class BuildingsService(BoardRequestService):
         self._builder = BrowserBuilder(
             cfg.missionchief.base_url, self._playwright_cookies
         )
-        self._overpass = OverpassClient()
+        self._overpass = OverpassClient(
+            urls=getattr(
+                getattr(cfg, "geocoding", None), "overpass_urls", None
+            ) or None
+        )
         self._rng = random.Random()
         # Post-creation automation: tax + level + extensions on new builds.
         from .building_upgrade import BuildingUpgradeService
