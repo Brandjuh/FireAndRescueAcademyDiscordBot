@@ -170,7 +170,10 @@ SETTINGS: tuple[Setting, ...] = (
             "Never spend below this alliance balance", minimum=0),
     Setting("automation.building.set_tax_percent", "int", True,
             "Tax on new alliance buildings", choices=(0, 10, 20, 30, 40, 50)),
-    Setting("automation.building.daily_build_enabled", "bool", False,
+    Setting("automation.building.upgrade_sweep_hours", "int", True,
+            "Hours between the alliance-wide level/extension catch-up sweep "
+            "(0 = off)", minimum=0, maximum=168),
+    Setting("automation.building.daily_build_enabled", "bool", True,
             "Daily worldwide hospital+prison build"),
     Setting("automation.building.daily_build_time", "time", False,
             "Daily build time (HH:MM, reports timezone)"),

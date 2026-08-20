@@ -168,6 +168,11 @@ class BuildingAutomationConfig:
     # OSM location, funds-gated and deduped against existing buildings.
     daily_build_enabled: bool
     daily_build_time: str  # "HH:MM" in reports.timezone
+    # Recurring catch-up sweep over ALL alliance hospitals/prisons: buys
+    # whatever levels/extensions have become affordable. The per-build
+    # finisher only follows a FRESH build for a while, so without this a
+    # building left half-done during a low-treasury spell stayed that way.
+    upgrade_sweep_hours: int = 6
 
 
 @dataclass(frozen=True)
@@ -701,6 +706,10 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 daily_build_enabled=bool(
                     _get(raw, "automation", "building", "daily_build_enabled", default=False)
+                ),
+                upgrade_sweep_hours=int(
+                    _get(raw, "automation", "building",
+                         "upgrade_sweep_hours", default=6)
                 ),
                 daily_build_time=str(
                     _get(raw, "automation", "building", "daily_build_time", default="03:00")
