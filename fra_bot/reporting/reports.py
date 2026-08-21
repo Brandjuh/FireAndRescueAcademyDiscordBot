@@ -32,6 +32,18 @@ def _prev_ny_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
     prev_month_last = ny_today.replace(day=1) - dt.timedelta(days=1)
     return prev_day.strftime("%Y-%m-%d"), prev_month_last.strftime("%Y-%m")
 
+#: How long after the NY reset a bare "today"/"month" still means the
+#: FINISHED period. These builders cannot see the schedule, and
+#: ``reports.daily_delay_minutes`` is capped at 120 by its Setting — the
+#: old ``hour == 0`` test therefore broke for any delay past 60 minutes,
+#: rendering the new day's single early bird as the day's top contributors.
+RESET_GRACE_MINUTES = 120
+
+
+def _just_after_reset(ny_now: dt.datetime) -> bool:
+    return ny_now.hour * 60 + ny_now.minute <= RESET_GRACE_MINUTES
+
+
 _MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
 
@@ -211,7 +223,7 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
         # fallback still covers a missing fresh snapshot.
         ny_now = dt.datetime.now(dt.timezone.utc).astimezone(NY)
         day_key, _ = ny_period_keys()
-        if period.name == "yesterday" or ny_now.hour == 0:
+        if period.name == "yesterday" or _just_after_reset(ny_now):
             day_key, _ = _prev_ny_keys()
         rows = await treasury.latest_snapshot("daily", day_key)
         if not rows and period.name != "yesterday":
@@ -233,7 +245,7 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
         ny_now = dt.datetime.now(dt.timezone.utc).astimezone(NY)
         _, month_key = ny_period_keys()
         if period.name == "prev-month" or (
-            ny_now.day == 1 and ny_now.hour == 0
+            ny_now.day == 1 and _just_after_reset(ny_now)
         ):
             _, month_key = _prev_ny_keys()
         rows = await treasury.latest_snapshot("monthly", month_key)

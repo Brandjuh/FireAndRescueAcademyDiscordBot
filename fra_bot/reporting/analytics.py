@@ -99,6 +99,12 @@ class OverviewData:
     top_earners: list[tuple[str, int]] = field(default_factory=list)
     donations_total: int | None = None
     donations_contributors: int | None = None
+    #: True when this period should have an income snapshot but none is
+    #: stored — reported as "no data", never as a zero.
+    donations_missing: bool = False
+    #: When the reported snapshot was captured, so a list that was taken
+    #: well before the reset can be labelled instead of passed off as final.
+    donations_taken_at: str | None = None
     top_donor: tuple[str, int] | None = None
     top_donors: list[tuple[str, int]] = field(default_factory=list)
 
@@ -190,15 +196,27 @@ async def gather_overview(
         data.top_earners = [(r["name"], r["delta"]) for r in deltas[:3]]
 
     # -- donations (income snapshots; game day / month only) ------------
-    rows = await _income_rows_for(treasury, period, now)
-    if rows is not None:
-        data.donations_total = sum(r["amount"] for r in rows)
-        data.donations_contributors = len(rows)
+    # A MISSING snapshot must never read as a real zero. latest_snapshot
+    # returns [] both for "nothing stored" and for a genuinely empty day,
+    # and the old `if rows is not None` accepted that empty list — so a
+    # night the capture was lost reported "Donated: 0 credits by 0
+    # member(s)" as fact, beside Funds and Spent tiles showing real
+    # movement. That is exactly what reads as "the daily treasury figures
+    # are wrong".
+    key = income_key_for(period, now)
+    if key is not None:
+        rows = await treasury.latest_snapshot(*key)
         if rows:
+            data.donations_total = sum(r["amount"] for r in rows)
+            data.donations_contributors = len(rows)
+            data.donations_taken_at = str(rows[0]["taken_at"])
             data.top_donor = (rows[0]["username"], rows[0]["amount"])
             data.top_donors = [
                 (row["username"], row["amount"]) for row in rows[:5]
             ]
+        else:
+            # Nothing stored for a period that SHOULD have a list.
+            data.donations_missing = True
 
     # -- treasury -------------------------------------------------------
     balance_row = await treasury.balance_at(period.end_iso)
@@ -318,23 +336,26 @@ def _period_days(period: Period) -> float:
     return max(0.0, (period.end - period.start).total_seconds() / 86400)
 
 
-async def _income_rows_for(treasury: TreasuryRepo, period: Period, now):
-    """Snapshot rows covering the period, or None when no snapshot maps
-    onto it (weeks/years have no income list in the game)."""
+def income_key_for(period: Period, now) -> tuple[str, str] | None:
+    """``(kind, period_key)`` of the income snapshot covering this period,
+    or None when no snapshot maps onto it at all.
+
+    The game keeps a daily and a monthly list and nothing else, so a week
+    or a year genuinely has no income figure — which is a different thing
+    from "the day's snapshot is missing", and the two used to be
+    indistinguishable downstream.
+    """
     ny_now = now.astimezone(NY)
     day_key, month_key = ny_period_keys(now)
     if period.name == "today":
-        return await treasury.latest_snapshot("daily", day_key)
+        return "daily", day_key
     if period.name == "yesterday":
-        prev_day = (ny_now.date() - dt.timedelta(days=1)).isoformat()
-        return await treasury.latest_snapshot("daily", prev_day)
+        return "daily", (ny_now.date() - dt.timedelta(days=1)).isoformat()
     if period.name == "month":
-        return await treasury.latest_snapshot("monthly", month_key)
+        return "monthly", month_key
     if period.name == "prev-month":
-        prev_month = (ny_now.date().replace(day=1) - dt.timedelta(days=1))
-        return await treasury.latest_snapshot(
-            "monthly", prev_month.strftime("%Y-%m")
-        )
+        prev_month = ny_now.date().replace(day=1) - dt.timedelta(days=1)
+        return "monthly", prev_month.strftime("%Y-%m")
     return None
 
 

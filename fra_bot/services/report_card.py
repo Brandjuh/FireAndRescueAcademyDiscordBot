@@ -218,6 +218,21 @@ def card_from_overview(data, date_label: str) -> DailyCard:
 
     # Compact chips, not bars: 12 courses beside 2 events share no unit,
     # so bar length compared nothing while eating a third of the card.
+    # The game-activity chips are all-or-nothing (a row of zeros is pure
+    # padding on a quiet day), but the donation chip is judged on its own
+    # — a missing snapshot is a WARNING and must survive that cull.
+    game: list[tuple[str, str, str]] = [
+        (label, _fmt(metric.value), _short_trend(metric))
+        for label, metric in (
+            ("Courses started", data.courses_started),
+            ("Courses done", data.courses_completed),
+            ("Large missions", data.missions_started),
+            ("Alliance events", data.events_started),
+        )
+    ]
+    if not any(value not in ("0", "?") for _, value, _ in game):
+        game = []
+
     activity: list[tuple[str, str, str]] = []
     if data.donations_total is not None:
         activity.append((
@@ -225,18 +240,10 @@ def card_from_overview(data, date_label: str) -> DailyCard:
             f"top {data.donations_contributors or 0} shown"
             if data.donations_contributors else "",
         ))
-    for label, metric in (
-        ("Courses started", data.courses_started),
-        ("Courses done", data.courses_completed),
-        ("Large missions", data.missions_started),
-        ("Alliance events", data.events_started),
-    ):
-        activity.append((label, _fmt(metric.value), _short_trend(metric)))
-    # An all-zero row is noise; drop it entirely.
-    if not any(
-        value not in ("0", "?") for _, value, _ in activity
-    ):
-        activity = []
+    elif data.donations_missing:
+        # "no data" is the truth; a 0 here read as "nobody donated".
+        activity.append(("Donated", "no data", "snapshot missing"))
+    activity += game
 
     return DailyCard(
         date_label=date_label,
