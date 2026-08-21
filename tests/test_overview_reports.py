@@ -372,13 +372,34 @@ async def test_card_maps_the_overview_without_arrow_glyphs(db):
     assert png is None or png.startswith(b"\x89PNG")
 
 
-async def test_card_drops_an_all_zero_activity_panel(db):
+async def test_all_zero_game_chips_are_culled_but_donations_survive(db):
+    """A quiet day has nothing to chart, so the row of zeros is padding —
+    but a real donation figure is still worth stating."""
+    from fra_bot.services.report_card import card_from_overview
+
+    await _member(db, 1, "Alice")
+    await TreasuryRepo(db).store_income_snapshot(
+        "daily", "2026-07-06", [{"username": "Alice", "amount": 500}],
+    )
+    period = resolve_period("yesterday", now=NOW)
+    data = await gather_overview(db, period, admin=False, now=NOW)
+    card = card_from_overview(data, "06 Jul 2026")
+    assert [(l, v) for l, v, _ in card.activity] == [("Donated", "500")]
+
+
+async def test_a_missing_snapshot_says_no_data_instead_of_zero(db):
+    """The live complaint: a night the capture was lost reported
+    "Donated: 0 credits by 0 member(s)" as fact, next to Funds and Spent
+    tiles showing real movement."""
     from fra_bot.services.report_card import card_from_overview
 
     await _member(db, 1, "Alice")
     period = resolve_period("yesterday", now=NOW)
     data = await gather_overview(db, period, admin=False, now=NOW)
-    assert card_from_overview(data, "06 Jul 2026").activity == []
+    assert data.donations_total is None
+    assert data.donations_missing is True
+    card = card_from_overview(data, "06 Jul 2026")
+    assert [(l, v) for l, v, _ in card.activity] == [("Donated", "no data")]
 
 
 async def test_member_names_are_not_recapitalised_on_the_card():
@@ -515,3 +536,51 @@ def test_bar_panel_still_spans_the_card_by_default():
     # The panel's right edge is painted at _WIDTH - _PAD when unbounded.
     assert image.getpixel((_WIDTH - _PAD - 4, 60)) != (0, 0, 0)
     assert image.getpixel((_WIDTH - _PAD // 2, 60)) == (0, 0, 0)
+
+
+# --------------------------------------------------------------------------
+# A finished period's standings must not be rewritten downward
+# --------------------------------------------------------------------------
+
+async def test_a_smaller_snapshot_cannot_overwrite_the_day(db):
+    """Within one period the game's list is cumulative, so it can only
+    grow. A smaller total means a partial page, a truncated table, or a
+    table read just after the reset while we still held the old key —
+    and because latest_snapshot reads MAX(taken_at), accepting it left
+    the good batch in the table but unreachable."""
+    treasury = TreasuryRepo(db)
+    full = [{"username": f"M{i}", "amount": 100_000} for i in range(25)]
+    assert await treasury.store_income_snapshot("daily", "2026-08-20", full) is True
+    assert await treasury.snapshot_total("daily", "2026-08-20") == 2_500_000
+
+    # A partially rendered page arrives later.
+    accepted = await treasury.store_income_snapshot(
+        "daily", "2026-08-20", [{"username": "EarlyBird", "amount": 500}],
+    )
+    assert accepted is False
+    assert await treasury.snapshot_total("daily", "2026-08-20") == 2_500_000
+    assert len(await treasury.latest_snapshot("daily", "2026-08-20")) == 25
+
+
+async def test_a_growing_snapshot_still_replaces_the_day(db):
+    treasury = TreasuryRepo(db)
+    await treasury.store_income_snapshot(
+        "daily", "2026-08-20", [{"username": "A", "amount": 100}],
+    )
+    assert await treasury.store_income_snapshot(
+        "daily", "2026-08-20",
+        [{"username": "A", "amount": 300}, {"username": "B", "amount": 50}],
+    ) is True
+    assert await treasury.snapshot_total("daily", "2026-08-20") == 350
+
+
+async def test_a_new_period_key_starts_from_scratch(db):
+    """The guard is per key: the next day legitimately starts near zero."""
+    treasury = TreasuryRepo(db)
+    await treasury.store_income_snapshot(
+        "daily", "2026-08-20", [{"username": "A", "amount": 2_000_000}],
+    )
+    assert await treasury.store_income_snapshot(
+        "daily", "2026-08-21", [{"username": "A", "amount": 10}],
+    ) is True
+    assert await treasury.snapshot_total("daily", "2026-08-21") == 10

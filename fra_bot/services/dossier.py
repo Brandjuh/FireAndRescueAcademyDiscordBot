@@ -188,14 +188,24 @@ class DossierService:
             pass  # dossier stays useful without the sanction block
 
     async def _income(self, mc_user_id: int, period: str) -> int | None:
-        """The member's latest treasury-income snapshot amount (their
-        contribution to the alliance funds this day/month)."""
+        """The member's contribution IN THE CURRENT day/month, or None.
+
+        The query used to take the newest period_key the member appears
+        in at all, so somebody who had not donated today — and is
+        therefore absent from today's list — was shown yesterday's (or
+        last week's) amount under a "today" label. Pinning the key means
+        an absent member reads as no contribution, which is the truth.
+        """
+        from ..db.repos import ny_period_keys
+
+        day_key, month_key = ny_period_keys()
+        period_key = day_key if period == "daily" else month_key
         try:
             async with self._db.conn.execute(
                 "SELECT amount FROM income_snapshots "
-                "WHERE period = ? AND mc_user_id = ? "
-                "ORDER BY period_key DESC, taken_at DESC LIMIT 1",
-                (period, mc_user_id),
+                "WHERE period = ? AND period_key = ? AND mc_user_id = ? "
+                "ORDER BY taken_at DESC LIMIT 1",
+                (period, period_key, mc_user_id),
             ) as cur:
                 row = await cur.fetchone()
             return row["amount"] if row is not None else None

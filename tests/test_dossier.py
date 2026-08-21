@@ -29,12 +29,19 @@ async def _seed(db):
         "last_seen_at, left_at) VALUES (43, 'GoneMember', 0, '2026-01-01', "
         "'2026-06-01', '2026-06-01')"
     )
-    # Treasury contributions (income snapshots).
+    # Treasury contributions (income snapshots). Keyed to the CURRENT NY
+    # game day/month: the dossier reports "today"/"this month", so a row
+    # under any other key must not be picked up (it used to be, and was
+    # then labelled as today's).
+    from fra_bot.db.repos import ny_period_keys
+
+    day_key, month_key = ny_period_keys()
     await db.execute(
         "INSERT INTO income_snapshots (period, period_key, taken_at, rank, "
         "username, mc_user_id, amount) VALUES "
-        "('daily', '2026-07-09', '2026-07-09', 1, 'DutchFireFighter', 42, 110828), "
-        "('monthly', '2026-07', '2026-07-09', 1, 'DutchFireFighter', 42, 2500000)"
+        "('daily', ?, '2026-07-09', 1, 'DutchFireFighter', 42, 110828), "
+        "('monthly', ?, '2026-07-09', 1, 'DutchFireFighter', 42, 2500000)",
+        (day_key, month_key),
     )
     # Requests: one training, one building; one large mission.
     await db.execute(
@@ -134,3 +141,24 @@ async def test_dossier_includes_sanction_summary(db):
     # A clean member gets no sanctions field at all.
     clean = dossier_embed(await svc.build(43))
     assert not any("Sanctions" in f.name for f in clean.fields)
+
+
+async def test_dossier_never_labels_an_older_contribution_as_today(db):
+    """A member absent from today's list showed yesterday's — or last
+    week's — amount under a "today" label. The number was real but
+    belonged to a different window."""
+    from fra_bot.services.dossier import DossierService
+
+    await db.execute(
+        "INSERT INTO members (mc_user_id, name, is_active, first_seen_at, "
+        "last_seen_at) VALUES (77, 'Quiet', 1, '2026-01-01', '2026-07-01')"
+    )
+    # A contribution under an OLD period key only.
+    await db.execute(
+        "INSERT INTO income_snapshots (period, period_key, taken_at, rank, "
+        "username, mc_user_id, amount) VALUES "
+        "('daily', '2020-01-01', '2020-01-01', 1, 'Quiet', 77, 999999)"
+    )
+    dossier = await DossierService(db).build(77)
+    assert dossier is not None
+    assert dossier.contributed_daily is None

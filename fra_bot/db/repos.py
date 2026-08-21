@@ -7,12 +7,15 @@ Timestamps in and out are UTC ISO-8601 strings.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from typing import Any
 
 import aiosqlite
 
 from ..mc.parsers.common import infer_expense_event_ats
 from .database import Database, utcnow_iso
+
+log = logging.getLogger(__name__)
 
 
 class StateRepo:
@@ -733,14 +736,40 @@ class TreasuryRepo:
 
     # -- income snapshots ----------------------------------------------
 
+    async def snapshot_total(self, period: str, period_key: str) -> int | None:
+        """Credits in the newest stored batch for this key, or None when
+        no batch exists yet."""
+        rows = await self.latest_snapshot(period, period_key)
+        if not rows:
+            return None
+        return sum(row["amount"] for row in rows)
+
     async def store_income_snapshot(
         self, period: str, period_key: str, entries: list[dict[str, Any]]
-    ) -> None:
+    ) -> bool:
         """Store a snapshot batch; readers use the newest batch per key.
 
         taken_at carries microsecond precision so two batches can never
         merge, even when stored within the same second.
+
+        A batch totalling LESS than the one already stored for this key is
+        REFUSED (returns False). Within one period the game's list is
+        cumulative, so it can only grow: a smaller total means a partially
+        rendered page, a truncated table, or a table parsed just after the
+        reset while we still hold the old key. Accepting it silently
+        rewrote a finished day's standings downward, and because
+        ``latest_snapshot`` reads MAX(taken_at) the good batch was still
+        in the table but unreachable.
         """
+        incoming = sum(int(e["amount"]) for e in entries)
+        stored = await self.snapshot_total(period, period_key)
+        if stored is not None and incoming < stored:
+            log.warning(
+                "treasury: refusing %s snapshot for %s — %d credits is "
+                "below the %d already stored (partial page?)",
+                period, period_key, incoming, stored,
+            )
+            return False
         now = dt.datetime.now(dt.timezone.utc).isoformat()
         async with self._db.transaction() as conn:
             for rank, entry in enumerate(entries, start=1):
@@ -760,6 +789,7 @@ class TreasuryRepo:
                         entry["amount"],
                     ),
                 )
+        return True
 
     async def latest_snapshot(
         self, period: str, period_key: str

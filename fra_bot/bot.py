@@ -182,6 +182,9 @@ class FRABot(commands.Bot):
         # So the service can raise the alarm when it refuses a duplicate
         # build without depending on Discord itself.
         self.buildings.notify_admin = self.notify_admin
+        # Same injection: the treasury sync must be able to say that a
+        # period's final income snapshot was not stored.
+        self.treasury_sync.notify_admin = self.notify_admin
         # Credit rank roles (the old bot's RoleBasedCredits, ported).
         from .services.rank_roles import RankRolesService
 

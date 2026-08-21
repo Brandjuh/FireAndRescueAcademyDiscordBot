@@ -97,6 +97,13 @@ class TreasurySyncService:
         # unambiguously in the new period) capture it.
         day_key_after, month_key_after = ny_period_keys()
 
+        # A skipped capture used to finish as a plain success with rows=0,
+        # so the day whose FINAL standings were lost looked exactly like a
+        # healthy run. The morning then presented that day's last interval
+        # snapshot (up to ~35 min before the reset) as final, or nothing
+        # at all. Say so instead.
+        skipped: list[str] = []
+
         daily_entries = parse_income_table(daily_html)
         if daily_entries and day_key_after != day_key:
             log.warning(
@@ -104,9 +111,14 @@ class TreasurySyncService:
                 "income snapshot skipped rather than filed under the wrong day",
                 day_key, day_key_after,
             )
+            skipped.append(f"daily {day_key} (rolled into {day_key_after})")
         elif daily_entries:
-            await self._treasury.store_income_snapshot("daily", day_key, daily_entries)
-            rows += len(daily_entries)
+            if await self._treasury.store_income_snapshot(
+                "daily", day_key, daily_entries
+            ):
+                rows += len(daily_entries)
+            else:
+                skipped.append(f"daily {day_key} (smaller than stored)")
 
         monthly_entries = parse_income_table(monthly_html)
         if monthly_entries and month_key_after != month_key:
@@ -114,9 +126,29 @@ class TreasurySyncService:
                 "treasury: NY month rolled over mid-sync (%s -> %s); monthly "
                 "income snapshot skipped", month_key, month_key_after,
             )
+            skipped.append(f"monthly {month_key} (rolled into {month_key_after})")
         elif monthly_entries:
-            await self._treasury.store_income_snapshot("monthly", month_key, monthly_entries)
-            rows += len(monthly_entries)
+            if await self._treasury.store_income_snapshot(
+                "monthly", month_key, monthly_entries
+            ):
+                rows += len(monthly_entries)
+            else:
+                skipped.append(f"monthly {month_key} (smaller than stored)")
+
+        if skipped:
+            note = "income snapshot not stored: " + "; ".join(skipped)
+            await self._runs.finish(
+                run_id, status="success", pages=2,
+                rows_parsed=rows, rows_new=rows, message=note,
+            )
+            notify = getattr(self, "notify_admin", None)
+            if notify is not None:
+                await notify(
+                    "⚠️ **Treasury** — " + note
+                    + ". That period's final standings may be missing or "
+                    "stale in the reports."
+                )
+            return
 
         await self._runs.finish(
             run_id, status="success", pages=2, rows_parsed=rows, rows_new=rows

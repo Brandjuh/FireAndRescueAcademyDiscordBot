@@ -63,8 +63,13 @@ def _treasury_section(result: ReportResult, data: OverviewData) -> None:
     if data.donations_total is not None:
         donors = data.donations_contributors or 0
         lines.append(
-            f"Donated: {data.donations_total:,} credits by {donors} member(s)"
+            f"Donated: {data.donations_total:,} credits "
+            f"(top {donors} on the game's list)"
         )
+    elif data.donations_missing:
+        # Never a zero: the game's income list for this period was not
+        # captured, which is a different fact from "nobody donated".
+        lines.append("Donated: no income snapshot stored for this period")
     if data.spent_total:
         line = f"Spent: {data.spent_total:,} credits ({data.spent_rows} expense(s))"
         if data.top_spender:
