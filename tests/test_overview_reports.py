@@ -560,6 +560,11 @@ async def test_a_smaller_snapshot_cannot_overwrite_the_day(db):
     assert accepted is False
     assert await treasury.snapshot_total("daily", "2026-08-20") == 2_500_000
     assert len(await treasury.latest_snapshot("daily", "2026-08-20")) == 25
+    # The refusal carries the numbers, so the admin notice can say which
+    # of the two readings is the odd one.
+    detail = treasury.last_snapshot_refusal
+    assert detail["incoming"] == 500 and detail["stored"] == 2_500_000
+    assert detail["incoming_rows"] == 1 and detail["stored_rows"] == 25
 
 
 async def test_a_growing_snapshot_still_replaces_the_day(db):
@@ -584,3 +589,42 @@ async def test_a_new_period_key_starts_from_scratch(db):
         "daily", "2026-08-21", [{"username": "A", "amount": 10}],
     ) is True
     assert await treasury.snapshot_total("daily", "2026-08-21") == 10
+
+
+async def test_an_ordinary_wobble_is_still_accepted(db):
+    """The guard is a guess about a page this code cannot see. If the
+    game's daily list turns out to be a rolling window rather than a
+    cumulative one, a strict never-shrink rule would reject the truth all
+    day — so only a COLLAPSE counts."""
+    treasury = TreasuryRepo(db)
+    await treasury.store_income_snapshot(
+        "daily", "2026-08-20", [{"username": "A", "amount": 1_000_000}],
+    )
+    assert await treasury.store_income_snapshot(
+        "daily", "2026-08-20", [{"username": "A", "amount": 800_000}],
+    ) is True
+    assert await treasury.snapshot_total("daily", "2026-08-20") == 800_000
+
+
+async def test_a_stale_stored_batch_stops_blocking_the_truth(db):
+    """A wrong stored value must not become permanent: if the game keeps
+    reporting a smaller number, the game is the better witness."""
+    from fra_bot.db.repos import SNAPSHOT_TRUST_MINUTES
+
+    treasury = TreasuryRepo(db)
+    await treasury.store_income_snapshot(
+        "daily", "2026-08-21", [{"username": "A", "amount": 2_000_000}],
+    )
+    # Age the stored batch past the trust window.
+    stale = (
+        dt.datetime.now(UTC)
+        - dt.timedelta(minutes=SNAPSHOT_TRUST_MINUTES + 5)
+    ).isoformat()
+    await db.execute(
+        "UPDATE income_snapshots SET taken_at = ? WHERE period_key = ?",
+        (stale, "2026-08-21"),
+    )
+    assert await treasury.store_income_snapshot(
+        "daily", "2026-08-21", [{"username": "A", "amount": 1_000}],
+    ) is True
+    assert await treasury.snapshot_total("daily", "2026-08-21") == 1_000

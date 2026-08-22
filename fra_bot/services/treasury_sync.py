@@ -118,7 +118,7 @@ class TreasurySyncService:
             ):
                 rows += len(daily_entries)
             else:
-                skipped.append(f"daily {day_key} (smaller than stored)")
+                skipped.append(self._refusal_note("daily", day_key))
 
         monthly_entries = parse_income_table(monthly_html)
         if monthly_entries and month_key_after != month_key:
@@ -133,7 +133,7 @@ class TreasurySyncService:
             ):
                 rows += len(monthly_entries)
             else:
-                skipped.append(f"monthly {month_key} (smaller than stored)")
+                skipped.append(self._refusal_note("monthly", month_key))
 
         if skipped:
             note = "income snapshot not stored: " + "; ".join(skipped)
@@ -266,6 +266,20 @@ class TreasurySyncService:
     # ------------------------------------------------------------------
     # Expenses: incremental top-up
     # ------------------------------------------------------------------
+
+    def _refusal_note(self, period: str, period_key: str) -> str:
+        """Why a batch was refused, WITH the numbers. "smaller than
+        stored" alone told nobody whether the new reading or the stored
+        one was the odd figure."""
+        detail = getattr(self._treasury, "last_snapshot_refusal", None) or {}
+        if detail.get("period_key") != period_key:
+            return f"{period} {period_key} (collapsed against the stored batch)"
+        return (
+            f"{period} {period_key} ({detail['incoming']:,} credits in "
+            f"{detail['incoming_rows']} row(s) vs {detail['stored']:,} in "
+            f"{detail['stored_rows']} row(s) captured "
+            f"{detail['stored_age_minutes']} min ago)"
+        )
 
     async def sync_expenses_incremental(self) -> int:
         """Fetch new expenses from the top of the ledger.
