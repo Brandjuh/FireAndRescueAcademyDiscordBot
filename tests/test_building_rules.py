@@ -804,3 +804,33 @@ async def test_overpass_does_not_retry_an_unreachable_host(monkeypatch):
     with pytest.raises(ov.OverpassError):
         await client.fetch("[out:json];")
     assert len(calls) == 1
+
+
+async def test_overpass_stops_at_its_wall_clock_budget(monkeypatch):
+    """sock_connect only bounds the HANDSHAKE. An endpoint that accepts
+    the connection and then stalls runs to the full per-request timeout,
+    and multiplied by the mirror list and the retry pass that was nine
+    minutes for ONE lookup — with the daily-build job lock held."""
+    import asyncio as _asyncio
+
+    from fra_bot.geo import overpass as ov
+
+    monkeypatch.setattr(ov, "RETRY_DELAY_SECONDS", 0)
+    client = ov.OverpassClient(
+        urls=["https://a.example/api", "https://b.example/api",
+              "https://c.example/api"],
+        budget=0.2,
+    )
+    attempts = []
+
+    async def _fetch_one(session, url, query):
+        attempts.append(url)
+        await _asyncio.sleep(0.15)          # a stalling endpoint
+        raise ov.OverpassError("HTTP 500: Internal Server Error")
+
+    client._fetch_one = _fetch_one
+    with pytest.raises(ov.OverpassError) as excinfo:
+        await client.fetch("[out:json];")
+    # The budget cut it short instead of walking every endpoint twice.
+    assert len(attempts) < len(client._urls) * ov.RETRY_PASSES
+    assert "budget exhausted" in str(excinfo.value)

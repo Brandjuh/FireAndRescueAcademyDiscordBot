@@ -47,6 +47,18 @@ USER_AGENT = "FireAndRescueAcademyBot/1.0 (alliance admin tooling; contact via D
 RETRY_PASSES = 2
 RETRY_DELAY_SECONDS = 3.0
 
+#: HARD wall-clock cap on one fetch — every endpoint and every retry pass
+#: together. sock_connect only bounds the HANDSHAKE, so an endpoint that
+#: accepts the connection and then stalls runs to the full per-request
+#: timeout; multiplied by the mirror list and the retry pass that is
+#: 2 x 3 x 90s = 9 minutes for a single lookup, and the daily build makes
+#: several. This is the number that actually keeps the job lock free.
+FETCH_BUDGET_SECONDS = 60.0
+
+
+def _loop_time() -> float:
+    return asyncio.get_running_loop().time()
+
 
 def _is_transient(reason: str) -> bool:
     """A server-side failure worth one more pass, as opposed to a host we
@@ -199,8 +211,9 @@ class OverpassClient:
     def __init__(
         self, *, url: str | None = None,
         urls: tuple[str, ...] | list[str] | None = None,
-        timeout: float = 90.0,
+        timeout: float = 45.0,
         contact_email: str = "",
+        budget: float = FETCH_BUDGET_SECONDS,
     ) -> None:
         # ``url=`` stays supported for callers (and tests) that pin one
         # endpoint; ``urls=`` is the mirror list.
@@ -209,6 +222,7 @@ class OverpassClient:
         else:
             self._urls = tuple(urls or DEFAULT_OVERPASS_URLS)
         self._timeout = timeout
+        self._budget = budget
         self._user_agent = (
             f"FireAndRescueAcademyBot/1.0 ({contact_email})"
             if contact_email else USER_AGENT
@@ -245,10 +259,14 @@ class OverpassClient:
         async with aiohttp.ClientSession(
             timeout=timeout, trust_env=True, headers=headers,
         ) as session:
+            deadline = _loop_time() + self._budget
             for attempt in range(RETRY_PASSES):
                 problems = []
                 transient = False
                 for url in self._urls:
+                    if _loop_time() >= deadline:
+                        problems.append("(budget exhausted, endpoints skipped)")
+                        break
                     try:
                         return await self._fetch_one(session, url, query)
                     except (
@@ -269,7 +287,11 @@ class OverpassClient:
                 # daily build. Only server-side failures are worth a
                 # second pass — an unreachable host will still be
                 # unreachable, and the connect timeout already bounds it.
-                if not transient or attempt == RETRY_PASSES - 1:
+                if (
+                    not transient
+                    or attempt == RETRY_PASSES - 1
+                    or _loop_time() + RETRY_DELAY_SECONDS >= deadline
+                ):
                     break
                 log.info("Overpass: every endpoint failed transiently; retrying")
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
