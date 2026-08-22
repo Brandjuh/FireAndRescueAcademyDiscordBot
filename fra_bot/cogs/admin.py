@@ -26,6 +26,11 @@ from ..services.treasury_sync import STATE_BACKFILL_DONE, STATE_BACKFILL_NEXT_PA
 
 log = logging.getLogger(__name__)
 
+#: Ceiling for a MANUAL daily build. The worst case is bounded in the
+#: Overpass client and the city loop, but geocoding is a third party too —
+#: an admin watching "running…" deserves an answer either way.
+DAILY_BUILD_TIMEOUT_SECONDS = 600
+
 # Only these Discord user IDs may spend alliance coins via !fra coinmission.
 # Everything else in the bot is strictly free-only; this is a deliberate,
 # owner-only exception, and it still previews unless `| confirm` is given.
@@ -2065,12 +2070,29 @@ class AdminCog(commands.Cog):
             return
         message = await ctx.send(
             "⏳ Running the daily worldwide auto-build… "
-            "(geocode + OpenStreetMap lookups can take a minute)"
+            "(geocode + OpenStreetMap lookups can take a few minutes)"
         )
         async with lock:
             self.bot.presence.mark_running("daily-build")
             try:
-                summary = await self.bot.buildings.daily_build(force=True)
+                # Bounded: geocoding and Overpass both talk to third
+                # parties that can stall, and this message otherwise sits
+                # on "running…" forever with the job lock held.
+                summary = await asyncio.wait_for(
+                    self.bot.buildings.daily_build(force=True),
+                    timeout=DAILY_BUILD_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                log.error("Manual daily build timed out")
+                await message.edit(
+                    content=(
+                        "⏱️ Daily build gave up after "
+                        f"{DAILY_BUILD_TIMEOUT_SECONDS // 60} minutes — "
+                        "geocoding or OpenStreetMap is not answering. "
+                        "Nothing was built; try again later."
+                    )
+                )
+                return
             except Exception as exc:  # noqa: BLE001 - surfaced to the admin
                 log.exception("Manual daily build failed")
                 await message.edit(content=f"❌ Daily build failed: {exc}")
