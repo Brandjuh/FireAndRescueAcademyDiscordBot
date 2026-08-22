@@ -352,10 +352,10 @@ class BuildingsService(BoardRequestService):
         self._builder = BrowserBuilder(
             cfg.missionchief.base_url, self._playwright_cookies
         )
+        geo_cfg = getattr(cfg, "geocoding", None)
         self._overpass = OverpassClient(
-            urls=getattr(
-                getattr(cfg, "geocoding", None), "overpass_urls", None
-            ) or None
+            urls=getattr(geo_cfg, "overpass_urls", None) or None,
+            contact_email=getattr(geo_cfg, "contact_email", "") or "",
         )
         self._rng = random.Random()
         # Post-creation automation: tax + level + extensions on new builds.
