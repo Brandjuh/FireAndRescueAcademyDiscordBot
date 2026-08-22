@@ -17,6 +17,26 @@ from .database import Database, utcnow_iso
 
 log = logging.getLogger(__name__)
 
+#: An income batch below this fraction of the stored one has COLLAPSED
+#: rather than merely wobbled — the signature of a half-rendered page.
+SNAPSHOT_COLLAPSE_RATIO = 0.5
+#: How long a stored income batch is trusted over a much smaller new one.
+#: Past this the new reading wins: a wrong stored value must be able to
+#: heal within the same game day instead of sticking for good.
+SNAPSHOT_TRUST_MINUTES = 120
+
+
+def _snapshot_age_minutes(taken_at: str) -> float | None:
+    """Minutes since a snapshot's taken_at, or None when unparseable."""
+    try:
+        taken = dt.datetime.fromisoformat(str(taken_at))
+    except (TypeError, ValueError):
+        return None
+    if taken.tzinfo is None:
+        taken = taken.replace(tzinfo=dt.timezone.utc)
+    delta = dt.datetime.now(dt.timezone.utc) - taken
+    return max(0.0, delta.total_seconds() / 60)
+
 
 class StateRepo:
     """Small key/value store for sync cursors and backfill progress."""
@@ -709,6 +729,10 @@ class LogsRepo:
 class TreasuryRepo:
     def __init__(self, db: Database) -> None:
         self._db = db
+        #: Details of the most recent refused income batch, so the caller
+        #: can report the actual numbers instead of just "smaller than
+        #: stored" — which said nothing anyone could act on.
+        self.last_snapshot_refusal: dict[str, Any] | None = None
 
     # -- balance -------------------------------------------------------
 
@@ -752,24 +776,53 @@ class TreasuryRepo:
         taken_at carries microsecond precision so two batches can never
         merge, even when stored within the same second.
 
-        A batch totalling LESS than the one already stored for this key is
-        REFUSED (returns False). Within one period the game's list is
-        cumulative, so it can only grow: a smaller total means a partially
-        rendered page, a truncated table, or a table parsed just after the
-        reset while we still hold the old key. Accepting it silently
-        rewrote a finished day's standings downward, and because
-        ``latest_snapshot`` reads MAX(taken_at) the good batch was still
-        in the table but unreachable.
+        A batch that COLLAPSES against the one already stored for this key
+        is refused (returns False): a partially rendered page, a truncated
+        table, or a table parsed just after the reset while we still held
+        the old key. Accepting one rewrote a finished day's standings
+        downward, and because ``latest_snapshot`` reads MAX(taken_at) the
+        good batch stayed in the table but became unreachable.
+
+        Two deliberate limits on that guard, because it is a guess about a
+        page this code cannot see:
+
+        * only a COLLAPSE counts (below
+          :data:`SNAPSHOT_COLLAPSE_RATIO` of the stored total). An
+          ordinary wobble is accepted — if the game's daily list turns out
+          to be a rolling window rather than a cumulative one, a strict
+          "must never shrink" rule would reject the truth all day;
+        * the guard EXPIRES after :data:`SNAPSHOT_TRUST_MINUTES`. A wrong
+          stored value must not become permanent: if the game keeps
+          reporting a smaller number, the game is right and we are wrong,
+          so the period self-corrects instead of staying poisoned.
         """
         incoming = sum(int(e["amount"]) for e in entries)
-        stored = await self.snapshot_total(period, period_key)
-        if stored is not None and incoming < stored:
+        previous = await self.latest_snapshot(period, period_key)
+        stored = sum(row["amount"] for row in previous) if previous else None
+        if stored is not None and stored > 0 and incoming < stored * SNAPSHOT_COLLAPSE_RATIO:
+            age_minutes = _snapshot_age_minutes(previous[0]["taken_at"])
+            if age_minutes is not None and age_minutes <= SNAPSHOT_TRUST_MINUTES:
+                log.warning(
+                    "treasury: refusing %s snapshot for %s — %d credits in "
+                    "%d row(s) collapses against the %d in %d row(s) stored "
+                    "%d min ago (partial page?)",
+                    period, period_key, incoming, len(entries), stored,
+                    len(previous), int(age_minutes),
+                )
+                self.last_snapshot_refusal = {
+                    "period": period, "period_key": period_key,
+                    "incoming": incoming, "incoming_rows": len(entries),
+                    "stored": stored, "stored_rows": len(previous),
+                    "stored_age_minutes": int(age_minutes),
+                }
+                return False
             log.warning(
-                "treasury: refusing %s snapshot for %s — %d credits is "
-                "below the %d already stored (partial page?)",
+                "treasury: accepting a much smaller %s snapshot for %s "
+                "(%d vs %d stored %s min ago) — the stored value is stale, "
+                "so the game is the better witness",
                 period, period_key, incoming, stored,
+                "?" if age_minutes is None else int(age_minutes),
             )
-            return False
         now = dt.datetime.now(dt.timezone.utc).isoformat()
         async with self._db.transaction() as conn:
             for rank, entry in enumerate(entries, start=1):
