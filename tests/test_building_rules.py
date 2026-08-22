@@ -726,3 +726,81 @@ async def test_a_completed_build_stamps_built_at(db):
     stored = json.loads((await repo.get(rid))["payload"])
     assert stored["built_at"]
     assert stored["building_id"] is None      # id unknown, still guarded
+
+
+async def test_overpass_identifies_itself():
+    """OSM services require an identifying User-Agent, and the front end
+    at overpass-api.de answers a generic one with 406 Not Acceptable —
+    which is exactly what a bare aiohttp default got."""
+    import aiohttp
+
+    from fra_bot.geo.overpass import OverpassClient
+
+    seen = {}
+    real_session = aiohttp.ClientSession
+
+    class _Spy(real_session):
+        def __init__(self, *args, headers=None, **kwargs):
+            seen["headers"] = headers or {}
+            super().__init__(*args, headers=headers, **kwargs)
+
+    aiohttp.ClientSession = _Spy
+    try:
+        client = OverpassClient(urls=["https://x.example/api"],
+                                contact_email="admin@example.com")
+
+        async def _fetch_one(session, url, query):
+            raise aiohttp.ClientError("nope")
+
+        client._fetch_one = _fetch_one
+        with pytest.raises(Exception):
+            await client.fetch("[out:json];")
+    finally:
+        aiohttp.ClientSession = real_session
+    assert "FireAndRescueAcademyBot" in seen["headers"]["User-Agent"]
+    assert "admin@example.com" in seen["headers"]["User-Agent"]
+    assert "json" in seen["headers"]["Accept"]
+
+
+async def test_overpass_retries_the_list_once_on_a_server_error(monkeypatch):
+    """Public instances answer 5xx under load often enough that one bad
+    moment must not cost the whole daily build."""
+    import asyncio as _asyncio
+
+    from fra_bot.geo import overpass as ov
+
+    monkeypatch.setattr(ov, "RETRY_DELAY_SECONDS", 0)
+    client = ov.OverpassClient(urls=["https://a.example/api", "https://b.example/api"])
+    calls = []
+
+    async def _fetch_one(session, url, query):
+        calls.append(url)
+        if len(calls) <= 2:                       # first pass: both 500
+            raise ov.OverpassError("HTTP 500: Internal Server Error")
+        return {"elements": []}
+
+    client._fetch_one = _fetch_one
+    assert await client.fetch("[out:json];") == {"elements": []}
+    assert len(calls) == 3                        # 2 failures, then success
+
+
+async def test_overpass_does_not_retry_an_unreachable_host(monkeypatch):
+    """A host we cannot reach will still be unreachable; the connect
+    timeout already bounds that case, and a second pass just burns the
+    daily-build job lock."""
+    import aiohttp
+
+    from fra_bot.geo import overpass as ov
+
+    monkeypatch.setattr(ov, "RETRY_DELAY_SECONDS", 0)
+    client = ov.OverpassClient(urls=["https://down.example/api"])
+    calls = []
+
+    async def _fetch_one(session, url, query):
+        calls.append(url)
+        raise aiohttp.ClientError("Cannot connect to host down.example:443")
+
+    client._fetch_one = _fetch_one
+    with pytest.raises(ov.OverpassError):
+        await client.fetch("[out:json];")
+    assert len(calls) == 1

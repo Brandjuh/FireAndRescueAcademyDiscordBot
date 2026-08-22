@@ -29,7 +29,8 @@ def test_query_covers_both_types_and_validates():
     assert 'nwr["amenity"="hospital"]' in q
     assert 'nwr["healthcare"="hospital"]' in q
     assert 'nwr["amenity"="prison"]' in q
-    assert "out center tags;" in q
+    # Documented order: verbosity, then geometry.
+    assert "out tags center;" in q
     # A hospital-only query omits the prison clause.
     assert 'prison' not in build_candidate_query(40.0, -74.2, 40.4, -73.8, "hospital")
     with pytest.raises(ValueError):

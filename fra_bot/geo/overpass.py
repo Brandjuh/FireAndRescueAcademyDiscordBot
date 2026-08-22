@@ -33,6 +33,26 @@ DEFAULT_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 #: must fail FAST so the next mirror gets its turn.
 CONNECT_TIMEOUT = 10.0
 
+#: OSM services require an identifying User-Agent, and the front end at
+#: overpass-api.de answers a generic one with "406 Not Acceptable" —
+#: which is what a bare aiohttp default (``Python/3.11 aiohttp/x``) got.
+#: The geocoder already identifies itself this way for Nominatim; this is
+#: the same identity, and ``geocoding.contact_email`` personalises it.
+USER_AGENT = "FireAndRescueAcademyBot/1.0 (alliance admin tooling; contact via Discord)"
+
+#: Whole-list attempts before giving up, and the pause between them.
+#: Public instances answer 5xx under load often enough that a single bad
+#: moment should not cost the daily build; an unreachable host is not
+#: retried (the connect timeout already bounds that case).
+RETRY_PASSES = 2
+RETRY_DELAY_SECONDS = 3.0
+
+
+def _is_transient(reason: str) -> bool:
+    """A server-side failure worth one more pass, as opposed to a host we
+    simply cannot reach."""
+    return any(f"HTTP {code}" in reason for code in (429, 500, 502, 503, 504))
+
 DEFAULT_OVERPASS_URLS: tuple[str, ...] = (
     DEFAULT_OVERPASS_URL,
     "https://overpass.kumi.systems/api/interpreter",
@@ -120,7 +140,9 @@ def build_candidate_query(
     # Server-side budget kept UNDER the client timeout (90 s): at 180 the
     # client always gave up first, so a slow query looked like a network
     # failure instead of a slow one.
-    return "\n".join(["[out:json][timeout:60];", "(", *clauses, ");", "out center tags;"])
+    # "out tags center" is the documented order (verbosity, then
+    # geometry); the reversed form parsed but is not what the examples use.
+    return "\n".join(["[out:json][timeout:60];", "(", *clauses, ");", "out tags center;"])
 
 
 def parse_candidates(data: dict, *, want: str | None = None) -> list[OsmCandidate]:
@@ -178,6 +200,7 @@ class OverpassClient:
         self, *, url: str | None = None,
         urls: tuple[str, ...] | list[str] | None = None,
         timeout: float = 90.0,
+        contact_email: str = "",
     ) -> None:
         # ``url=`` stays supported for callers (and tests) that pin one
         # endpoint; ``urls=`` is the mirror list.
@@ -186,6 +209,10 @@ class OverpassClient:
         else:
             self._urls = tuple(urls or DEFAULT_OVERPASS_URLS)
         self._timeout = timeout
+        self._user_agent = (
+            f"FireAndRescueAcademyBot/1.0 ({contact_email})"
+            if contact_email else USER_AGENT
+        )
 
     @property
     def url(self) -> str:
@@ -195,7 +222,7 @@ class OverpassClient:
     async def _fetch_one(self, session, url: str, query: str) -> dict:
         async with session.post(url, data={"data": query}) as resp:
             if resp.status != 200:
-                body = (await resp.text())[:300]
+                body = " ".join((await resp.text())[:200].split())
                 raise OverpassError(f"HTTP {resp.status}: {body}")
             return await resp.json(content_type=None)
 
@@ -209,18 +236,43 @@ class OverpassClient:
             total=self._timeout, sock_connect=CONNECT_TIMEOUT
         )
         problems: list[str] = []
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            for url in self._urls:
-                try:
-                    return await self._fetch_one(session, url, query)
-                except (aiohttp.ClientError, asyncio.TimeoutError, OverpassError) as exc:
-                    # asyncio.TimeoutError is NOT an aiohttp.ClientError, so
-                    # it used to escape OverpassError entirely and surface as
-                    # an unhandled exception out of the callers' except.
-                    host = url.split("/")[2] if "//" in url else url
-                    reason = str(exc) or exc.__class__.__name__
-                    log.warning("Overpass %s failed: %s", host, reason)
-                    problems.append(f"{host}: {reason}")
+        headers = {
+            "User-Agent": self._user_agent,
+            # Explicit, so a content-negotiating front end cannot decide
+            # it has nothing acceptable to offer us.
+            "Accept": "application/json, */*;q=0.5",
+        }
+        async with aiohttp.ClientSession(
+            timeout=timeout, trust_env=True, headers=headers,
+        ) as session:
+            for attempt in range(RETRY_PASSES):
+                problems = []
+                transient = False
+                for url in self._urls:
+                    try:
+                        return await self._fetch_one(session, url, query)
+                    except (
+                        aiohttp.ClientError, asyncio.TimeoutError, OverpassError
+                    ) as exc:
+                        # asyncio.TimeoutError is NOT an aiohttp.ClientError,
+                        # so it used to escape OverpassError entirely and
+                        # surface as an unhandled exception out of the
+                        # callers' except.
+                        host = url.split("/")[2] if "//" in url else url
+                        reason = str(exc) or exc.__class__.__name__
+                        log.warning("Overpass %s failed: %s", host, reason)
+                        problems.append(f"{host}: {reason}")
+                        if _is_transient(reason):
+                            transient = True
+                # Public Overpass instances answer 5xx under load often
+                # enough that one bad moment should not cost the whole
+                # daily build. Only server-side failures are worth a
+                # second pass — an unreachable host will still be
+                # unreachable, and the connect timeout already bounds it.
+                if not transient or attempt == RETRY_PASSES - 1:
+                    break
+                log.info("Overpass: every endpoint failed transiently; retrying")
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
         raise OverpassError(
             "Overpass request failed on every endpoint — " + "; ".join(problems)
         )
