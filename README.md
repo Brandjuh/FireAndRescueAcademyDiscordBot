@@ -237,9 +237,12 @@ from any member panel and sends nothing anywhere — it only drives
 missionchief.com in your own browser.
 
 * **Toggle + settings panel** (bottom right on any missionchief.com page):
-  building type, location mode (random worldwide / around a place / both),
-  radius, interval, a per-run cap and a credit floor. The toggle survives
-  page loads; only one browser tab ever drives.
+  which building types (a tick list of the game's own types — tick one,
+  several or **All**, and they are built in turn), location mode (random
+  worldwide / around a place / both), radius, interval, a per-run cap and a
+  credit floor. The type list is read from the game's build form on first
+  use, so it needs no id table and survives the game adding a type. The
+  toggle survives page loads; only one browser tab ever drives.
 * **Per building**: pick a spot with a real street address (the game's own
   pin lookup, OpenStreetMap as second opinion) → build it as a **personal**
   building with your own credits → link it to the dispatch center that

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FRA Auto-Build (private)
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.2.0
+// @version      1.3.0
 // @description  Private admin tool: bulk-build YOUR OWN MissionChief buildings. Pick a type, pick a place (fixed area and/or random worldwide), flip the toggle. Every new building is linked to the nearest dispatch center, fully expanded (all extensions/storage bought with credits) and fire stations start with a Quint.
 // @match        https://www.missionchief.com/*
 // @match        https://missionchief.com/*
@@ -22,6 +22,9 @@
  *
  * WHAT IT DOES, PER BUILDING
  * --------------------------
+ * 0. takes the next building type from the ones you ticked — the list is
+ *    the game's own, read from the build form, and you can tick all of
+ *    them; they are then built in turn, evenly;
  * 1. picks a spot — random inside a radius around a place you name, random
  *    anywhere in the world, or alternating between the two;
  * 2. checks the spot has a real street address (the game's own pin lookup,
@@ -73,7 +76,7 @@
 
   if (window.top !== window.self) return;   // never inside our own frames
 
-  const VERSION = "1.2.0";
+  const VERSION = "1.3.0";
   // Both www.missionchief.com and missionchief.com serve the game, and a
   // frame or fetch across those two is CROSS-ORIGIN: everything here would
   // silently stop working. So the script always stays on the host the
@@ -109,8 +112,7 @@
   const DEFAULTS = {
     enabled: false,          // the toggle survives a page load
     dryRun: true,
-    typeValue: "",
-    typeLabel: "",
+    typeValues: [],                  // every type you ticked; built in turn
     locationMode: "world",           // "area" | "world" | "mix"
     areaText: "",
     areaLat: null,
@@ -243,8 +245,16 @@
   let queue = readJson(QUEUE_KEY, {});        // buildingId -> {idle, addedAt, label}
   let history = readJson(HISTORY_KEY, []);    // [{lat, lng, id, at, type}]
   let cachedTypes = readJson(TYPES_KEY, []);  // [{value, label}]
-  let session = readJson(SESSION_KEY, { count: 0, startedAt: 0 });
+  let session = readJson(SESSION_KEY, { count: 0, startedAt: 0, cursor: 0 });
   let needsDispatch = readJson(NEEDS_KEY, {});   // country -> times skipped
+
+  if (!Array.isArray(settings.typeValues)) settings.typeValues = [];
+  if (!settings.typeValues.length && settings.typeValue) {
+    settings.typeValues = [String(settings.typeValue)];   // 1.x had one type
+    delete settings.typeValue;
+    delete settings.typeLabel;
+    writeJson(SETTINGS_KEY, settings);
+  }
 
   const state = {
     running: false,
@@ -996,6 +1006,28 @@
     );
   }
 
+  function knownTypes() {
+    return cachedTypes.length
+      ? cachedTypes
+      : (settings.typeValues || []).map((value) => ({ value, label: value }));
+  }
+
+  function selectedTypes() {
+    const wanted = new Set((settings.typeValues || []).map(String));
+    return knownTypes().filter((type) => wanted.has(String(type.value)));
+  }
+
+  function nextType() {
+    // Round robin, not random: "all buildings" should come out evenly
+    // spread, not thirty fire stations and one prison.
+    const types = selectedTypes();
+    if (!types.length) return null;
+    const cursor = (session.cursor || 0) % types.length;
+    session.cursor = cursor + 1;
+    saveSession();
+    return types[cursor];
+  }
+
   function buildingName(typeLabel, placeLabel) {
     const place = String(placeLabel || "").split(",")[0].trim();
     const name = `${place || "New"} ${typeLabel}`.replace(/\s+/g, " ").trim();
@@ -1005,7 +1037,9 @@
   // ---------------------------------------------------------- build a one
 
   async function buildOne() {
-    const typeLabel = settings.typeLabel || "building";
+    const type = nextType();
+    if (!type) throw new Error("STOP — tick at least one building type first");
+    const typeLabel = type.label || "building";
     const spot = await pickLocation();
     log(`📍 ${typeLabel}: ${spot.lat.toFixed(5)}, ${spot.lng.toFixed(5)} ` +
         `near ${spot.label}` +
@@ -1019,7 +1053,7 @@
       cachedTypes = options;
       writeJson(TYPES_KEY, cachedTypes);
     }
-    const chosen = selectType(doc, win, settings.typeValue);
+    const chosen = selectType(doc, win, type.value);
     if (!chosen.ok) throw new Error(chosen.error);
     await sleep(500);   // the page reveals the type's own block on 'change'
 
@@ -1455,8 +1489,8 @@
         stop();
         return;
       }
-      if (!settings.typeValue) {
-        log("⏹️ pick a building type first — stopped", "error");
+      if (!selectedTypes().length) {
+        log("⏹️ tick at least one building type first — stopped", "error");
         stop();
         return;
       }
@@ -1514,11 +1548,13 @@
     state.running = true;
     settings.enabled = true;
     saveSettings();
-    session = { count: 0, startedAt: Date.now() };
+    session = { count: 0, startedAt: Date.now(), cursor: 0 };
     saveSession();
     state.nextAt = 0;
+    const picked = selectedTypes();
     log(`▶️ started — ${settings.dryRun ? "DRY RUN" : "LIVE"}, ` +
-        `${settings.typeLabel || "no type!"}, mode ${settings.locationMode}`, "ok");
+        `${picked.length ? picked.map((type) => type.label).join(" + ") : "no types!"}` +
+        `, mode ${settings.locationMode}`, "ok");
     renderStatus();
   }
 
@@ -1567,7 +1603,8 @@
         writeJson(TYPES_KEY, cachedTypes);
         renderTypes();
       }
-      const probe = settings.typeValue
+      const picked = selectedTypes();
+      const probe = (picked[0] || {}).value
         || (options.find((option) => /fire station/i.test(option.label)) || options[0] || {}).value;
       if (probe) {
         const chosen = selectType(doc, win, probe);
@@ -1675,6 +1712,15 @@
     #fra-ab input[type=text], #fra-ab input[type=number], #fra-ab select {
       flex: 1 1 auto; min-width: 0; background: #2b3036; color: #eee;
       border: 1px solid #414852; border-radius: 4px; padding: 3px 5px; font: inherit; }
+    #fra-ab .types { max-height: 150px; overflow: auto; background: #171a1d;
+      border-radius: 4px; padding: 4px 6px; margin: 2px 0 4px; }
+    #fra-ab .types label { display: flex; gap: 6px; align-items: center; color: #cfd6dd;
+      padding: 1px 0; cursor: pointer; }
+    #fra-ab .types .muted { color: #8c949c; padding: 4px 0; }
+    #fra-ab .typebar { display: flex; gap: 6px; align-items: center; margin-top: 2px; }
+    #fra-ab .typebar span { flex: 1 1 auto; color: #b9c0c8; }
+    #fra-ab .typebar button { background: #313841; color: #eee; border: 1px solid #4a525c;
+      border-radius: 4px; padding: 2px 7px; cursor: pointer; font: inherit; }
     #fra-ab .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; margin: 6px 0; }
     #fra-ab .checks label { display: flex; gap: 5px; align-items: center; color: #cfd6dd; }
     #fra-ab .buttons { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 6px; }
@@ -1735,23 +1781,77 @@
   let panel = null;
   let needsBox = null;
   let startButtonPainter = null;
-  let typeSelect = null;
+  let typeBox = null;
+  let typeCount = null;
+  let typesLoading = false;
   let statusBox = null;
   let logBox = null;
 
   function renderTypes() {
-    if (!typeSelect) return;
-    typeSelect.innerHTML = "";
-    if (!cachedTypes.length) {
-      typeSelect.appendChild(el("option", { value: "", text: "— run Self-test first —" }));
+    if (!typeBox) return;
+    typeBox.innerHTML = "";
+    const types = knownTypes();
+    if (!types.length) {
+      typeBox.appendChild(el("div", { class: "muted", text: typesLoading
+        ? "reading the game's building list…"
+        : "no list yet — press Reload" }));
+      if (typeCount) typeCount.textContent = "";
       return;
     }
-    typeSelect.appendChild(el("option", { value: "", text: "— pick a type —" }));
-    for (const type of cachedTypes) {
-      const option = el("option", { value: type.value, text: type.label });
-      typeSelect.appendChild(option);
+    const wanted = new Set((settings.typeValues || []).map(String));
+    for (const type of types) {
+      const input = el("input", { type: "checkbox" });
+      input.checked = wanted.has(String(type.value));
+      input.addEventListener("change", () => {
+        const set = new Set((settings.typeValues || []).map(String));
+        if (input.checked) set.add(String(type.value));
+        else set.delete(String(type.value));
+        settings.typeValues = [...set];
+        saveSettings();
+        if (typeCount) {
+          typeCount.textContent = `${settings.typeValues.length} of ${types.length} ticked`;
+        }
+      });
+      typeBox.appendChild(el("label", { title: `type ${type.value}` },
+        [input, el("span", { text: type.label })]));
     }
-    typeSelect.value = settings.typeValue || "";
+    if (typeCount) {
+      typeCount.textContent =
+        `${selectedTypes().length} of ${types.length} ticked`;
+    }
+  }
+
+  async function loadTypes(announce) {
+    // The list comes from the game's own build form, so it needs no id
+    // table here and survives the game adding a building type. Read once
+    // and cached; "Reload" re-reads it.
+    if (typesLoading || state.busy) return;
+    typesLoading = true;
+    state.busy = true;
+    renderTypes();
+    try {
+      const { doc } = await frameGoto("/buildings/new");
+      if (isLoginPage(doc)) {
+        log("log in to MissionChief first, then press Reload", "error");
+        return;
+      }
+      const options = readTypeOptions(doc);
+      if (!options.length) {
+        log("the build form offered no building types", "error");
+        return;
+      }
+      cachedTypes = options;
+      writeJson(TYPES_KEY, cachedTypes);
+      if (announce) {
+        log(`📋 ${options.length} building types read from the game`, "ok");
+      }
+    } catch (error) {
+      log(`could not read the building list — ${error.message}`, "error");
+    } finally {
+      typesLoading = false;
+      state.busy = false;
+      renderTypes();
+    }
   }
 
   function renderNeeds() {
@@ -1799,14 +1899,26 @@
     document.head.appendChild(el("style", { text: STYLE }));
     const body = el("div", { class: "body" });
 
-    typeSelect = el("select", {});
-    typeSelect.addEventListener("change", () => {
-      settings.typeValue = typeSelect.value;
-      settings.typeLabel = typeSelect.selectedOptions.length
-        ? typeSelect.selectedOptions[0].textContent : "";
+    typeBox = el("div", { class: "types" });
+    typeCount = el("span", {});
+    const allButton = el("button", { text: "All" });
+    allButton.addEventListener("click", () => {
+      settings.typeValues = knownTypes().map((type) => String(type.value));
       saveSettings();
+      renderTypes();
     });
-    body.appendChild(labelled("Building", typeSelect));
+    const noneButton = el("button", { text: "None" });
+    noneButton.addEventListener("click", () => {
+      settings.typeValues = [];
+      saveSettings();
+      renderTypes();
+    });
+    const reloadButton = el("button", { text: "Reload" });
+    reloadButton.addEventListener("click", () => loadTypes(true));
+    body.appendChild(el("div", { class: "row" }, [el("label", { text: "Buildings" })]));
+    body.appendChild(typeBox);
+    body.appendChild(el("div", { class: "typebar" },
+      [typeCount, allButton, noneButton, reloadButton]));
 
     const modeSelect = el("select", {});
     for (const [value, text] of [
@@ -2012,6 +2124,7 @@
     buildPanel();
     log(`ready — ${cachedTypes.length} building types cached, ` +
         `${Object.keys(queue).length} on the finish list`);
+    if (!cachedTypes.length) loadTypes(true);
     if (settings.enabled) resume();
     setInterval(() => {
       renderStatus();
