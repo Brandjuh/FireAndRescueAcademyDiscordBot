@@ -114,6 +114,19 @@ def test_nothing_secret_is_baked_in(source):
     assert not re.search(r"\b(password|api[_-]?key|secret|token)\s*[:=]\s*['\"]", source)
 
 
+def test_any_number_of_building_types_can_be_picked(source):
+    # "All buildings" has to be one tick: the list is the game's own, and
+    # the ticked types are built in turn rather than one type forever.
+    block = source.split("const DEFAULTS = {")[1].split("};")[0]
+    assert re.search(r"\btypeValues:\s*\[\]", block)
+    assert "typeValue:" not in block and "typeLabel:" not in block
+    for name in ("function selectedTypes(", "function nextType(",
+                 "async function loadTypes("):
+        assert name in source
+    # The list fills itself — a self-test must not be a prerequisite.
+    assert "if (!cachedTypes.length) loadTypes(true);" in source
+
+
 def test_the_duplicate_and_pacing_rails_are_present(source):
     assert "DUPLICATE_RADIUS_M = 250" in source          # same figure as the bot
     assert "Math.max(20, Number(settings.intervalSeconds)" in source
