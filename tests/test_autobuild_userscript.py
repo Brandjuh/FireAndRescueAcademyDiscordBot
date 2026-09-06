@@ -127,6 +127,19 @@ def test_any_number_of_building_types_can_be_picked(source):
     assert "if (!cachedTypes.length) loadTypes(true);" in source
 
 
+def test_the_staff_amount_is_taken_from_the_edit_page(source):
+    # Live: /buildings/<id>/edit, the SECOND text box. The dispatch select
+    # is on that same form, so both are saved with one submit — two saves
+    # would each write the other field's old value back.
+    assert "async function editBuilding(" in source
+    assert "function staffFieldOnEdit(" in source
+    assert "/edit`" in source
+    assert "fields.texts[1]" in source
+    assert "async function linkDispatch(" not in source
+    # A setting that will not stick is retried, then given up on out loud.
+    assert "EDIT_MAX_TRIES" in source
+
+
 def test_the_duplicate_and_pacing_rails_are_present(source):
     assert "DUPLICATE_RADIUS_M = 250" in source          # same figure as the bot
     assert "Math.max(20, Number(settings.intervalSeconds)" in source

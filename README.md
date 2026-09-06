@@ -245,9 +245,10 @@ missionchief.com in your own browser.
   toggle survives page loads; only one browser tab ever drives.
 * **Per building**: pick a spot with a real street address (the game's own
   pin lookup, OpenStreetMap as second opinion) → build it as a **personal**
-  building with your own credits → link it to the dispatch center that
-  covers that **region** → raise the **level** to the maximum, set the
-  **staff limit** (400 by default) and buy every **storage slot** → keep it
+  building with your own credits → open `/buildings/<id>/edit` once and
+  save both the **staff amount** (the second text box; 400 by default) and
+  the dispatch center that covers that **region** → raise the **level** to
+  the maximum and buy every **storage slot** → keep it
   on a finish list, because purchases unlock as construction finishes. Fire
   stations pick the **Quint** as the free starting vehicle and refuse to
   build without it. Extensions are **off by default**.
