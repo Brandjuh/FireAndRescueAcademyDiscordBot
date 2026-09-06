@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FRA Auto-Build (private)
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.4.0
+// @version      1.5.0
 // @description  Private admin tool: bulk-build YOUR OWN MissionChief buildings. Pick a type, pick a place (fixed area and/or random worldwide), flip the toggle. Every new building is linked to the nearest dispatch center, fully expanded (all extensions/storage bought with credits) and fire stations start with a Quint.
 // @match        https://www.missionchief.com/*
 // @match        https://missionchief.com/*
@@ -28,8 +28,12 @@
  * 1. picks a spot — random inside a radius around a place you name, random
  *    anywhere in the world, or alternating between the two;
  * 2. checks the spot has a real street address (the game's own pin lookup,
- *    with OpenStreetMap as a second opinion) so nothing lands in the sea;
- * 3. opens /buildings/new in a hidden frame, selects the type, drops the
+ *    with OpenStreetMap as a second opinion) so nothing lands in the sea.
+ *    When OSM knows a real station/hospital/prison of that kind nearby,
+ *    the spot MOVES onto it and the building takes ITS OSM name — no
+ *    invented names, and never a city name from tens of kilometres away;
+ * 3. opens /buildings/new in a hidden frame (clipped to 0x0 — you never
+ *    see it), selects the type, drops the
  *    pin, and — for fire stations — picks the Quint as the free starting
  *    vehicle;
  * 4. submits with credits. NEVER with coins: build_with_coins stays 0 and
@@ -77,7 +81,7 @@
 
   if (window.top !== window.self) return;   // never inside our own frames
 
-  const VERSION = "1.4.0";
+  const VERSION = "1.5.0";
   // Both www.missionchief.com and missionchief.com serve the game, and a
   // frame or fetch across those two is CROSS-ORIGIN: everything here would
   // silently stop working. So the script always stays on the host the
@@ -93,6 +97,7 @@
   const NEEDS_KEY = "fra_autobuild_needs_dispatch";
   const OWNER_KEY = "fra_autobuild_owner";
   const FRAME_ID = "fra-autobuild-frame";
+  const HOST_ID = "fra-autobuild-host";
 
   // One tab drives; the others idle. Same idea as the bot's job lock: a
   // heartbeat that goes stale when a tab is closed mid-run.
@@ -110,6 +115,12 @@
   const DUPLICATE_RADIUS_M = 250;    // same figure the bot uses
   const NOMINATIM_REVERSE =
     "https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18";
+  const OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+  ];
+  const OVERPASS_TIMEOUT_MS = 15000;
 
   const DEFAULTS = {
     enabled: false,          // the toggle survives a page load
@@ -125,6 +136,8 @@
     maxPerSession: 10,
     creditsFloor: 5000000,
     verifyWithOsm: true,
+    useOsmNames: true,               // name (and place) buildings from OSM
+    facilityRadiusKm: 3,
     linkDispatch: true,
     dispatchRules: "",               // "Netherlands = Dispatch Rotterdam" per line
     maxLevel: true,                  // raise the level as far as it goes
@@ -357,21 +370,53 @@
 
   // ------------------------------------------------------------- the frame
 
+  function force(element, rules) {
+    // !important on every rule: the game's own stylesheet has opinions
+    // about iframes, and a white 1280x900 page landing on top of the game
+    // is exactly what this must never do.
+    for (const [property, value] of Object.entries(rules)) {
+      element.style.setProperty(property, value, "important");
+    }
+  }
+
   function ensureFrame() {
+    // The frame may NOT be display:none — a frame that lays nothing out
+    // has no boxes, and the build form's buttons are picked by "is it
+    // visible and does it have a size". So the frame keeps its full size
+    // and a 0x0 clipping host hides it instead: laid out, never painted.
+    let host = document.getElementById(HOST_ID);
+    if (!host) {
+      host = document.createElement("div");
+      host.id = HOST_ID;
+      document.body.appendChild(host);
+    }
     let frame = document.getElementById(FRAME_ID);
     if (!frame) {
       frame = document.createElement("iframe");
       frame.id = FRAME_ID;
-      document.body.appendChild(frame);
+      frame.setAttribute("tabindex", "-1");
+      frame.setAttribute("aria-hidden", "true");
+      frame.setAttribute("title", "FRA Auto-Build worker");
+      host.appendChild(frame);
     }
-    // NOT display:none — a hidden frame lays nothing out, and the build
-    // form's own buttons are picked by "is it visible and does it have a
-    // box". Parked off-screen it renders normally.
-    frame.style.cssText = settings.showFrame
-      ? "position:fixed;right:8px;bottom:360px;width:900px;height:620px;z-index:2147483000;" +
-        "border:2px solid #c0392b;background:#fff;"
-      : "position:fixed;left:-12000px;top:0;width:1280px;height:900px;border:0;" +
-        "opacity:0.01;pointer-events:none;";
+    if (frame.parentElement !== host) host.appendChild(frame);
+    if (settings.showFrame) {
+      force(host, {
+        position: "fixed", right: "8px", bottom: "360px", left: "auto", top: "auto",
+        width: "900px", height: "620px", overflow: "hidden", opacity: "1",
+        "z-index": "2147483000", border: "2px solid #c0392b", background: "#fff",
+        "pointer-events": "auto", clip: "auto",
+      });
+      force(frame, { width: "900px", height: "620px", border: "0", opacity: "1" });
+    } else {
+      force(host, {
+        position: "fixed", left: "0", top: "0", right: "auto", bottom: "auto",
+        width: "0", height: "0", overflow: "hidden", opacity: "0",
+        "z-index": "-2147483647", border: "0", background: "transparent",
+        "pointer-events": "none", visibility: "visible",
+      });
+      force(frame, { width: "1280px", height: "900px", border: "0", opacity: "0" });
+    }
     return frame;
   }
 
@@ -514,6 +559,7 @@
       const a = data.address || {};
       if (!a.road && !a.city && !a.town && !a.village && !a.suburb) return null;
       return {
+        name: (data.name || "").trim(),        // OSM's own name for the spot
         address: (data.display_name || "").slice(0, 160),
         country: a.country || "",
         state: a.state || a.region || "",
@@ -528,6 +574,91 @@
   async function osmAddress(lat, lng) {
     const place = await osmPlace(lat, lng);
     return place ? place.address : null;
+  }
+
+  // A building should be called what OSM calls it, and stand where OSM says
+  // it stands. So before building, ask Overpass for a real facility of the
+  // right kind near the spot and take BOTH its name and its coordinates.
+  // Nothing found (or Overpass down) is not an error — the name then falls
+  // back to OSM's name for the spot itself, and only then to a plain
+  // "<town> <type>". No invented city names either way.
+  const FACILITY_TAGS = [
+    { re: /fire\s*station|feuerwache/i, tags: ['"amenity"="fire_station"'] },
+    { re: /police/i, tags: ['"amenity"="police"'] },
+    { re: /prison|jail/i, tags: ['"amenity"="prison"'] },
+    { re: /hospital|clinic/i,
+      tags: ['"amenity"="hospital"', '"healthcare"="hospital"'] },
+    { re: /rescue|ambulance|ems/i, tags: ['"emergency"="ambulance_station"'] },
+  ];
+
+  function facilityTagsFor(typeLabel) {
+    if (/academy|school|training/i.test(typeLabel)) return null;  // never snap
+    const entry = FACILITY_TAGS.find((candidate) => candidate.re.test(typeLabel));
+    return entry ? entry.tags : null;
+  }
+
+  function facilityQuery(lat, lng, tags, radiusM) {
+    const parts = [];
+    for (const tag of tags) {
+      for (const kind of ["node", "way"]) {
+        parts.push(`${kind}[${tag}](around:${radiusM},${lat.toFixed(5)},${lng.toFixed(5)});`);
+      }
+    }
+    return `[out:json][timeout:20];(${parts.join("")});out tags center 40;`;
+  }
+
+  async function overpass(query) {
+    let lastError = "";
+    for (const url of OVERPASS_URLS) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), OVERPASS_TIMEOUT_MS);
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          body: "data=" + encodeURIComponent(query),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          lastError = `${url} -> HTTP ${response.status}`;
+          continue;
+        }
+        return await response.json();
+      } catch (error) {
+        lastError = `${url} -> ${error.message}`;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    throw new Error(lastError || "no Overpass mirror answered");
+  }
+
+  async function osmFacility(lat, lng, typeLabel) {
+    const tags = facilityTagsFor(typeLabel);
+    if (!tags) return null;
+    const radius = Math.max(200, (Number(settings.facilityRadiusKm) || 3) * 1000);
+    let data;
+    try {
+      data = await overpass(facilityQuery(lat, lng, tags, radius));
+    } catch (error) {
+      log(`⚠️ OpenStreetMap lookup failed (${error.message}) — naming from ` +
+          "the address instead", "error");
+      return null;
+    }
+    const found = [];
+    for (const element of (data && data.elements) || []) {
+      const name = ((element.tags && element.tags.name) || "").trim();
+      if (!name) continue;                       // an unnamed one tells us nothing
+      const pointLat = element.lat !== undefined
+        ? element.lat : (element.center && element.center.lat);
+      const pointLng = element.lon !== undefined
+        ? element.lon : (element.center && element.center.lon);
+      if (!isFinite(pointLat) || !isFinite(pointLng)) continue;
+      if (tooCloseToHistory(pointLat, pointLng)) continue;
+      found.push({ name, lat: pointLat, lng: pointLng });
+    }
+    if (!found.length) return null;
+    return found[Math.floor(Math.random() * found.length)];
   }
 
   async function osmGeocode(text) {
@@ -961,25 +1092,36 @@
     };
   }
 
-  async function pickLocation() {
-    // Returns {lat, lng, label, address, place, dispatch} for a spot that is
-    // not a duplicate, has a street address, and — when dispatch linking is
-    // on — sits in a region one of your dispatch centers covers. A spot that
-    // fails the last test is skipped and its country noted, not built.
+  async function pickLocation(typeLabel) {
+    // Returns a spot that is not a duplicate, has a street address, and —
+    // when dispatch linking is on — sits in a region one of your dispatch
+    // centers covers. A spot that fails the last test is skipped and its
+    // country noted, not built. When OSM knows a real facility of this kind
+    // nearby, the spot MOVES onto it and takes its name.
     const centers = settings.linkDispatch ? await dispatchCenters() : [];
     const rules = parseDispatchRules(settings.dispatchRules);
-    const needsPlace = settings.verifyWithOsm || settings.linkDispatch;
+    const needsPlace = settings.verifyWithOsm || settings.linkDispatch
+      || settings.useOsmNames;
     let lastReason = "";
     for (let attempt = 0; attempt < MAX_LOCATION_TRIES; attempt++) {
       const anchor = pickAnchor();
-      const [lat, lng] = offsetPoint(anchor.lat, anchor.lng, anchor.radiusKm);
+      let [lat, lng] = offsetPoint(anchor.lat, anchor.lng, anchor.radiusKm);
       if (tooCloseToHistory(lat, lng)) {
         lastReason = "too close to something this script already built";
         continue;
       }
+      let osmName = "";
+      if (settings.useOsmNames) {
+        const facility = await osmFacility(lat, lng, typeLabel);
+        if (facility) {
+          lat = facility.lat;
+          lng = facility.lng;
+          osmName = facility.name;
+        }
+      }
       if (!needsPlace) {
         return { lat, lng, label: anchor.label, address: null, place: null,
-                 dispatch: null };
+                 dispatch: null, osmName };
       }
       const place = await osmPlace(lat, lng);
       if (!place) {
@@ -987,9 +1129,10 @@
         await sleep(1100);   // Nominatim asks for at most one call per second
         continue;
       }
+      if (!osmName && place.name) osmName = place.name;   // OSM's own name
       if (!settings.linkDispatch) {
         return { lat, lng, label: anchor.label, address: place.address, place,
-                 dispatch: null };
+                 dispatch: null, osmName };
       }
       const match = matchDispatch(place, centers, rules);
       if (!match.ok) {
@@ -1000,7 +1143,7 @@
       }
       return {
         lat, lng, label: anchor.label, address: place.address, place,
-        dispatch: match.center, dispatchWhy: match.why,
+        dispatch: match.center, dispatchWhy: match.why, osmName,
       };
     }
     throw new Error(
@@ -1030,9 +1173,16 @@
     return types[cursor];
   }
 
-  function buildingName(typeLabel, placeLabel) {
-    const place = String(placeLabel || "").split(",")[0].trim();
-    const name = `${place || "New"} ${typeLabel}`.replace(/\s+/g, " ").trim();
+  function buildingName(typeLabel, spot) {
+    // OSM's own name wins, verbatim. Only when OSM has no name for the
+    // place does this fall back to "<town> <type>" — and then the town is
+    // the one OSM reports for the ACTUAL spot, never the city this script
+    // aimed at, which can be tens of kilometres away.
+    const fromOsm = String((spot && spot.osmName) || "").replace(/\s+/g, " ").trim();
+    if (fromOsm) return fromOsm.slice(0, 40);
+    const place = spot && spot.place;
+    const town = (place && (place.city || place.county || place.state)) || "";
+    const name = `${town || "New"} ${typeLabel}`.replace(/\s+/g, " ").trim();
     return name.slice(0, 40);   // the game's name limit
   }
 
@@ -1042,9 +1192,10 @@
     const type = nextType();
     if (!type) throw new Error("STOP — tick at least one building type first");
     const typeLabel = type.label || "building";
-    const spot = await pickLocation();
+    const spot = await pickLocation(typeLabel);
     log(`📍 ${typeLabel}: ${spot.lat.toFixed(5)}, ${spot.lng.toFixed(5)} ` +
         `near ${spot.label}` +
+        (spot.osmName ? ` — OSM: "${spot.osmName}"` : "") +
         (spot.dispatch ? ` → dispatch "${spot.dispatch.name}" (${spot.dispatchWhy})` : ""));
 
     const { frame, doc, win } = await frameGoto("/buildings/new");
@@ -1059,7 +1210,7 @@
     if (!chosen.ok) throw new Error(chosen.error);
     await sleep(500);   // the page reveals the type's own block on 'change'
 
-    const name = buildingName(typeLabel, spot.label);
+    const name = buildingName(typeLabel, spot);
     const placed = setPosition(doc, win, { name, lat: spot.lat, lng: spot.lng });
     if (!placed.ok) throw new Error(placed.error);
 
