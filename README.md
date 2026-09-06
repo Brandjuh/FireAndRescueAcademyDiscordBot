@@ -229,6 +229,36 @@ which feeds `/profile`, `!hotspots`, `!infographic` and `!fleet`.
   or creates a webhook named "FRA Profile Sync" on the intake channel
   (needs Manage Webhooks).
 
+## Auto-build (the private userscript)
+
+**`tools/fra-auto-build.user.js`** is an admin-only Tampermonkey script for
+bulk-building your OWN buildings with your OWN credits. It is not linked
+from any member panel and sends nothing anywhere — it only drives
+missionchief.com in your own browser.
+
+* **Toggle + settings panel** (bottom right on any missionchief.com page):
+  building type, location mode (random worldwide / around a place / both),
+  radius, interval, a per-run cap and a credit floor. The toggle survives
+  page loads; only one browser tab ever drives.
+* **Per building**: pick a spot with a real street address (the game's own
+  pin lookup, OpenStreetMap as second opinion) → build it → link it to your
+  **nearest dispatch center** → buy **every credit expansion the building
+  page offers** (that is "fully delivered, all storage slots" in practice)
+  → keep it on a finish list, because extensions only unlock as the
+  previous one finishes construction. Fire stations pick the **Quint** as
+  the free starting vehicle, and refuse to build without it.
+* **Never coins**: `build_with_coins` is pinned to 0 and any button
+  mentioning coins is refused — the same two brakes as the bot's builder
+  (`fra_bot/mc/browser_builder.py`, which this script is a port of).
+* **Dry run is the default**: it does everything except the last click and
+  reports what it would have clicked.
+* **Self-test** reads the live build form and prints what it found — the
+  building types the game offers, whether the map/address hooks are
+  reachable, the button labels, your dispatch centers. That is the way to
+  check the script against a game update, since none of it can be verified
+  from CI. `tests/test_autobuild_userscript.py` guards only what is
+  checkable statically (coins, defaults, the world pool, no secrets).
+
 ## Admin commands
 
 Requires Discord administrator permission or a role listed in
