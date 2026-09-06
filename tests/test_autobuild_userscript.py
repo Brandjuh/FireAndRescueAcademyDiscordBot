@@ -26,7 +26,22 @@ def test_userscript_metadata_is_complete(source):
     assert "// ==UserScript==" in header
     for key in ("@name", "@version", "@match", "@updateURL", "@downloadURL"):
         assert key in header, f"missing {key} in the userscript header"
+    # The game answers on both hosts and the player may sit on either; a
+    # frame or fetch across the two is cross-origin, so the script has to
+    # match both AND stay on whichever one it was loaded from.
     assert "https://www.missionchief.com/*" in header
+    assert "https://missionchief.com/*" in header
+    assert "window.location.origin" in source
+
+
+def test_the_storage_endpoints_are_recognised(source):
+    # From the live game (fire station, tab #storage):
+    #   /buildings/<id>/storage_upgrade/credits/fire_equipment_initial
+    #   ...            /credits/fire_equipment_additional[_2..._7]
+    assert "storage_upgrade" in source
+    assert re.search(r"const STORAGE_RE = /storage_upgrade\|", source)
+    # They live under a tab, which may render only once it is clicked.
+    assert "function revealTabs(" in source
 
 
 def test_it_never_spends_coins(source):

@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         FRA Auto-Build (private)
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.1.0
+// @version      1.2.0
 // @description  Private admin tool: bulk-build YOUR OWN MissionChief buildings. Pick a type, pick a place (fixed area and/or random worldwide), flip the toggle. Every new building is linked to the nearest dispatch center, fully expanded (all extensions/storage bought with credits) and fire stations start with a Quint.
 // @match        https://www.missionchief.com/*
+// @match        https://missionchief.com/*
 // @grant        none
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/main/tools/fra-auto-build.user.js
@@ -72,8 +73,14 @@
 
   if (window.top !== window.self) return;   // never inside our own frames
 
-  const VERSION = "1.1.0";
-  const BASE = "https://www.missionchief.com";
+  const VERSION = "1.2.0";
+  // Both www.missionchief.com and missionchief.com serve the game, and a
+  // frame or fetch across those two is CROSS-ORIGIN: everything here would
+  // silently stop working. So the script always stays on the host the
+  // player is actually on.
+  const BASE = /missionchief\.com$/i.test(window.location.hostname)
+    ? window.location.origin
+    : "https://www.missionchief.com";
   const SETTINGS_KEY = "fra_autobuild_settings";
   const QUEUE_KEY = "fra_autobuild_queue";
   const HISTORY_KEY = "fra_autobuild_history";
@@ -120,7 +127,7 @@
     setStaffLimit: true,
     staffLimit: 400,
     buyStorage: true,
-    maxStorageBuys: 25,
+    maxStorageBuys: 12,
     buyExtensions: false,            // OFF on purpose — see the header
     startingVehicle: "Quint",
     strictVehicle: true,
@@ -1209,7 +1216,15 @@
   // click the building page is re-loaded and re-scanned: purchases unlock
   // one at a time, exactly like the bot's finisher.
 
-  const STORAGE_RE = /storage|lager/i;
+  // Storage, from the live game (a fire station, tab #storage):
+  //   /buildings/<id>/storage_upgrade/credits/fire_equipment_initial
+  //   /buildings/<id>/storage_upgrade/credits/fire_equipment_additional
+  //   /buildings/<id>/storage_upgrade/credits/fire_equipment_additional_2
+  //   ... up to _7          (all with ?redirect_building_id=<id>)
+  // Every slug is its own one-time purchase, so each is bought once and
+  // the slugs differ per building type — which is why they are read from
+  // the page rather than listed here.
+  const STORAGE_RE = /storage_upgrade|storage|lager/i;
   const LEVEL_RE = /expand_do|expand\/|\/expand/i;
   const EXTENSION_RE = /\/extension\//i;
   const STAFF_NAME_RE = /personal|personnel|staff|crew|besetzung/i;
@@ -1252,6 +1267,29 @@
     return wanted;
   }
 
+  function revealTabs(doc) {
+    // The purchases sit under tabs (#storage and friends). A pane that the
+    // page loads lazily is empty until its tab is clicked, so click them
+    // all once — a tab click navigates nothing and buys nothing.
+    const tabs = [...doc.querySelectorAll(
+      'a[data-toggle="tab"], .nav-tabs a[href^="#"], ul.nav a[href^="#"]'
+    )];
+    for (const tab of tabs) {
+      try {
+        tab.click();
+      } catch (error) {
+        /* a tab that refuses to be clicked is not our problem */
+      }
+    }
+    return tabs.length;
+  }
+
+  async function openBuilding(buildingId) {
+    const page = await frameGoto(`/buildings/${buildingId}`);
+    if (revealTabs(page.doc)) await sleep(900);
+    return page;
+  }
+
   async function clickAndSettle(page, element, buildingId) {
     // Some of these controls navigate, some are AJAX. Wait for a load if
     // one comes, then re-open the building page either way.
@@ -1259,7 +1297,7 @@
     element.click();
     await Promise.race([landed, sleep(6000)]);
     await sleep(600);
-    return frameGoto(`/buildings/${buildingId}`);
+    return openBuilding(buildingId);
   }
 
   function staffField(doc, win) {
@@ -1308,7 +1346,7 @@
   async function deliverBuilding(buildingId) {
     const counts = { level: 0, storage: 0, extension: 0 };
     const labels = [];
-    let page = await frameGoto(`/buildings/${buildingId}`);
+    let page = await openBuilding(buildingId);
 
     if (settings.setStaffLimit) {
       const staff = await applyStaffLimit(page);
@@ -1317,7 +1355,7 @@
       } else if (!staff.ok) {
         log(`⚠️ #${buildingId}: staff limit not set — ${staff.reason}`, "error");
       }
-      page = await frameGoto(`/buildings/${buildingId}`);
+      page = await openBuilding(buildingId);
     }
 
     const wanted = wantedCategories();
@@ -1332,24 +1370,14 @@
       if (!links.length) break;
       const next = links[0];
       const key = next.href || next.label;
+      attempted.add(key);      // each slug is a one-time purchase
       if (next.kind === "storage") {
-        // The storage button stays on the page and buys ONE slot per press,
-        // so it must not go on the "already tried" list — it is bounded by
-        // its own cap instead. Everything else is a one-off offer.
-        if (storageBought >= (parseInt(settings.maxStorageBuys, 10) || 0)) {
-          attempted.add(key);
-          continue;
-        }
+        if (storageBought >= (parseInt(settings.maxStorageBuys, 10) || 0)) continue;
         storageBought += 1;
-      } else {
-        attempted.add(key);
       }
       counts[next.kind] += 1;
       labels.push(`${next.label || next.href}`.slice(0, 60));
-      if (settings.dryRun) {
-        if (next.kind === "storage") attempted.add(key);   // report it once
-        continue;
-      }
+      if (settings.dryRun) continue;
       page = await clickAndSettle(page, next.element, buildingId);
       await sleep(1000);
     }
@@ -1598,7 +1626,7 @@
       // What the delivery step would actually find on a real building of
       // yours: the staff field, the storage button, the level chain.
       try {
-        const page = await frameGoto(`/buildings/${probeId}`);
+        const page = await openBuilding(probeId);
         lines.push(`probe building #${probeId}:`);
         const staff = staffField(page.doc, page.win);
         lines.push(`  staff field: ${staff
