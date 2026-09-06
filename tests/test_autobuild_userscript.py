@@ -140,6 +140,29 @@ def test_the_staff_amount_is_taken_from_the_edit_page(source):
     assert "EDIT_MAX_TRIES" in source
 
 
+def test_buildings_are_named_after_what_osm_calls_them(source):
+    # No invented names: OSM's own name for the facility, then OSM's name
+    # for the spot, and only then "<town> <type>" — with the town taken
+    # from the ACTUAL spot, never from the city the script aimed at.
+    assert "async function osmFacility(" in source
+    assert "const fromOsm = String((spot && spot.osmName)" in source
+    block = source.split("function buildingName(")[1].split("\n  }")[0]
+    assert "spot.label" not in block
+    assert "place.city || place.county || place.state" in block
+
+
+def test_the_worker_frame_is_clipped_not_hidden(source):
+    # It may not be display:none (a frame that lays nothing out has no
+    # boxes, and the build buttons are picked by size), and it may not be
+    # visible either — a white 1280x900 page over the game.
+    assert "const HOST_ID =" in source
+    assert "function force(element, rules)" in source
+    assert '"important"' in source
+    block = source.split("function ensureFrame(")[1].split("\n  }")[0]
+    assert "overflow" in block and 'opacity: "0"' in block
+    assert "display: \"none\"" not in block
+
+
 def test_the_duplicate_and_pacing_rails_are_present(source):
     assert "DUPLICATE_RADIUS_M = 250" in source          # same figure as the bot
     assert "Math.max(20, Number(settings.intervalSeconds)" in source

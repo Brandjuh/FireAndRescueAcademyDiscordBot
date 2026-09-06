@@ -243,6 +243,12 @@ missionchief.com in your own browser.
   credit floor. The type list is read from the game's build form on first
   use, so it needs no id table and survives the game adding a type. The
   toggle survives page loads; only one browser tab ever drives.
+* **Named by OSM**: when OpenStreetMap knows a real station/hospital/prison
+  of that kind near the chosen spot, the build **moves onto it** and takes
+  **its OSM name** verbatim. Otherwise the name falls back to OSM's name for
+  the spot, and only then to `<town> <type>` — with the town OSM reports for
+  the actual spot, never the city the script aimed at (which can be tens of
+  kilometres away). Nothing is invented.
 * **Per building**: pick a spot with a real street address (the game's own
   pin lookup, OpenStreetMap as second opinion) → build it as a **personal**
   building with your own credits → open `/buildings/<id>/edit` once and
