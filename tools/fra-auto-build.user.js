@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FRA Auto-Build (private)
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.3.0
+// @version      1.4.0
 // @description  Private admin tool: bulk-build YOUR OWN MissionChief buildings. Pick a type, pick a place (fixed area and/or random worldwide), flip the toggle. Every new building is linked to the nearest dispatch center, fully expanded (all extensions/storage bought with credits) and fire stations start with a Quint.
 // @match        https://www.missionchief.com/*
 // @match        https://missionchief.com/*
@@ -34,14 +34,15 @@
  *    vehicle;
  * 4. submits with credits. NEVER with coins: build_with_coins stays 0 and
  *    any button whose label mentions coins is refused, twice over;
- * 5. links the finished building to the dispatch center that covers that
- *    REGION — matched by name against the country/region/city of the spot,
+ * 5. opens /buildings/<id>/edit once and saves BOTH the staff amount (the
+ *    second text box on that form) and the dispatch center that covers that
+ *    REGION — the center matched by name against country/region/city,
  *    with your own rule list on top ("Netherlands = Rotterdam Dispatch").
  *    A country where you have no center is never built in: the script
  *    skips it and puts the country on a list in the panel to ask you about;
- * 6. raises the LEVEL as far as it goes, sets the STAFF LIMIT, and buys
- *    every STORAGE slot. Extensions are OFF by default — switch them on
- *    yourself if you want them;
+ * 6. raises the LEVEL as far as it goes and buys every STORAGE slot.
+ *    Extensions are OFF by default — switch them on yourself if you want
+ *    them;
  * 7. keeps the building on a "finish" list, because extensions only unlock
  *    when the previous one finishes CONSTRUCTION — the list is revisited
  *    every few minutes until the building stops offering anything new.
@@ -76,7 +77,7 @@
 
   if (window.top !== window.self) return;   // never inside our own frames
 
-  const VERSION = "1.3.0";
+  const VERSION = "1.4.0";
   // Both www.missionchief.com and missionchief.com serve the game, and a
   // frame or fetch across those two is CROSS-ORIGIN: everything here would
   // silently stop working. So the script always stays on the host the
@@ -104,6 +105,7 @@
   const MAX_LOCATION_TRIES = 12;     // per build: re-jitter, then re-pick
   const MAX_FINISH_PASSES = 12;      // purchase passes per building visit
   const FINISH_IDLE_LIMIT = 3;       // quiet visits before a building retires
+  const EDIT_MAX_TRIES = 5;          // then stop retrying dispatch/staff
   const FINISH_INTERVAL_MS = 5 * 60 * 1000;
   const DUPLICATE_RADIUS_M = 250;    // same figure the bot uses
   const NOMINATIM_REVERSE =
@@ -1193,56 +1195,13 @@
       || null;
   }
 
-  async function linkDispatch(buildingId, center) {
-    if (!center) return { ok: false, reason: "no dispatch center was chosen" };
-    for (const path of [`/buildings/${buildingId}`, `/buildings/${buildingId}/edit`]) {
-      let page;
-      try {
-        page = await frameGoto(path);
-      } catch (error) {
-        continue;
-      }
-      const select = dispatchSelect(page.doc, page.win);
-      if (!select) continue;
-      const option = optionForCenter(select, center);
-      if (!option) {
-        return {
-          ok: false,
-          reason: `"${center.name}" is not in the dispatch list on the ` +
-                  "building page (options: " +
-                  [...select.options].map((entry) => visibleText(entry))
-                    .join(" | ").slice(0, 200) + ")",
-        };
-      }
-      if (String(select.value) === String(option.value)) {
-        return { ok: true, already: true, label: center.name };
-      }
-      if (settings.dryRun) {
-        return { ok: true, dryRun: true, label: center.name };
-      }
-      select.value = String(option.value);
-      dispatchEvents(select, page.win);
-      const form = select.closest("form");
-      if (!form) return { ok: false, reason: "the dispatch select is not in a form" };
-      const landed = waitForFrameLoad(page.frame);
-      const submit = form.querySelector(
-        'input[type="submit"], button[type="submit"]'
-      );
-      if (submit) submit.click();
-      else if (form.requestSubmit) form.requestSubmit();
-      else form.submit();
-      await landed;
-      return { ok: true, label: center.name };
-    }
-    return { ok: false, reason: "no dispatch center field on the building page" };
-  }
-
   // --------------------------------------------------- deliver a building
   //
   // Deliberately NOT "buy everything the page offers": extensions are OFF
-  // by default. A new building gets its LEVEL raised as far as it goes,
-  // its STAFF LIMIT set, and every STORAGE slot bought — nothing else,
-  // unless you switch extensions on yourself.
+  // by default. A new building gets its LEVEL raised as far as it goes and
+  // every STORAGE slot bought — nothing else, unless you switch extensions
+  // on yourself. (The dispatch center and the staff amount are not bought;
+  // they are settings, and live in editBuilding above.)
   //
   // All of it happens in the frame, on the real page, because these
   // controls are a mix of plain links, Rails POST links and small forms,
@@ -1334,64 +1293,151 @@
     return openBuilding(buildingId);
   }
 
-  function staffField(doc, win) {
-    const fields = [...doc.querySelectorAll(
-      'input[type="number"], input[type="text"], select'
-    )];
-    for (const field of fields) {
-      const name = (field.name || field.id || "").toLowerCase();
-      if (STAFF_NAME_RE.test(name)) return field;
-    }
-    for (const field of fields) {
-      const context = normalize(visibleText(
-        field.closest("form, div, td, li, label") || field));
-      if (/staff|personnel|crew/.test(context)
-          && /max|limit|target|amount/.test(context)) {
-        return field;
-      }
-    }
-    return null;
+  // The building's own settings live on /buildings/<id>/edit: the dispatch
+  // center AND the staff amount, which is the SECOND text box on that form
+  // (confirmed against the live page). Both are set in one visit and saved
+  // with one submit — two separate saves would each write the other field's
+  // old value back.
+
+  function editTextFields(doc, win) {
+    const form = doc.querySelector('form[action*="/buildings/"]')
+      || doc.querySelector("form");
+    if (!form) return null;
+    // Everything the player would call a text box, in the order they see
+    // them. Readonly/disabled ones are NOT filtered out: they still count
+    // when you count boxes down the page.
+    const texts = [...form.querySelectorAll(
+      'input[type="text"], input[type="number"], input:not([type])'
+    )].filter((field) => isVisible(field, win));
+    return { form, texts };
   }
 
-  async function applyStaffLimit(page) {
-    const field = staffField(page.doc, page.win);
-    if (!field) return { ok: false, reason: "no staff-limit field on the page" };
-    const target = Math.max(0, parseInt(settings.staffLimit, 10) || 0);
-    const max = parseInt(field.getAttribute("max") || "", 10);
-    const value = isFinite(max) && max > 0 ? Math.min(target, max) : target;
-    const current = parseInt(String(field.value).replace(/[^\d]/g, ""), 10);
-    if (isFinite(current) && current >= value) {
-      return { ok: true, already: true, value: current };
+  function staffFieldOnEdit(doc, win) {
+    const fields = editTextFields(doc, win);
+    if (!fields) return null;
+    const byName = fields.texts.find((field) =>
+      STAFF_NAME_RE.test((field.name || field.id || "").toLowerCase()));
+    return byName || fields.texts[1] || null;   // the second box
+  }
+
+  async function editBuilding(buildingId, center) {
+    // Returns {dispatch: {...}, staff: {...}} — each either applied,
+    // already right, skipped or refused, with a reason.
+    const report = { dispatch: null, staff: null };
+    const wantStaff = !!settings.setStaffLimit;
+    const wantDispatch = !!(settings.linkDispatch && center);
+    if (!wantStaff && !wantDispatch) return report;
+
+    let page;
+    try {
+      page = await frameGoto(`/buildings/${buildingId}/edit`);
+    } catch (error) {
+      return {
+        dispatch: wantDispatch ? { ok: false, reason: error.message } : null,
+        staff: wantStaff ? { ok: false, reason: error.message } : null,
+      };
     }
-    if (settings.dryRun) return { ok: true, dryRun: true, value: value };
-    field.value = String(value);
-    dispatchEvents(field, page.win);
-    const form = field.closest("form");
-    if (!form) return { ok: false, reason: "the staff field is not in a form" };
+    if (isLoginPage(page.doc)) throw new Error("you are logged out of MissionChief");
+
+    let dirty = false;
+    let form = null;
+
+    if (wantDispatch) {
+      const select = dispatchSelect(page.doc, page.win);
+      if (!select) {
+        report.dispatch = { ok: false, reason: "no dispatch field on the edit page" };
+      } else {
+        const option = optionForCenter(select, center);
+        if (!option) {
+          report.dispatch = {
+            ok: false,
+            reason: `"${center.name}" is not in the dispatch list (options: ` +
+              [...select.options].map((entry) => visibleText(entry))
+                .join(" | ").slice(0, 200) + ")",
+          };
+        } else if (String(select.value) === String(option.value)) {
+          report.dispatch = { ok: true, already: true, label: center.name };
+        } else if (settings.dryRun) {
+          report.dispatch = { ok: true, dryRun: true, label: center.name };
+        } else {
+          select.value = String(option.value);
+          dispatchEvents(select, page.win);
+          form = select.closest("form") || form;
+          dirty = true;
+          report.dispatch = { ok: true, label: center.name };
+        }
+      }
+    }
+
+    if (wantStaff) {
+      const field = staffFieldOnEdit(page.doc, page.win);
+      if (!field) {
+        report.staff = { ok: false, reason: "no staff field on the edit page" };
+      } else {
+        const target = Math.max(0, parseInt(settings.staffLimit, 10) || 0);
+        const max = parseInt(field.getAttribute("max") || "", 10);
+        const value = isFinite(max) && max > 0 ? Math.min(target, max) : target;
+        const current = parseInt(String(field.value).replace(/[^\d]/g, ""), 10);
+        const where = field.name || field.id || "(unnamed)";
+        if (isFinite(current) && current === value) {
+          report.staff = { ok: true, already: true, value: current, field: where };
+        } else if (settings.dryRun) {
+          report.staff = { ok: true, dryRun: true, value, was: field.value,
+                           field: where };
+        } else {
+          field.value = String(value);
+          dispatchEvents(field, page.win);
+          form = field.closest("form") || form;
+          dirty = true;
+          report.staff = { ok: true, value, was: current, field: where };
+        }
+      }
+    }
+
+    if (!dirty) return report;
+    if (!form) {
+      const failure = { ok: false, reason: "the edit fields are not in a form" };
+      if (report.dispatch && report.dispatch.ok) report.dispatch = failure;
+      if (report.staff && report.staff.ok) report.staff = failure;
+      return report;
+    }
     const landed = waitForFrameLoad(page.frame).catch(() => null);
     const submit = form.querySelector('input[type="submit"], button[type="submit"]');
     if (submit) submit.click();
     else if (form.requestSubmit) form.requestSubmit();
     else form.submit();
     await Promise.race([landed, sleep(6000)]);
-    return { ok: true, value: value, field: field.name || field.id || "(unnamed)" };
+    const flash = flashText(page.frame.contentDocument || page.doc);
+    if (flash) report.flash = flash;
+    return report;
+  }
+
+  function describeEdit(report) {
+    const parts = [];
+    const say = (what, entry) => {
+      if (!entry) return;
+      if (entry.ok) {
+        parts.push(`${what} ${entry.label || entry.value}` +
+          (entry.dryRun ? " [dry run]" : entry.already ? " (already set)" : ""));
+      } else {
+        parts.push(`${what} FAILED — ${entry.reason}`);
+      }
+    };
+    say("dispatch", report.dispatch);
+    say("staff", report.staff);
+    if (report.flash) parts.push(`page says: ${report.flash}`);
+    return parts.join(" · ");
+  }
+
+  function editOk(report) {
+    return (!report.dispatch || report.dispatch.ok)
+      && (!report.staff || report.staff.ok);
   }
 
   async function deliverBuilding(buildingId) {
     const counts = { level: 0, storage: 0, extension: 0 };
     const labels = [];
     let page = await openBuilding(buildingId);
-
-    if (settings.setStaffLimit) {
-      const staff = await applyStaffLimit(page);
-      if (staff.ok && !staff.already) {
-        labels.push(`staff limit ${staff.value}${staff.dryRun ? " [dry run]" : ""}`);
-      } else if (!staff.ok) {
-        log(`⚠️ #${buildingId}: staff limit not set — ${staff.reason}`, "error");
-      }
-      page = await openBuilding(buildingId);
-    }
-
     const wanted = wantedCategories();
     const attempted = new Set();
     let storageBought = 0;
@@ -1420,12 +1466,16 @@
 
   // ------------------------------------------------------- the finish list
 
-  function enqueue(buildingId, label) {
+  function enqueue(buildingId, label, center, editDone) {
     queue[String(buildingId)] = {
       label: label || "",
       idle: 0,
       addedAt: Date.now(),
       nextAt: Date.now() + FINISH_INTERVAL_MS,
+      // A dispatch link or a staff amount that did not stick is retried by
+      // the finisher, exactly like the bot retries a building's tax.
+      editDone: !!editDone,
+      center: center ? { id: center.id, name: center.name } : null,
     };
     saveQueue();
   }
@@ -1435,6 +1485,29 @@
     for (const [key, entry] of Object.entries(queue)) {
       if ((entry.nextAt || 0) > now) continue;
       const buildingId = parseInt(key, 10);
+      let progressed = false;
+      if (!entry.editDone && (entry.editTries || 0) < EDIT_MAX_TRIES) {
+        entry.editTries = (entry.editTries || 0) + 1;
+        try {
+          const edited = await editBuilding(buildingId, entry.center);
+          const described = describeEdit(edited);
+          if (described) {
+            log(`🛰️ #${buildingId}: ${described}`,
+                editOk(edited) ? "info" : "error");
+          }
+          if (editOk(edited)) {
+            entry.editDone = true;
+            progressed = true;
+          }
+        } catch (error) {
+          log(`⚠️ #${buildingId}: edit page failed — ${error.message}`, "error");
+        }
+        if (!entry.editDone && entry.editTries >= EDIT_MAX_TRIES) {
+          // Never nag forever: say it once and let the building retire.
+          log(`🛑 #${buildingId}: giving up on the dispatch/staff settings ` +
+              `after ${EDIT_MAX_TRIES} tries — set them by hand`, "error");
+        }
+      }
       let result;
       try {
         result = await deliverBuilding(buildingId);
@@ -1447,14 +1520,13 @@
       const bought = result.counts.level + result.counts.storage
         + result.counts.extension;
       if (bought > 0) {
-        entry.idle = 0;
         log(`🏗️ #${buildingId}: ${bought} more ` +
             `(${result.labels.join(", ")})`);
-      } else {
-        entry.idle = (entry.idle || 0) + 1;
       }
+      entry.idle = (bought > 0 || progressed) ? 0 : (entry.idle || 0) + 1;
       entry.nextAt = now + FINISH_INTERVAL_MS;
-      if (entry.idle >= FINISH_IDLE_LIMIT) {
+      const editSettled = entry.editDone || (entry.editTries || 0) >= EDIT_MAX_TRIES;
+      if (entry.idle >= FINISH_IDLE_LIMIT && editSettled) {
         delete queue[key];
         log(`🏁 #${buildingId} is fully delivered — off the finish list`, "ok");
       }
@@ -1506,28 +1578,27 @@
       saveSession();
       state.lastError = "";
       if (result.buildingId) {
-        if (settings.linkDispatch) {
-          try {
-            const linked = await linkDispatch(
-              result.buildingId, result.spot && result.spot.dispatch);
-            if (linked.ok) {
-              log(`🛰️ #${result.buildingId} → dispatch "${linked.label}"` +
-                  (linked.dryRun ? " [dry run]" : linked.already ? " (already set)" : ""));
-            } else {
-              log(`⚠️ #${result.buildingId}: dispatch not linked — ${linked.reason}`,
-                  "error");
-            }
-          } catch (error) {
-            log(`⚠️ #${result.buildingId}: dispatch link failed — ${error.message}`,
-                "error");
+        const center = result.spot && result.spot.dispatch;
+        let settled = true;
+        try {
+          const edited = await editBuilding(result.buildingId, center);
+          const described = describeEdit(edited);
+          if (described) {
+            log(`🛰️ #${result.buildingId}: ${described}`,
+                editOk(edited) ? "info" : "error");
           }
+          settled = editOk(edited);
+        } catch (error) {
+          log(`⚠️ #${result.buildingId}: edit page failed — ${error.message}`,
+              "error");
+          settled = false;
         }
         const delivered = await deliverBuilding(result.buildingId);
         log(`🧱 #${result.buildingId}: ${settings.dryRun ? "would do" : "done"} — ` +
             `level ${delivered.counts.level}, storage ${delivered.counts.storage}` +
             (settings.buyExtensions ? `, extensions ${delivered.counts.extension}` : "") +
             (delivered.labels.length ? ` — ${delivered.labels.join(", ")}` : ""));
-        enqueue(result.buildingId, result.name);
+        enqueue(result.buildingId, result.name, center, settled);
       }
     } catch (error) {
       state.lastError = error.message;
@@ -1665,22 +1736,31 @@
       try {
         const page = await openBuilding(probeId);
         lines.push(`probe building #${probeId}:`);
-        const staff = staffField(page.doc, page.win);
-        lines.push(`  staff field: ${staff
-          ? `${staff.name || staff.id || "(unnamed)"} = ${staff.value}` +
-            (staff.getAttribute("max") ? ` (max ${staff.getAttribute("max")})` : "")
-          : "NOT FOUND"}`);
         const links = creditLinks(page.doc, probeId)
           .map((link) => Object.assign(link, { kind: categorize(link) }));
         lines.push(`  credit controls: ${links.length}`);
         for (const link of links.slice(0, 15)) {
           lines.push(`    [${link.kind}] ${link.label || "(no label)"} ${link.href}`);
         }
-        const select = dispatchSelect(page.doc, page.win);
+        const edit = await frameGoto(`/buildings/${probeId}/edit`);
+        const fields = editTextFields(edit.doc, edit.win);
+        lines.push(`  edit page text boxes: ${fields ? fields.texts.length : "no form"}`);
+        if (fields) {
+          fields.texts.forEach((field, index) => {
+            lines.push(`    ${index + 1}. ${field.name || field.id || "(unnamed)"}` +
+              ` = "${field.value}"` +
+              (field.getAttribute("max") ? ` (max ${field.getAttribute("max")})` : ""));
+          });
+          const staff = staffFieldOnEdit(edit.doc, edit.win);
+          lines.push(`  staff field picked: ${staff
+            ? `${staff.name || staff.id || "(unnamed)"} = ${staff.value}`
+            : "NOT FOUND"}`);
+        }
+        const select = dispatchSelect(edit.doc, edit.win);
         lines.push(`  dispatch select: ${select
           ? [...select.options].map((option) => visibleText(option))
               .join(" | ").slice(0, 200)
-          : "NOT FOUND on the building page"}`);
+          : "NOT FOUND on the edit page"}`);
       } catch (error) {
         lines.push(`probe building #${probeId}: FAILED — ${error.message}`);
       }
@@ -2020,17 +2100,14 @@
       try {
         const result = await buildOne();
         if (result.buildingId) {
-          if (settings.linkDispatch) {
-            const linked = await linkDispatch(
-              result.buildingId, result.spot && result.spot.dispatch);
-            log(linked.ok
-              ? `🛰️ dispatch "${linked.label}"${linked.dryRun ? " [dry run]" : ""}`
-              : `⚠️ dispatch not linked — ${linked.reason}`, linked.ok ? "info" : "error");
-          }
+          const center = result.spot && result.spot.dispatch;
+          const edited = await editBuilding(result.buildingId, center);
+          const described = describeEdit(edited);
+          if (described) log(`🛰️ ${described}`, editOk(edited) ? "info" : "error");
           const delivered = await deliverBuilding(result.buildingId);
           log(`🧱 ${settings.dryRun ? "would do" : "done"} — level ` +
               `${delivered.counts.level}, storage ${delivered.counts.storage}`);
-          enqueue(result.buildingId, result.name);
+          enqueue(result.buildingId, result.name, center, editOk(edited));
         }
       } catch (error) {
         log(`❌ ${error.message}`, "error");
