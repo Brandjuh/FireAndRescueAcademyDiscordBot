@@ -241,12 +241,18 @@ missionchief.com in your own browser.
   radius, interval, a per-run cap and a credit floor. The toggle survives
   page loads; only one browser tab ever drives.
 * **Per building**: pick a spot with a real street address (the game's own
-  pin lookup, OpenStreetMap as second opinion) → build it → link it to your
-  **nearest dispatch center** → buy **every credit expansion the building
-  page offers** (that is "fully delivered, all storage slots" in practice)
-  → keep it on a finish list, because extensions only unlock as the
-  previous one finishes construction. Fire stations pick the **Quint** as
-  the free starting vehicle, and refuse to build without it.
+  pin lookup, OpenStreetMap as second opinion) → build it as a **personal**
+  building with your own credits → link it to the dispatch center that
+  covers that **region** → raise the **level** to the maximum, set the
+  **staff limit** (400 by default) and buy every **storage slot** → keep it
+  on a finish list, because purchases unlock as construction finishes. Fire
+  stations pick the **Quint** as the free starting vehicle and refuse to
+  build without it. Extensions are **off by default**.
+* **Dispatch centers are per region, not "the nearest one"**: a center is
+  matched by name against the country/region/city of the spot, with your
+  own rules on top (`Netherlands = Rotterdam Dispatch`, one per line). A
+  country where you have no center is never built in — it lands on a
+  "needs a dispatch center" list in the panel instead.
 * **Never coins**: `build_with_coins` is pinned to 0 and any button
   mentioning coins is refused — the same two brakes as the bot's builder
   (`fra_bot/mc/browser_builder.py`, which this script is a port of).

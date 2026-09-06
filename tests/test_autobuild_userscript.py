@@ -35,7 +35,8 @@ def test_it_never_spends_coins(source):
     assert 'setField(doc, win, "build_with_coins", "0")' in source
     assert 'String(prep.snapshot.coins) !== "0"' in source
     assert '!text.includes("coins")' in source
-    assert 'href.includes("coins")' in source
+    # The delivery step filters href AND label together.
+    assert 'if (/coin/i.test(haystack)) continue;' in source
     # Nothing may ever set the field to anything else.
     others = re.findall(r'"build_with_coins",\s*"(?!0")', source)
     assert others == []
@@ -45,10 +46,35 @@ def test_dry_run_is_the_default(source):
     block = source.split("const DEFAULTS = {")[1].split("};")[0]
     assert re.search(r"\bdryRun:\s*true\b", block)
     assert re.search(r"\benabled:\s*false\b", block)
-    assert re.search(r"\bbuildAsAlliance:\s*false\b", block)
     # A fire station without its Quint must stop, not build something else.
     assert re.search(r"\bstrictVehicle:\s*true\b", block)
     assert re.search(r'\bstartingVehicle:\s*"Quint"', block)
+
+
+def test_the_delivery_defaults_are_what_was_asked_for(source):
+    block = source.split("const DEFAULTS = {")[1].split("};")[0]
+    # Level, staff limit and storage yes; extensions explicitly NOT.
+    assert re.search(r"\bmaxLevel:\s*true\b", block)
+    assert re.search(r"\bsetStaffLimit:\s*true\b", block)
+    assert re.search(r"\bstaffLimit:\s*400\b", block)
+    assert re.search(r"\bbuyStorage:\s*true\b", block)
+    assert re.search(r"\bbuyExtensions:\s*false\b", block)
+
+
+def test_every_build_is_a_personal_build(source):
+    # There is no alliance mode: the alliance treasury is the bot's job.
+    assert "buildAsAlliance" not in source
+    assert "alliance: false," in source
+
+
+def test_a_region_without_a_dispatch_center_is_never_built_in(source):
+    # Not "the nearest center": matched per region, and a country without
+    # one is skipped and reported rather than guessed at.
+    assert "function matchDispatch(" in source
+    assert "function parseDispatchRules(" in source
+    assert "noteMissingDispatch(" in source
+    assert "distanceMeters" not in source.split("function matchDispatch(")[1] \
+        .split("function noteMissingDispatch(")[0]
 
 
 def test_world_pool_holds_real_coordinates(source):
@@ -77,3 +103,5 @@ def test_the_duplicate_and_pacing_rails_are_present(source):
     assert "DUPLICATE_RADIUS_M = 250" in source          # same figure as the bot
     assert "Math.max(20, Number(settings.intervalSeconds)" in source
     assert "FINISH_IDLE_LIMIT" in source                 # the bot's finisher idea
+    assert "MAX_DELIVERY_STEPS" in source                # bounded purchases
+    assert "maxStorageBuys" in source                    # bounded storage presses
