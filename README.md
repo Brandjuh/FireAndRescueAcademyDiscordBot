@@ -258,6 +258,12 @@ missionchief.com in your own browser.
   (`fra_bot/mc/browser_builder.py`, which this script is a port of).
 * **Dry run is the default**: it does everything except the last click and
   reports what it would have clicked.
+* **Storage** is `/buildings/<id>/storage_upgrade/credits/<slug>` under the
+  building's `#storage` tab (`fire_equipment_initial`, then
+  `fire_equipment_additional` and `_2`…`_7` on a fire station). Every slug
+  is a one-time purchase and they differ per building type, so the script
+  reads them off the page — and clicks the tabs open first, in case a pane
+  loads lazily.
 * **Self-test** reads the live build form and prints what it found — the
   building types the game offers, whether the map/address hooks are
   reachable, the button labels, your dispatch centers. That is the way to
