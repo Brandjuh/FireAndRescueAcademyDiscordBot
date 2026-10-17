@@ -20,10 +20,12 @@ from ..mc.client import MissionChiefClient
 from ..mc.errors import FetchError
 from ..mc.parsers.chat import (
     ChatMessage,
+    ChatMission,
     build_chat_payload,
     format_discord_message_for_mc,
     parse_chat_form,
     parse_chat_history,
+    parse_chat_missions,
 )
 
 log = logging.getLogger(__name__)
@@ -60,6 +62,15 @@ class ChatSyncService:
     async def fetch_history(self) -> list[ChatMessage]:
         """Current chat history, oldest first. Raises MissionChiefError."""
         return parse_chat_history(await self.client.fetch_page(CHATS_PATH))
+
+    async def fetch_chat_missions(self) -> dict[int, ChatMission]:
+        """Which recent messages were shared from a mission (main page —
+        ~3 MB, so the bridge only asks when it has new messages to post).
+        Raises MissionChiefError."""
+        return parse_chat_missions(await self.client.fetch_page(MAIN_PATH))
+
+    def mission_url(self, mission_id: int) -> str:
+        return self.client.url(f"/missions/{int(mission_id)}")
 
     async def last_seen(self) -> int:
         raw = await self.state.get(LAST_SEEN_KEY)

@@ -282,3 +282,90 @@ async def test_on_message_ignores_bots_and_other_channels(db):
     other = FakeChannel(channel_id=901)
     await cog.on_message(FakeMessage(other, "elsewhere"))
     assert client.posts == []
+
+
+# -- mission links -------------------------------------------------------------
+
+# Shape of the live main page: the history page drops the mission, only this
+# script block (same chat ids) says which message was shared from one.
+MAIN_PAGE_WITH_CHAT_MISSIONS = """
+<script>
+    missionSpeed(6);
+    const chat_missions = {"chat":[
+      {"ignore_audio":true,"mission_id":null,"whisper":0,"mission_caption":null,
+       "message":"@MOCOFIREEMS thanks for that","user_id":814047,
+       "username":"Mtycofire","id":6941627,"mission_present":false},
+      {"ignore_audio":true,"mission_id":511252724,"whisper":0,
+       "mission_caption":"Multiple vehicles on fire [Big]",
+       "message":"\\ud83d\\udccdManhattan || 4x Traffic Control","user_id":814047,
+       "username":"Mtycofire","id":6941664,"mission_present":false}
+    ]};
+    allianceChatMass(chat_missions);
+</script>
+"""
+
+
+async def test_parse_chat_missions_maps_chat_ids_to_missions():
+    from fra_bot.mc.parsers.chat import parse_chat_missions
+
+    missions = parse_chat_missions(MAIN_PAGE_WITH_CHAT_MISSIONS)
+    assert set(missions) == {6941664}            # plain message: no mission
+    assert missions[6941664].mission_id == 511252724
+    assert missions[6941664].caption == "Multiple vehicles on fire [Big]"
+    assert parse_chat_missions("<html></html>") == {}
+    assert parse_chat_missions("const chat_missions = {broken") == {}
+
+
+class CountingClient(FakeClient):
+    def __init__(self, pages, *, fail_main=False):
+        super().__init__(pages)
+        self.fetched = []
+        self.fail_main = fail_main
+
+    async def fetch_page(self, path, *, referer=None, ajax=False):
+        self.fetched.append(path)
+        if path == "/" and self.fail_main:
+            from fra_bot.mc.errors import FetchError
+            raise FetchError(path, message="boom")
+        return await super().fetch_page(path, referer=referer, ajax=ajax)
+
+
+async def test_shared_mission_gets_a_link_in_the_embed(db):
+    client = CountingClient({
+        "/alliance_chats": CHAT_HISTORY_HTML,
+        "/": MAIN_PAGE_WITH_CHAT_MISSIONS,
+    })
+    channel = FakeChannel()
+    cog = _cog(db, client, channel)
+    await cog.chat.set_last_seen(1)                      # both messages new
+    result = await cog._sync_once()
+    assert result["posted"] == 2
+    plain, shared = ({f.name: f.value for f in e.fields} for e in channel.sent)
+    assert "Mission" not in plain
+    assert shared["Mission"] == (
+        "[Multiple vehicles on fire (Big)]"
+        "(https://www.missionchief.com/missions/511252724)"
+    )
+    assert client.fetched.count("/") == 1                # once per pass
+
+
+async def test_main_page_is_only_fetched_when_there_is_something_to_post(db):
+    client = CountingClient({
+        "/alliance_chats": CHAT_HISTORY_HTML,
+        "/": MAIN_PAGE_WITH_CHAT_MISSIONS,
+    })
+    cog = _cog(db, client, FakeChannel())
+    await cog.chat.set_last_seen(6941664)                # nothing new
+    await cog._sync_once()
+    assert "/" not in client.fetched
+
+
+async def test_mission_lookup_failure_still_posts_without_link(db):
+    client = CountingClient({"/alliance_chats": CHAT_HISTORY_HTML}, fail_main=True)
+    channel = FakeChannel()
+    cog = _cog(db, client, channel)
+    await cog.chat.set_last_seen(6941627)
+    result = await cog._sync_once()
+    assert result["posted"] == 1
+    assert "Mission" not in {f.name for f in channel.sent[0].fields}
+    assert await cog.chat.last_seen() == 6941664
