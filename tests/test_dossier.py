@@ -33,9 +33,9 @@ async def _seed(db):
     # game day/month: the dossier reports "today"/"this month", so a row
     # under any other key must not be picked up (it used to be, and was
     # then labelled as today's).
-    from fra_bot.db.repos import ny_period_keys
+    from fra_bot.db.repos import game_period_keys
 
-    day_key, month_key = ny_period_keys()
+    day_key, month_key = game_period_keys()
     await db.execute(
         "INSERT INTO income_snapshots (period, period_key, taken_at, rank, "
         "username, mc_user_id, amount) VALUES "

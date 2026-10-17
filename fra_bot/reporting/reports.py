@@ -18,21 +18,21 @@ from ..db.repos import (
     MembersRepo,
     MissionsRepo,
     TreasuryRepo,
-    ny_period_keys,
+    game_period_keys,
 )
-from .period import NY, Period
+from .period import GAME_TZ, Period
 from .registry import Report, ReportRegistry, ReportResult
 
 
-def _prev_ny_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
-    """(previous NY game day, previous NY month) as period keys."""
+def _prev_game_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
+    """(previous game day, previous game month) as period keys."""
     now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
-    ny_today = now_utc.astimezone(NY).date()
-    prev_day = ny_today - dt.timedelta(days=1)
-    prev_month_last = ny_today.replace(day=1) - dt.timedelta(days=1)
+    game_today = now_utc.astimezone(GAME_TZ).date()
+    prev_day = game_today - dt.timedelta(days=1)
+    prev_month_last = game_today.replace(day=1) - dt.timedelta(days=1)
     return prev_day.strftime("%Y-%m-%d"), prev_month_last.strftime("%Y-%m")
 
-#: How long after the NY reset a bare "today"/"month" still means the
+#: How long after the game reset a bare "today"/"month" still means the
 #: FINISHED period. These builders cannot see the schedule, and
 #: ``reports.daily_delay_minutes`` is capped at 120 by its Setting — the
 #: old ``hour == 0`` test therefore broke for any delay past 60 minutes,
@@ -40,8 +40,8 @@ def _prev_ny_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
 RESET_GRACE_MINUTES = 120
 
 
-def _just_after_reset(ny_now: dt.datetime) -> bool:
-    return ny_now.hour * 60 + ny_now.minute <= RESET_GRACE_MINUTES
+def _just_after_reset(game_now: dt.datetime) -> bool:
+    return game_now.hour * 60 + game_now.minute <= RESET_GRACE_MINUTES
 
 
 _MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -213,21 +213,21 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
         return result
 
     async def income_daily(period: Period) -> ReportResult:
-        # "yesterday" reports the FINISHED game day (the 23:55-NY pre-reset
+        # "yesterday" reports the FINISHED game day (the 23:55-UTC pre-reset
         # capture); "today" reports the running day. The morning schedule
-        # fires minutes after the NY midnight reset — in that first hour a
+        # fires minutes after the midnight-UTC reset — in that first hour a
         # "today" list is empty or a single early bird, so the finished
         # day's FINAL standings are what the reader wants (an empty-only
         # fallback showed a one-contributor "top 10" when anyone donated
         # within minutes of the reset). Outside that hour the empty-list
         # fallback still covers a missing fresh snapshot.
-        ny_now = dt.datetime.now(dt.timezone.utc).astimezone(NY)
-        day_key, _ = ny_period_keys()
-        if period.name == "yesterday" or _just_after_reset(ny_now):
-            day_key, _ = _prev_ny_keys()
+        game_now = dt.datetime.now(dt.timezone.utc).astimezone(GAME_TZ)
+        day_key, _ = game_period_keys()
+        if period.name == "yesterday" or _just_after_reset(game_now):
+            day_key, _ = _prev_game_keys()
         rows = await treasury.latest_snapshot("daily", day_key)
         if not rows and period.name != "yesterday":
-            prev_day, _ = _prev_ny_keys()
+            prev_day, _ = _prev_game_keys()
             rows = await treasury.latest_snapshot("daily", prev_day)
             if rows:
                 day_key = prev_day
@@ -239,18 +239,18 @@ def register_builtin_reports(registry: ReportRegistry, db: Database) -> None:
 
     async def income_monthly(period: Period) -> ReportResult:
         # Same shape as the daily report: "prev-month" is explicit, and the
-        # first hour after the month's NY rollover shows the finished
+        # first hour after the month's rollover shows the finished
         # month's final standings (the monthly schedule fires exactly
         # then); an empty fresh month still falls back afterwards.
-        ny_now = dt.datetime.now(dt.timezone.utc).astimezone(NY)
-        _, month_key = ny_period_keys()
+        game_now = dt.datetime.now(dt.timezone.utc).astimezone(GAME_TZ)
+        _, month_key = game_period_keys()
         if period.name == "prev-month" or (
-            ny_now.day == 1 and _just_after_reset(ny_now)
+            game_now.day == 1 and _just_after_reset(game_now)
         ):
-            _, month_key = _prev_ny_keys()
+            _, month_key = _prev_game_keys()
         rows = await treasury.latest_snapshot("monthly", month_key)
         if not rows and period.name != "prev-month":
-            _, prev_month = _prev_ny_keys()
+            _, prev_month = _prev_game_keys()
             rows = await treasury.latest_snapshot("monthly", prev_month)
             if rows:
                 month_key = prev_month

@@ -3229,10 +3229,11 @@ class DmMirrorRepo:
         )
 
 
-def ny_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
-    """(daily, monthly) period keys for the current New York game day."""
-    from zoneinfo import ZoneInfo
+def game_period_keys(now_utc: dt.datetime | None = None) -> tuple[str, str]:
+    """(daily, monthly) period keys for the current game day — the game
+    resets its income lists at midnight UTC."""
+    from ..reporting.period import GAME_TZ
 
     now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
-    ny = now_utc.astimezone(ZoneInfo("America/New_York"))
-    return ny.strftime("%Y-%m-%d"), ny.strftime("%Y-%m")
+    game = now_utc.astimezone(GAME_TZ)
+    return game.strftime("%Y-%m-%d"), game.strftime("%Y-%m")

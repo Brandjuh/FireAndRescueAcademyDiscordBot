@@ -470,12 +470,13 @@ class FRABot(commands.Bot):
             initial_delay_seconds=420.0,
         )
         # Final pre-reset capture of the daily/monthly income standings.
-        # Close to midnight NY (the reset) so the snapshot reflects the full
-        # day, but with a safety margin for the fetch to finish first.
-        # Pinned to America/New_York — the GAME's reset clock — never the
-        # display timezone: with reports.timezone=Europe/Amsterdam this job
-        # used to fire at 17:55 NY and the "final" standings missed the
-        # last six hours of the game day. This one shot IS the day's final
+        # Close to the game's midnight-UTC reset so the snapshot reflects the
+        # full day, but with a safety margin for the fetch to finish first.
+        # Pinned to the GAME's reset clock (GAME_TZ) — never the display
+        # timezone — and not New York either: the game resets at 00:00 UTC
+        # (20:00 NY in summer), so a 23:55-NY capture landed four hours
+        # into the NEXT day and filed its near-empty list under the
+        # finished day. This one shot IS the day's final
         # standings, so a transient fetch error retries within the margin
         # instead of silently leaving the day without its capture.
         async def _pre_reset_capture() -> None:
@@ -497,7 +498,7 @@ class FRABot(commands.Bot):
         sched.add_daily_job(
             self._guarded(_pre_reset_capture, "pre-reset"),
             at=dt.time(23, 55),
-            timezone="America/New_York",
+            timezone="UTC",
             name="treasury-pre-reset",
         )
 

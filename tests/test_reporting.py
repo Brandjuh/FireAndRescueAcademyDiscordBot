@@ -14,7 +14,7 @@ from fra_bot.reporting import (
     ReportResult,
     resolve_period,
 )
-from fra_bot.reporting.period import NY, UTC
+from fra_bot.reporting.period import GAME_TZ, UTC
 from fra_bot.reporting.reports import register_builtin_reports
 
 # asyncio_mode = auto (pytest.ini) runs the async tests without a mark.
@@ -24,22 +24,22 @@ from fra_bot.reporting.reports import register_builtin_reports
 # Period maths (pure, no DB)
 # --------------------------------------------------------------------------
 
-# 2026-07-07 11:30 EDT (UTC-4) -> 15:30 UTC. NY midnight is 04:00 UTC.
+# 2026-07-07 15:30 UTC. The game resets at midnight UTC.
 NOW = dt.datetime(2026, 7, 7, 15, 30, tzinfo=UTC)
-NY_MIDNIGHT = dt.datetime(2026, 7, 7, 0, 0, tzinfo=NY).astimezone(UTC)
+GAME_MIDNIGHT = dt.datetime(2026, 7, 7, 0, 0, tzinfo=GAME_TZ).astimezone(UTC)
 
 
-def test_today_starts_at_ny_midnight():
+def test_today_starts_at_game_midnight():
     period = resolve_period("today", now=NOW)
-    assert period.start == NY_MIDNIGHT
+    assert period.start == GAME_MIDNIGHT
     assert period.end == NOW
     assert period.start_iso is not None
 
 
-def test_yesterday_is_the_prior_ny_day():
+def test_yesterday_is_the_prior_game_day():
     period = resolve_period("yesterday", now=NOW)
-    assert period.end == NY_MIDNIGHT
-    assert period.start == NY_MIDNIGHT - dt.timedelta(days=1)
+    assert period.end == GAME_MIDNIGHT
+    assert period.start == GAME_MIDNIGHT - dt.timedelta(days=1)
 
 
 def test_week_is_rolling_seven_days():
@@ -48,31 +48,31 @@ def test_week_is_rolling_seven_days():
     assert period.end == NOW
 
 
-def test_month_starts_on_the_first_ny_day():
+def test_month_starts_on_the_first_game_day():
     period = resolve_period("month", now=NOW)
-    first = dt.datetime(2026, 7, 1, 0, 0, tzinfo=NY).astimezone(UTC)
+    first = dt.datetime(2026, 7, 1, 0, 0, tzinfo=GAME_TZ).astimezone(UTC)
     assert period.start == first
 
 
 def test_prev_month_spans_the_previous_month():
     period = resolve_period("prev-month", now=NOW)
-    june_first = dt.datetime(2026, 6, 1, 0, 0, tzinfo=NY).astimezone(UTC)
-    july_first = dt.datetime(2026, 7, 1, 0, 0, tzinfo=NY).astimezone(UTC)
+    june_first = dt.datetime(2026, 6, 1, 0, 0, tzinfo=GAME_TZ).astimezone(UTC)
+    july_first = dt.datetime(2026, 7, 1, 0, 0, tzinfo=GAME_TZ).astimezone(UTC)
     assert period.start == june_first
     assert period.end == july_first
 
 
 def test_year_starts_on_jan_1():
     period = resolve_period("year", now=NOW)
-    jan1 = dt.datetime(2026, 1, 1, 0, 0, tzinfo=NY).astimezone(UTC)
+    jan1 = dt.datetime(2026, 1, 1, 0, 0, tzinfo=GAME_TZ).astimezone(UTC)
     assert period.start == jan1
     assert period.end == NOW
 
 
 def test_prev_year_spans_the_previous_year():
     period = resolve_period("prev-year", now=NOW)
-    jan1_2025 = dt.datetime(2025, 1, 1, 0, 0, tzinfo=NY).astimezone(UTC)
-    jan1_2026 = dt.datetime(2026, 1, 1, 0, 0, tzinfo=NY).astimezone(UTC)
+    jan1_2025 = dt.datetime(2025, 1, 1, 0, 0, tzinfo=GAME_TZ).astimezone(UTC)
+    jan1_2026 = dt.datetime(2026, 1, 1, 0, 0, tzinfo=GAME_TZ).astimezone(UTC)
     assert period.start == jan1_2025
     assert period.end == jan1_2026
 
@@ -219,9 +219,9 @@ async def test_treasury_report_summarises_expenses(db, registry):
 
 
 async def test_income_daily_uses_latest_snapshot(db, registry):
-    from fra_bot.db.repos import TreasuryRepo, ny_period_keys
+    from fra_bot.db.repos import TreasuryRepo, game_period_keys
 
-    day_key, _ = ny_period_keys()
+    day_key, _ = game_period_keys()
     await TreasuryRepo(db).store_income_snapshot(
         "daily", day_key,
         [
@@ -257,13 +257,13 @@ async def test_automation_report_groups_by_kind(db, registry):
 
 
 async def test_income_daily_falls_back_to_finished_day(db, registry):
-    # The morning schedule fires minutes after the NY midnight reset: the new
+    # The morning schedule fires minutes after the midnight-UTC reset: the new
     # day has no snapshot yet, so the report must show the FINISHED day (the
-    # 23:55-NY pre-reset capture) instead of "No contributions recorded".
+    # 23:55-UTC pre-reset capture) instead of "No contributions recorded".
     from fra_bot.db.repos import TreasuryRepo
-    from fra_bot.reporting.reports import _prev_ny_keys
+    from fra_bot.reporting.reports import _prev_game_keys
 
-    prev_day, _ = _prev_ny_keys()
+    prev_day, _ = _prev_game_keys()
     await TreasuryRepo(db).store_income_snapshot(
         "daily", prev_day, [{"username": "Alice", "amount": 7500, "mc_user_id": 1}],
     )
@@ -274,11 +274,11 @@ async def test_income_daily_falls_back_to_finished_day(db, registry):
 
 
 async def test_income_daily_explicit_yesterday_ignores_today(db, registry):
-    from fra_bot.db.repos import TreasuryRepo, ny_period_keys
-    from fra_bot.reporting.reports import _prev_ny_keys
+    from fra_bot.db.repos import TreasuryRepo, game_period_keys
+    from fra_bot.reporting.reports import _prev_game_keys
 
-    day_key, _ = ny_period_keys()
-    prev_day, _ = _prev_ny_keys()
+    day_key, _ = game_period_keys()
+    prev_day, _ = _prev_game_keys()
     repo = TreasuryRepo(db)
     await repo.store_income_snapshot(
         "daily", day_key, [{"username": "TodayGuy", "amount": 1, "mc_user_id": 1}],
@@ -296,9 +296,9 @@ async def test_income_daily_explicit_yesterday_ignores_today(db, registry):
 
 async def test_income_monthly_falls_back_to_finished_month(db, registry):
     from fra_bot.db.repos import TreasuryRepo
-    from fra_bot.reporting.reports import _prev_ny_keys
+    from fra_bot.reporting.reports import _prev_game_keys
 
-    _, prev_month = _prev_ny_keys()
+    _, prev_month = _prev_game_keys()
     await TreasuryRepo(db).store_income_snapshot(
         "monthly", prev_month, [{"username": "Alice", "amount": 5, "mc_user_id": 1}],
     )
@@ -385,3 +385,20 @@ async def test_sanctions_report_summarises_the_window(db, registry):
     # An empty window still reports the register standing.
     empty = await _run(registry, "sanctions", "today")
     assert empty is not None
+
+
+def test_game_period_keys_roll_over_at_midnight_utc():
+    # The game's income lists reset at 00:00 UTC (20:00 New York in summer).
+    # Keyed on New York, every sync between 00:00 and 04:00 UTC filed the NEW
+    # day's near-empty list under the FINISHED day — the guard refused it for
+    # two hours, then accepted it as "stale" and the day's total was lost.
+    from fra_bot.db.repos import game_period_keys
+
+    before = dt.datetime(2026, 10, 16, 23, 55, tzinfo=UTC)
+    after = dt.datetime(2026, 10, 17, 0, 30, tzinfo=UTC)
+    assert game_period_keys(before) == ("2026-10-16", "2026-10")
+    assert game_period_keys(after) == ("2026-10-17", "2026-10")
+    month_end = dt.datetime(2026, 10, 31, 23, 59, tzinfo=UTC)
+    month_start = dt.datetime(2026, 11, 1, 0, 1, tzinfo=UTC)
+    assert game_period_keys(month_end)[1] == "2026-10"
+    assert game_period_keys(month_start)[1] == "2026-11"

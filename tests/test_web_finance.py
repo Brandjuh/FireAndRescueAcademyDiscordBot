@@ -9,7 +9,7 @@ import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
 from fra_bot.db.database import Database
-from fra_bot.db.repos import StateRepo, ny_period_keys
+from fra_bot.db.repos import StateRepo, game_period_keys
 from fra_bot.services.treasury_sync import STATE_BACKFILL_DONE
 from fra_bot.web.server import build_app
 
@@ -66,7 +66,7 @@ async def _seed(db) -> None:
         "INSERT INTO treasury_balance (total_funds, scraped_at) "
         "VALUES (12345678, ?)", (recent,),
     )
-    day_key, month_key = ny_period_keys()
+    day_key, month_key = game_period_keys()
     for period, key, rank, name, amount in (
         ("daily", day_key, 1, "Alice", 250000),
         ("daily", day_key, 2, "Bob", 100000),
@@ -126,7 +126,7 @@ async def test_backfill_note_clears_when_done(client):
 
 async def test_income_panels_reuse_report_builders(client):
     text = await (await client.get("/finance")).text()
-    day_key, month_key = ny_period_keys()
+    day_key, month_key = game_period_keys()
     assert f"Daily top contributors ({day_key})" in text
     assert f"Monthly top contributors ({month_key})" in text
     # Report markdown becomes safe HTML.

@@ -24,16 +24,19 @@ gates new build requests, not their completion.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 
 from ..config import Config
 from ..db.database import Database
 from ..db.repos import RunsRepo
+from ..mc.buildings_api import BUILDING_TYPE_IDS
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.academy import find_next_page_path
 from ..mc.parsers.building_detail import (
+    AllianceBuilding,
     parse_alliance_building_kinds,
     parse_csrf_token,
     parse_current_level,
@@ -44,6 +47,7 @@ from ..mc.parsers.funds import parse_total_funds
 log = logging.getLogger(__name__)
 
 ALLIANCE_BUILDINGS_PATH = "/verband/gebauede"
+API_ALLIANCE_BUILDINGS_PATH = "/api/alliance_buildings"
 KASSE_PATH = "/verband/kasse"
 MAX_LIST_PAGES = 15
 
@@ -65,6 +69,7 @@ class UpgradeReport:
     mode: str                      # "PREVIEW" | "LIVE"
     funds: int | None = None
     buildings_seen: int = 0
+    already_done: int = 0          # skipped up front: the API shows them finished
     levels_raised: int = 0
     extensions_bought: int = 0     # bought (LIVE) or would-buy (PREVIEW)
     errors: int = 0
@@ -80,6 +85,8 @@ class UpgradeReport:
             f"levels: {self.levels_raised} · extensions: {self.extensions_bought}"
             + (f" · errors: {self.errors}" if self.errors else ""),
         ]
+        if self.already_done:
+            head.append(f"Already finished (skipped): {self.already_done}")
         if self.funds is not None:
             head.append(f"Alliance funds: {self.funds:,} (floor {floor:,})")
         if self.funds_blocked:
@@ -113,7 +120,7 @@ class BuildingUpgradeService:
         run_id = await self.runs.start("building_upgrade")
         try:
             report.funds = await self._live_funds()
-            targets = await self._alliance_targets()
+            targets, report.already_done = await self._alliance_targets()
             report.buildings_seen = len(targets)
             for b in targets:
                 if execute and report.actions >= max_actions:
@@ -140,7 +147,24 @@ class BuildingUpgradeService:
 
     # -- targets ---------------------------------------------------------
 
-    async def _alliance_targets(self) -> list:
+    async def _alliance_targets(self) -> tuple[list, int]:
+        """``(hospitals/prisons that may need work, count already finished)``.
+
+        ``/api/alliance_buildings`` carries every building's level and built
+        extensions, so finished buildings are skipped without fetching their
+        page. Walking all 2000+ detail pages at the human pace took ~4 h —
+        every sweep hit the 60-minute tick cap and started over at the top,
+        so buildings late in the list were never reached. The list scrape
+        (one detail fetch per building) remains the fallback when the API
+        does not answer."""
+        try:
+            api = await self._api_targets()
+        except MissionChiefError as exc:
+            log.info("building upgrade: %s unavailable (%s); using the list scrape",
+                     API_ALLIANCE_BUILDINGS_PATH, exc)
+            api = None
+        if api is not None:
+            return api
         seen: set[int] = set()
         targets: list = []
         path = ALLIANCE_BUILDINGS_PATH
@@ -154,7 +178,59 @@ class BuildingUpgradeService:
             if not nxt:
                 break
             path = nxt
-        return targets
+        return targets, 0
+
+    async def _api_targets(self) -> tuple[list, int] | None:
+        """Targets from the alliance buildings API, or None when it gave no
+        usable list (non-JSON, not a list, empty)."""
+        raw = await self.client.fetch_page(API_ALLIANCE_BUILDINGS_PATH)
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(data, list) or not data:
+            return None
+        kinds = {
+            BUILDING_TYPE_IDS["hospital"]: "hospital",
+            BUILDING_TYPE_IDS["prison"]: "prison",
+        }
+        targets: list = []
+        done = 0
+        for rec in data:
+            if not isinstance(rec, dict):
+                continue
+            kind = kinds.get(rec.get("building_type"))
+            building_id = rec.get("id")
+            if kind is None or not isinstance(building_id, int):
+                continue
+            if self._finished_per_api(rec, kind):
+                done += 1
+                continue
+            targets.append(AllianceBuilding(
+                building_id=building_id,
+                name=rec.get("caption") or f"Building {building_id}",
+                kind=kind,
+            ))
+        log.info("building upgrade: %d alliance hospitals/prisons to check, "
+                 "%d already finished", len(targets), done)
+        return targets, done
+
+    def _finished_per_api(self, rec: dict, kind: str) -> bool:
+        """True when the API record shows nothing left to do: every extension
+        below the skipped "large" one is built (or under construction) and,
+        for a hospital, the level is at the maximum. Anything unreadable
+        counts as NOT finished, so the page is checked instead."""
+        try:
+            built = {int(e["type_id"]) for e in rec.get("extensions") or []}
+        except (KeyError, TypeError, ValueError):
+            return False
+        large = HOSPITAL_LARGE_EXT_ID if kind == "hospital" else PRISON_LARGE_EXT_ID
+        if not set(range(large)) <= built:
+            return False
+        if kind == "hospital":
+            level = rec.get("level")
+            return isinstance(level, int) and level >= self._max_level
+        return True
 
     # -- preview ---------------------------------------------------------
 

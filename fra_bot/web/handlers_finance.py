@@ -4,7 +4,7 @@ Entirely read-only. Every figure comes from data the treasury sync
 already stores (``treasury_balance``, ``income_snapshots``, ``expenses``)
 — nothing here talks to MissionChief. The income panels run the same
 registered report builders as ``!fra report income-daily/-monthly`` so
-the NY-game-day key selection and its pre-reset fallback live in ONE
+the game-day key selection and its pre-reset fallback live in ONE
 place; spend totals reuse ``TreasuryRepo.expense_summary`` with the
 shared report periods for the same reason.
 

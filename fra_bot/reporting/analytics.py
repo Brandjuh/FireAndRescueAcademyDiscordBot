@@ -33,9 +33,9 @@ from ..db.repos import (
     MissionsRepo,
     SanctionsRepo,
     TreasuryRepo,
-    ny_period_keys,
+    game_period_keys,
 )
-from .period import NY, Period
+from .period import GAME_TZ, Period
 
 #: Log actions that are performed by alliance admins/staff — the basis of
 #: the "most active admin" line. Bot-executed starts are filtered out by
@@ -345,16 +345,16 @@ def income_key_for(period: Period, now) -> tuple[str, str] | None:
     from "the day's snapshot is missing", and the two used to be
     indistinguishable downstream.
     """
-    ny_now = now.astimezone(NY)
-    day_key, month_key = ny_period_keys(now)
+    game_now = now.astimezone(GAME_TZ)
+    day_key, month_key = game_period_keys(now)
     if period.name == "today":
         return "daily", day_key
     if period.name == "yesterday":
-        return "daily", (ny_now.date() - dt.timedelta(days=1)).isoformat()
+        return "daily", (game_now.date() - dt.timedelta(days=1)).isoformat()
     if period.name == "month":
         return "monthly", month_key
     if period.name == "prev-month":
-        prev_month = ny_now.date().replace(day=1) - dt.timedelta(days=1)
+        prev_month = game_now.date().replace(day=1) - dt.timedelta(days=1)
         return "monthly", prev_month.strftime("%Y-%m")
     return None
 
@@ -441,15 +441,15 @@ async def _outlook(db: Database, data: OverviewData, now) -> list[str]:
             lines.append(line)
 
     # Month-to-date income pace (only meaningful mid-month).
-    ny_now = now.astimezone(NY)
-    _, month_key = ny_period_keys(now)
+    game_now = now.astimezone(GAME_TZ)
+    _, month_key = game_period_keys(now)
     month_rows = await treasury.latest_snapshot("monthly", month_key)
-    days_gone = ny_now.day
+    days_gone = game_now.day
     if month_rows and 2 <= days_gone < 28:
         total = sum(r["amount"] for r in month_rows)
         import calendar
 
-        days_in_month = calendar.monthrange(ny_now.year, ny_now.month)[1]
+        days_in_month = calendar.monthrange(game_now.year, game_now.month)[1]
         projected = int(total / days_gone * days_in_month)
         lines.append(
             f"Donations: {total:,} credits in the first {days_gone} days "

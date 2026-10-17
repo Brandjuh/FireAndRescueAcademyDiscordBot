@@ -321,3 +321,53 @@ async def test_upgrade_one_ignores_the_funds_floor(db):
     assert report.levels_raised == 1            # 5 -> 20 jump page fixture
     assert report.extensions_bought == 1        # ward bought despite low funds
     assert not any("credits/9" in p for p in client.posts)  # large still skipped
+
+
+async def test_api_prefilter_skips_finished_buildings_without_fetching_them(db):
+    # Walking 2000+ detail pages took ~4 h and every sweep died at the 60-min
+    # tick cap. The alliance buildings API shows level + built extensions, so
+    # finished buildings are skipped without a page fetch.
+    import json
+
+    def ext(ids):
+        return [{"type_id": i, "available": True, "enabled": True} for i in ids]
+
+    api = json.dumps([
+        # finished hospital: level 20, extensions 0..8 (9 = large, skipped)
+        {"id": 11, "building_type": 2, "level": 20, "caption": "Done Hosp",
+         "extensions": ext(range(9))},
+        # finished prison: extensions 0..29 (30 = large)
+        {"id": 21, "building_type": 10, "level": 0, "caption": "Done Jail",
+         "extensions": ext(range(30))},
+        # hospital below max level -> needs work
+        {"id": 10, "building_type": 2, "level": 5, "caption": "Alliance Hospital",
+         "extensions": ext(range(9))},
+        # prison missing extension 2 -> needs work
+        {"id": 20, "building_type": 10, "level": 0, "caption": "County Prison",
+         "extensions": ext([0, 1])},
+        # an academy is never a target
+        {"id": 30, "building_type": 4, "level": 0, "caption": "Fire Academy",
+         "extensions": []},
+    ])
+
+    class ApiClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.fetched = []
+
+        async def fetch_page(self, path, *, referer=None):
+            self.fetched.append(path)
+            if path == "/api/alliance_buildings":
+                return api
+            return await super().fetch_page(path, referer=referer)
+
+    client = ApiClient()
+    svc = _svc(db, client)
+    report = await svc.upgrade_all(execute=False)
+    assert report.buildings_seen == 2
+    assert report.already_done == 2
+    assert "/buildings/11" not in client.fetched
+    assert "/buildings/21" not in client.fetched
+    assert not any("gebauede" in p for p in client.fetched)
+    assert {"/buildings/10", "/buildings/20"} <= set(client.fetched)
+    assert "Already finished (skipped): 2" in report.summary(floor=0)

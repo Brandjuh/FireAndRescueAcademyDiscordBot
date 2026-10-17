@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 
 ALLIANCE_BUILDINGS_PATH = "/verband/gebauede"
 API_BUILDINGS_PATH = "/api/buildings"
+API_ALLIANCE_BUILDINGS_PATH = "/api/alliance_buildings"
 MAX_ACADEMY_LIST_PAGES = 10
 # Academy building type-ids on MissionChief (the icon IS the type). This is
 # the reliable way to find an academy — it identifies the discipline AND tells
@@ -1146,34 +1147,30 @@ class TrainingsService(BoardRequestService):
     async def _find_academies(self, discipline: str) -> list[AcademyListing]:
         """Alliance academies for a discipline, preferred building first.
 
-        Two sources are UNIONED, because neither sees everything:
-
-        * ``/api/buildings`` by building type-id (the icon = the type) — but
-          it only lists the buildings owned by OUR account, so academies
-          built by other alliance members are invisible to it.
-        * the alliance-buildings scrape (``/verband/gebauede``) — the
-          alliance-wide list the reference bot always used; it sees every
-          member's academy but depends on scraped keywords/buttons.
-
-        Taking only one (as before) silently missed academies: the API-first
-        short-circuit hid other members' academies whenever we owned any
-        matching building ourselves."""
-        candidates = await self._academies_from_api(discipline)
-        seen = {a.building_id for a in candidates}
-        try:
-            for listing in await self._academies_from_list(discipline):
-                if listing.building_id not in seen:
-                    seen.add(listing.building_id)
-                    candidates.append(listing)
-        except MissionChiefError as exc:
-            # The scrape failing must not discard what the API found.
-            if not candidates:
-                raise
-            log.warning(
-                "training: alliance building list unavailable (%s); "
-                "using the %d API-found %s academies only",
-                exc, len(candidates), discipline,
-            )
+        Academies come by building type-id (the icon = the type) from
+        ``/api/buildings`` (our own account) and ``/api/alliance_buildings``
+        (every member's). Only when the alliance endpoint does not answer is
+        the alliance-buildings scrape (``/verband/gebauede``, the list the
+        reference bot always used) unioned in: ``/api/buildings`` alone
+        misses other members' academies, and the scrape depends on scraped
+        keywords/buttons."""
+        candidates, typed_ok = await self._academies_from_api(discipline)
+        if not typed_ok:
+            seen = {a.building_id for a in candidates}
+            try:
+                for listing in await self._academies_from_list(discipline):
+                    if listing.building_id not in seen:
+                        seen.add(listing.building_id)
+                        candidates.append(listing)
+            except MissionChiefError as exc:
+                # The scrape failing must not discard what the API found.
+                if not candidates:
+                    raise
+                log.warning(
+                    "training: alliance building list unavailable (%s); "
+                    "using the %d API-found %s academies only",
+                    exc, len(candidates), discipline,
+                )
         preferred_id = self._auto.preferred_academies.get(discipline)
         candidates.sort(key=lambda a: 0 if a.building_id == preferred_id else 1)
         if not candidates and preferred_id:
@@ -1188,31 +1185,59 @@ class TrainingsService(BoardRequestService):
             ]
         return candidates
 
-    async def _academies_from_api(self, discipline: str) -> list[AcademyListing]:
-        type_id = ACADEMY_TYPE_IDS.get(discipline)
-        if type_id is None:
-            return []
-        try:
-            raw = await self.client.fetch_page(API_BUILDINGS_PATH)
-            # No coordinate requirement: we only need id + type here, and
-            # a record without lat/lon must not hide an academy.
-            buildings = parse_api_buildings(raw, require_coordinates=False)
-        except MissionChiefError as exc:
-            log.info("training: /api/buildings unavailable (%s); using list scrape", exc)
-            return []
-        except Exception as exc:  # noqa: BLE001 — bad/non-JSON body → fall back
-            log.warning("training: could not parse /api/buildings (%s); using list scrape", exc)
-            return []
+    async def _academies_from_api(
+        self, discipline: str
+    ) -> tuple[list[AcademyListing], bool]:
+        """API academies for one discipline, plus whether the alliance-wide
+        list answered (then the keyword scrape is redundant)."""
+        typed, alliance_ok = await self._typed_academy_ids()
         return [
             AcademyListing(
-                building_id=b.building_id,
-                name=f"{discipline} academy #{b.building_id}",
+                building_id=building_id,
+                name=f"{discipline} academy #{building_id}",
                 discipline=discipline,
                 has_start_button=True,
             )
-            for b in buildings
-            if b.building_type_id == type_id and b.building_id is not None
-        ]
+            for building_id in typed.get(discipline, [])
+        ], alliance_ok
+
+    async def _typed_academy_ids(self) -> tuple[dict[str, list[int]], bool]:
+        """``{discipline: [academy ids]}`` by building TYPE-ID from
+        ``/api/buildings`` (our own account) and ``/api/alliance_buildings``
+        (every member's alliance-shared building), plus whether the alliance
+        endpoint returned a usable list.
+
+        When it did, the result is complete and authoritative: the
+        ``/verband/gebauede`` keyword scrape filed every prison whose row
+        mentions "police" (jail icons, "County Police Jail") as a police
+        academy — 600+ alliance prisons, walked page by page each hour, so
+        the availability walk never finished inside its 60-minute cap and
+        the cache went stale for days."""
+        out: dict[str, list[int]] = {key: [] for key in _AGENCY_ORDER}
+        seen: set[int] = set()
+        alliance_ok = False
+        id_to_disc = {tid: disc for disc, tid in ACADEMY_TYPE_IDS.items()}
+        for path in (API_BUILDINGS_PATH, API_ALLIANCE_BUILDINGS_PATH):
+            try:
+                # No coordinate requirement: we only need id + type here,
+                # and a record without lat/lon must not hide an academy.
+                buildings = parse_api_buildings(
+                    await self.client.fetch_page(path), require_coordinates=False
+                )
+            except MissionChiefError as exc:
+                log.info("training: %s unavailable (%s)", path, exc)
+                continue
+            except Exception as exc:  # noqa: BLE001 — bad/non-JSON body
+                log.warning("training: could not parse %s (%s)", path, exc)
+                continue
+            if path == API_ALLIANCE_BUILDINGS_PATH and buildings:
+                alliance_ok = True
+            for b in buildings:
+                disc = id_to_disc.get(b.building_type_id)
+                if disc and b.building_id is not None and b.building_id not in seen:
+                    seen.add(b.building_id)
+                    out[disc].append(b.building_id)
+        return out, alliance_ok
 
     async def _academies_from_list(self, discipline: str) -> list[AcademyListing]:
         listings: list[AcademyListing] = []
@@ -1233,30 +1258,16 @@ class TrainingsService(BoardRequestService):
     async def _academy_ids_by_discipline(self) -> dict[str, list[int]]:
         """``{discipline: [academy building ids]}`` for the availability walk.
 
-        The UNION of ``/api/buildings`` by TYPE-ID (icon = type; own account's
-        buildings only) and the alliance-buildings scrape (every member's
-        academy) — the same two-source merge as :meth:`_find_academies`, so
-        the availability panel counts the whole alliance's classrooms. The
-        scrape may raise when the API found nothing, letting the caller treat
-        it as "couldn't read"."""
-        out: dict[str, list[int]] = {key: [] for key in _AGENCY_ORDER}
-        seen: set[int] = set()
-        try:
-            buildings = parse_api_buildings(
-                await self.client.fetch_page(API_BUILDINGS_PATH),
-                require_coordinates=False,
-            )
-        except MissionChiefError:
-            buildings = None
-        except Exception:  # noqa: BLE001 — bad/non-JSON body → scrape fallback
-            buildings = None
-        if buildings:
-            id_to_disc = {tid: disc for disc, tid in ACADEMY_TYPE_IDS.items()}
-            for b in buildings:
-                disc = id_to_disc.get(b.building_type_id)
-                if disc and b.building_id is not None and b.building_id not in seen:
-                    seen.add(b.building_id)
-                    out[disc].append(b.building_id)
+        By TYPE-ID from the buildings APIs (:meth:`_typed_academy_ids`) — the
+        alliance endpoint sees every member's academy. Only when that
+        endpoint does not answer is the keyword scrape of the alliance list
+        merged in (the same fallback as :meth:`_find_academies`); the scrape
+        may raise when the APIs found nothing, letting the caller treat it as
+        "couldn't read"."""
+        out, alliance_ok = await self._typed_academy_ids()
+        if alliance_ok:
+            return out
+        seen = {bid for ids in out.values() for bid in ids}
         # Merge in the alliance-buildings scrape (keyword discipline). When
         # the API already produced academies, a scrape failure only costs us
         # the other members' academies — keep what we have.

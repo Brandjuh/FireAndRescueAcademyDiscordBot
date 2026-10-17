@@ -15,7 +15,7 @@ Designed to run 24/7 on a **Raspberry Pi 4B with Debian Bookworm**
 | Members (name, role, earned credits, contribution rate, member since) | `/verband/mitglieder/<id>` (47+ pages) | hourly | join/leave/role/contribution change events |
 | Applications | `/verband/bewerbungen` | every 5 min | new-application alert |
 | Alliance logs | `/alliance_logfiles` | every 15 min | log feed (classified, colour-coded) |
-| Alliance funds + income top lists | `/verband/kasse` (+`?type=monthly`) | every 30 min + a final capture at 23:52 New York | daily & monthly top-10 reports after the New York midnight reset |
+| Alliance funds + income top lists | `/verband/kasse` (+`?type=monthly`) | every 30 min + a final capture at 23:55 UTC | daily & monthly top-10 reports after the midnight-UTC reset |
 | Expense ledger (3150+ pages) | `/verband/kasse?page=N` | one resumable backfill, then incremental | — (stored for reporting/auditing) |
 
 ## What it does (phase 2 — board request automation)
@@ -69,7 +69,7 @@ Trainings and events use plain HTTP and need no browser.
   row *sequences* (anchor matching) and occurrence indexes, never by
   dropping "duplicates".
 * **Timezones handled once.** Storage is UTC everywhere; the MissionChief
-  game day/month is America/New_York; income snapshots are keyed by the NY
+  game day/month resets at midnight UTC; income snapshots are keyed by that
   game period, so the midnight reset can't corrupt reports.
 
 ## Installation (Raspberry Pi 4B, Debian Bookworm)

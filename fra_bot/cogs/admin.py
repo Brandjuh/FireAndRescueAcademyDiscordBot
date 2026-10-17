@@ -20,7 +20,7 @@ from ..db.repos import (
     RunsRepo,
     StateRepo,
     TreasuryRepo,
-    ny_period_keys,
+    game_period_keys,
 )
 from ..services.treasury_sync import STATE_BACKFILL_DONE, STATE_BACKFILL_NEXT_PAGE
 
@@ -519,7 +519,7 @@ class AdminCog(commands.Cog):
         if period not in ("daily", "monthly"):
             await ctx.send("Period must be `daily` or `monthly`.")
             return
-        day_key, month_key = ny_period_keys()
+        day_key, month_key = game_period_keys()
         key = day_key if period == "daily" else month_key
         rows = await self._treasury.latest_snapshot(period, key)
         if not rows:
