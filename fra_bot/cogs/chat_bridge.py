@@ -23,6 +23,7 @@ from ..mc.errors import MissionChiefError
 from ..mc.parsers.chat import (
     ChatMessage,
     discord_timestamp,
+    mission_link_markdown,
     truncate_embed_value,
 )
 from .admin import is_fra_admin
@@ -91,6 +92,7 @@ class ChatBridgeCog(commands.Cog):
         channel = self._channel()
         fresh = [m for m in messages if m.chat_id > last_seen]
         posted = skipped = 0
+        missions = None  # chat id -> shared mission; fetched once, lazily
         for message in fresh:
             if await self.chat.is_own_account(message.username):
                 # Our own game account only ever says what we relayed from
@@ -106,8 +108,17 @@ class ChatBridgeCog(commands.Cog):
             else:
                 if channel is None:
                     break  # keep the watermark so nothing is lost
+                if missions is None:
+                    missions = await self._chat_missions()
+                mission = missions.get(message.chat_id)
+                link = (
+                    mission_link_markdown(
+                        mission, self.chat.mission_url(mission.mission_id)
+                    )
+                    if mission is not None else None
+                )
                 await channel.send(
-                    embed=self._embed(message),
+                    embed=self._embed(message, mission_link=link),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 posted += 1
@@ -115,8 +126,20 @@ class ChatBridgeCog(commands.Cog):
             await self.chat.set_last_seen(last_seen)
         return {"seen": len(fresh), "posted": posted, "skipped_echoes": skipped}
 
+    async def _chat_missions(self) -> dict:
+        """Mission links for this pass's messages. Only fetched when there is
+        something to post (the main page is ~3 MB); a failure posts the
+        messages without links rather than holding them back."""
+        try:
+            return await self.chat.fetch_chat_missions()
+        except MissionChiefError as exc:
+            log.info("chat bridge: mission links unavailable (%s)", exc)
+            return {}
+
     @staticmethod
-    def _embed(message: ChatMessage) -> discord.Embed:
+    def _embed(
+        message: ChatMessage, *, mission_link: str | None = None
+    ) -> discord.Embed:
         embed = discord.Embed(
             title="MissionChief Alliance Chat",
             colour=discord.Colour.blue(),
@@ -128,6 +151,11 @@ class ChatBridgeCog(commands.Cog):
         embed.add_field(
             name="Message", value=truncate_embed_value(message.message), inline=False
         )
+        if mission_link:
+            embed.add_field(
+                name="Mission", value=truncate_embed_value(mission_link),
+                inline=False,
+            )
         embed.set_footer(text=f"MissionChief chat ID: {message.chat_id}")
         return embed
 

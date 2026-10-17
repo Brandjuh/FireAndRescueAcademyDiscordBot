@@ -647,6 +647,11 @@ class TrainingsService(BoardRequestService):
             return cached
         if await self._collect_availability() is None:
             return cached
+        # Fresh numbers: let the next board poll rewrite the guide overview
+        # now instead of at its hourly slot — that slot is independent of
+        # this walk, so the board could show the previous reading (or a
+        # "numbers from …" stale line) for up to an hour.
+        await self.state.delete(self._guide_refreshed_key())
         return await self.cached_availability()
 
     async def parse_request(self, post: BoardPost) -> dict | None:

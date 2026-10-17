@@ -68,6 +68,7 @@ def _service(db):
         "/verband/gebauede": ACADEMY_LIST,
         "/buildings/4951748": ACADEMY_PAGE,
     })
+    svc._auto = svc.cfg.automation.training
     svc.state = StateRepo(db)
     return svc
 
@@ -186,3 +187,17 @@ async def test_fully_booked_academy_counts_as_a_complete_zero(db):
     assert data["counts"]["fire"] == 2 and data["counts"]["coastal"] == 0
     assert data["complete"]["fire"] is True
     assert data["complete"]["coastal"] is True
+
+
+async def test_a_fresh_walk_makes_the_board_guide_due_now(db):
+    # The guide overview refreshes hourly on its own slot, independent of the
+    # walk — after a fresh walk the board showed the previous reading for up
+    # to an hour. A fresh walk clears the throttle; a cache reuse does not.
+    svc = _service(db)
+    key = "board_guide_refreshed:training:5935"
+    await svc.state.set(key, "1792262082.6")
+    await svc.refresh_availability()
+    assert await svc.state.get(key) is None
+    await svc.state.set(key, "1792262082.6")
+    await svc.refresh_availability()            # cache is fresh → reused
+    assert await svc.state.get(key) == "1792262082.6"

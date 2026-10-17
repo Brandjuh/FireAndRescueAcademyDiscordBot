@@ -7,11 +7,16 @@ Two pages are involved:
   posting a chat message;
 * ``/alliance_chats`` renders the recent history as
   ``div#chat_message_<id>`` nodes — the numeric id is the watermark.
+
+The history page drops which mission a message was shared from; only the
+main page's ``const chat_missions = {"chat": [...]}`` (the last ~15
+messages, same ids) carries ``mission_id``/``mission_caption``.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 from dataclasses import dataclass
 from urllib.parse import urljoin
@@ -25,6 +30,7 @@ MAX_EMBED_MESSAGE_LENGTH = 1024
 
 _CHAT_NODE_ID = re.compile(r"^chat_message_\d+$")
 _PROFILE_HREF = re.compile(r"/profile/(\d+)")
+_CHAT_MISSIONS = re.compile(r"\bchat_missions\s*=\s*")
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,47 @@ class ChatMessage:
     mc_user_id: int | None
     message: str
     timestamp: str  # raw data-message-time (ISO with offset), may be ""
+
+
+@dataclass(frozen=True)
+class ChatMission:
+    mission_id: int
+    caption: str | None
+
+
+def parse_chat_missions(html: str) -> dict[int, ChatMission]:
+    """``{chat id: mission}`` for the messages that were shared from a
+    mission, from the main page's ``chat_missions`` JSON. Empty when the
+    block is missing or unreadable — a link is a nicety, never a failure."""
+    text = html or ""
+    match = _CHAT_MISSIONS.search(text)
+    if match is None:
+        return {}
+    try:
+        data, _ = json.JSONDecoder().raw_decode(text, match.end())
+    except ValueError:
+        return {}
+    rows = data.get("chat") if isinstance(data, dict) else None
+    out: dict[int, ChatMission] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            chat_id = int(row["id"])
+            mission_id = int(row["mission_id"])
+        except (KeyError, TypeError, ValueError):
+            continue  # a plain message (mission_id null)
+        caption = str(row.get("mission_caption") or "").strip() or None
+        out[chat_id] = ChatMission(mission_id=mission_id, caption=caption)
+    return out
+
+
+def mission_link_markdown(mission: ChatMission, url: str) -> str:
+    """``[caption](url)`` for an embed field; brackets in the caption would
+    break the markdown link."""
+    label = mission.caption or f"Mission #{mission.mission_id}"
+    label = label.replace("[", "(").replace("]", ")")
+    return f"[{label}]({url})"
 
 
 def parse_chat_form(html: str, page_url: str) -> ChatForm:
