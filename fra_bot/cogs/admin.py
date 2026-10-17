@@ -2240,7 +2240,7 @@ class AdminCog(commands.Cog):
                 free_ok = not page.costs or 0 in page.costs
                 lines.append(
                     f"academy {first.building_id} ({first.name or first.discipline}): "
-                    f"form={'yes' if page.action else 'NO'}, "
+                    f"form={'yes' if page.action else ('no — all classrooms full' if page.all_full else 'NO')}, "
                     f"token={'yes' if page.authenticity_token else 'NO'}, "
                     f"free rooms={page.available_rooms}, "
                     f"courses={len(page.courses)}, "

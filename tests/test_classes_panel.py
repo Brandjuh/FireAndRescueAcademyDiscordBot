@@ -163,3 +163,26 @@ def test_keeper_registers_the_classes_panel():
     assert spec is not None
     assert spec.cog_name == "ClassesPanelCog"
     assert spec.channel_id() == 42
+
+
+async def test_fully_booked_academy_counts_as_a_complete_zero(db):
+    # The live coastal incident: every Coastal Rescue School was full, the
+    # game hid the education form, and the walk filed coastal as
+    # "unreadable" — panel 0 of unknown trust, auto-scale blind.
+    svc = _service(db)
+    full = (
+        "<h1>[AA] Coastal Rescue School #0001</h1>"
+        "<div class='alert alert-info'>The classrooms are all full.</div>"
+    )
+    svc.client = FakeClient({
+        "/api/alliance_buildings": json.dumps([
+            {"id": 4951748, "building_type": 4},
+            {"id": 700, "building_type": 24},
+        ]),
+        "/buildings/4951748": ACADEMY_PAGE,
+        "/buildings/700": full,
+    })
+    data = await svc.refresh_availability()
+    assert data["counts"]["fire"] == 2 and data["counts"]["coastal"] == 0
+    assert data["complete"]["fire"] is True
+    assert data["complete"]["coastal"] is True

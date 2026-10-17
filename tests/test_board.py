@@ -553,3 +553,25 @@ def test_typo_tolerance_survives_the_stricter_fuzz():
         matches, ambiguous = match_trainings(text)
         names = [m.name for m in matches] + [a.name for a in ambiguous]
         assert expected in names, (text, names)
+
+
+# What a fully booked academy renders in place of the education form (live
+# Coastal Rescue School, all four classrooms running).
+FULL_ACADEMY_HTML = """
+<h1>[AA] Coastal Rescue School #0009</h1>
+<h3>Lesson</h3>
+<div class="alert alert-info">The classrooms are all full.</div>
+<table><tr><th>Course</th><th>Runs?</th><th>Free places</th><th>Time left</th></tr>
+<tr><td>Ocean Navigation</td><td>Yes</td><td>0</td><td>Finish now (6 coins)</td></tr>
+</table>
+"""
+
+
+def test_parse_full_academy_is_zero_rooms_not_unreadable():
+    page = parse_academy_page(FULL_ACADEMY_HTML)
+    assert page.action is None and page.all_full is True
+    assert page.available_rooms == 0
+    # A page without the form and WITHOUT the notice stays "unreadable".
+    assert parse_academy_page("<h1>Prison</h1>").all_full is False
+    # With a form the notice is irrelevant.
+    assert parse_academy_page(ACADEMY_PAGE_HTML).all_full is False
