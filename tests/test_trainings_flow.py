@@ -1439,3 +1439,54 @@ async def test_guide_documents_every_accepted_count_form():
         matches, _ = match_trainings(form)
         assert [(m.name, m.count) for m in matches] == [("SWAT", 2)], form
     assert "1 class per recognized training" not in guide
+
+
+class _RecordingClient(FakeClient):
+    def __init__(self, pages):
+        super().__init__(pages)
+        self.fetched = []
+
+    async def fetch_page(self, path, *, referer=None):
+        self.fetched.append(path)
+        return await super().fetch_page(path, referer=referer)
+
+
+async def test_alliance_api_is_authoritative_and_skips_the_keyword_scrape(db):
+    # The live incident: the /verband/gebauede keyword scrape filed every
+    # alliance prison ("police" in the row) as a police academy, so the hourly
+    # availability walk fetched 600+ prison pages and never finished. With
+    # /api/alliance_buildings answering, academies come by TYPE only and the
+    # scrape is not even fetched.
+    import json
+    svc, _ = _service(db, dry_run=True)
+    svc.client = _RecordingClient({
+        "/api/buildings": json.dumps([{"id": 700, "building_type": 4}]),
+        "/api/alliance_buildings": json.dumps([
+            {"id": 800, "building_type": 7},    # police academy
+            {"id": 801, "building_type": 10},   # prison — never an academy
+            {"id": 802, "building_type": 2},    # hospital
+            {"id": 803, "building_type": 19},   # EMS academy
+            {"id": 700, "building_type": 4},    # also ours: no duplicate
+        ]),
+        "/verband/gebauede": ACADEMY_LIST,
+    })
+    ids = await svc._academy_ids_by_discipline()
+    assert ids == {"fire": [700], "police": [800], "ems": [803], "coastal": []}
+    assert not any("gebauede" in p for p in svc.client.fetched)
+
+    academies = await svc._find_academies("police")
+    assert [a.building_id for a in academies] == [800]
+    assert not any("gebauede" in p for p in svc.client.fetched)
+
+
+async def test_empty_alliance_api_still_falls_back_to_the_scrape(db):
+    # An empty alliance list is not a believable answer — fall back rather
+    # than report "no academies".
+    import json
+    svc, _ = _service(db, dry_run=True)
+    svc.client = FakeClient({
+        "/api/alliance_buildings": json.dumps([]),
+        "/verband/gebauede": ACADEMY_LIST,
+    })
+    academies = await svc._find_academies("fire")
+    assert [a.building_id for a in academies] == [4951748]

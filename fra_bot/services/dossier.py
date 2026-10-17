@@ -196,9 +196,9 @@ class DossierService:
         last week's) amount under a "today" label. Pinning the key means
         an absent member reads as no contribution, which is the truth.
         """
-        from ..db.repos import ny_period_keys
+        from ..db.repos import game_period_keys
 
-        day_key, month_key = ny_period_keys()
+        day_key, month_key = game_period_keys()
         period_key = day_key if period == "daily" else month_key
         try:
             async with self._db.conn.execute(

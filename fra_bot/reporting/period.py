@@ -1,8 +1,9 @@
 """Report time periods, bounded by the MissionChief game day.
 
-MissionChief resets its daily figures at midnight America/New_York, so
-report windows are computed in that timezone and converted to UTC for
-querying. Every stored timestamp is UTC ISO-8601, so the returned bounds
+MissionChief resets its daily and monthly income lists at midnight UTC
+(observed: the lists collapse between 00:00 and 00:30 UTC every night, all
+summer — i.e. 20:00 New York, not New York midnight as long assumed), so
+report windows are computed on that clock. Every stored timestamp is UTC ISO-8601, so the returned bounds
 are directly comparable with them.
 """
 
@@ -10,10 +11,10 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from zoneinfo import ZoneInfo
 
-NY = ZoneInfo("America/New_York")
 UTC = dt.timezone.utc
+#: The game's reset clock: game day / month edges are midnights on it.
+GAME_TZ = UTC
 
 # name -> human label
 PERIODS = {
@@ -45,14 +46,14 @@ class Period:
 
 
 def resolve_period(name: str, *, now: dt.datetime | None = None) -> Period:
-    """Compute UTC bounds for a named period using NY game-day edges."""
+    """Compute UTC bounds for a named period using game-day (UTC) edges."""
     name = (name or "today").lower()
     if name not in PERIODS:
         raise ValueError(f"Unknown period '{name}'. Options: {', '.join(PERIODS)}")
 
     now = now or dt.datetime.now(UTC)
-    ny_now = now.astimezone(NY)
-    day_start = ny_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    game_now = now.astimezone(GAME_TZ)
+    day_start = game_now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     if name == "today":
         start, end = day_start, now

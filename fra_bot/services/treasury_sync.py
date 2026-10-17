@@ -3,9 +3,9 @@
 Three jobs live here:
 
 * :meth:`sync_balance_and_income` — total funds + daily/monthly income
-  top lists, stored as snapshots keyed by the New York game day/month
-  (MissionChief resets these lists at midnight America/New_York). The
-  scheduler also fires this shortly before midnight NY so the final
+  top lists, stored as snapshots keyed by the game day/month
+  (MissionChief resets these lists at midnight UTC). The
+  scheduler also fires this shortly before midnight UTC so the final
   pre-reset standings are always captured.
 * :meth:`backfill_step` — resumable initial ingestion of the full
   expense ledger (3150+ pages). Pages are walked newest→oldest in small
@@ -24,7 +24,7 @@ import logging
 
 from ..config import Config
 from ..db.database import Database
-from ..db.repos import RunsRepo, StateRepo, TreasuryRepo, ny_period_keys
+from ..db.repos import RunsRepo, StateRepo, TreasuryRepo, game_period_keys
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError, ParseError
 from ..mc.parsers.treasury import (
@@ -68,10 +68,10 @@ class TreasurySyncService:
     async def sync_balance_and_income(self) -> None:
         run_id = await self._runs.start("treasury")
         # Period keys BEFORE the fetches: the paced page loads can take
-        # minutes, and a sync that started before the NY midnight reset
+        # minutes, and a sync that started before the midnight reset
         # used to store the finished day's standings under the NEW day's
         # key — the finished day then had no final capture at all.
-        day_key, month_key = ny_period_keys()
+        day_key, month_key = game_period_keys()
         try:
             daily_html = await self._client.fetch_page(KASSE_PATH)
             monthly_html = await self._client.fetch_page(f"{KASSE_PATH}?type=monthly")
@@ -88,14 +88,14 @@ class TreasurySyncService:
 
         # …and re-read them AFTER. Taking the keys up front fixed one race
         # (a pre-reset sync filing under the new day) but created its
-        # mirror image: a sync that STARTS just before the NY reset and
+        # mirror image: a sync that STARTS just before the reset and
         # finishes just after it fetches the NEW day's near-empty list and
         # would file it under the FINISHED day's key — overwriting that
         # day's final standings with a couple of early birds. When the
         # period rolled over mid-sync we cannot tell which day the page
         # showed, so we store nothing and let the next run (minutes later,
         # unambiguously in the new period) capture it.
-        day_key_after, month_key_after = ny_period_keys()
+        day_key_after, month_key_after = game_period_keys()
 
         # A skipped capture used to finish as a plain success with rows=0,
         # so the day whose FINAL standings were lost looked exactly like a
@@ -107,7 +107,7 @@ class TreasurySyncService:
         daily_entries = parse_income_table(daily_html)
         if daily_entries and day_key_after != day_key:
             log.warning(
-                "treasury: NY day rolled over mid-sync (%s -> %s); daily "
+                "treasury: game day rolled over mid-sync (%s -> %s); daily "
                 "income snapshot skipped rather than filed under the wrong day",
                 day_key, day_key_after,
             )
@@ -123,7 +123,7 @@ class TreasurySyncService:
         monthly_entries = parse_income_table(monthly_html)
         if monthly_entries and month_key_after != month_key:
             log.warning(
-                "treasury: NY month rolled over mid-sync (%s -> %s); monthly "
+                "treasury: game month rolled over mid-sync (%s -> %s); monthly "
                 "income snapshot skipped", month_key, month_key_after,
             )
             skipped.append(f"monthly {month_key} (rolled into {month_key_after})")
@@ -218,7 +218,7 @@ class TreasurySyncService:
                     # and flip the done flag atomically.
                     copied = await self._treasury.staging_finalize(
                         STATE_BACKFILL_DONE, STATE_BACKFILL_NEXT_PAGE,
-                        current_year=int(ny_period_keys()[0][:4]),
+                        current_year=int(game_period_keys()[0][:4]),
                     )
                     await self._runs.finish(
                         run_id,

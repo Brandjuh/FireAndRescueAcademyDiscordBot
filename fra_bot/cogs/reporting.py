@@ -17,7 +17,7 @@ import discord
 from discord.ext import commands
 
 from ..reporting import Period, ReportResult, resolve_period
-from ..reporting.period import NY, PERIODS
+from ..reporting.period import GAME_TZ, PERIODS
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ _TITLE_LIMIT = 256
 _DESC_LIMIT = 4096
 _FIELD_LIMIT = 1024
 _DEFAULT_COLOUR = discord.Colour.blurple()
-#: NY game-day date (ISO) of the last scheduled-reports run — the restart
+#: Game-day date (ISO) of the last scheduled-reports run — the restart
 #: catch-up and the double-fire guard both key off it.
 _LAST_FIRED_KEY = "reports:last_fired_day"
 
@@ -104,20 +104,20 @@ class ReportingCog(commands.Cog):
 
     async def _schedule_loop(self) -> None:
         await self.bot.wait_until_ready()
-        # Fire shortly after each NY midnight — the GAME-day rollover — a
+        # Fire shortly after each game midnight (UTC) — the rollover — a
         # simple daily tick covers daily, weekly (on weekday) and monthly
-        # (on day) cadences. Pinned to America/New_York, NOT the display
+        # (on day) cadences. Pinned to GAME_TZ, NOT the display
         # timezone: keyed to reports.timezone (e.g. Europe/Amsterdam) the
         # "daily" reports fired six hours before the game day ended and
         # showed partial standings; every period label and income key is
-        # NY-based, so the trigger must be too.
+        # game-clock based, so the trigger must be too.
         from ..db.repos import StateRepo
 
         state = StateRepo(self.bot.db)
         delay = self.bot.cfg.reports.daily_delay_minutes
         while True:
             try:
-                now = dt.datetime.now(NY)
+                now = dt.datetime.now(GAME_TZ)
                 # timedelta, NOT minute=delay: the setting allows up to 120
                 # and .replace(minute=60+) raises, killing every report.
                 target = now.replace(
@@ -134,9 +134,9 @@ class ReportingCog(commands.Cog):
                         await state.set(_LAST_FIRED_KEY, now.date().isoformat())
                         await self._run_scheduled(now)
                     target += dt.timedelta(days=1)
-                    now = dt.datetime.now(NY)
+                    now = dt.datetime.now(GAME_TZ)
                 await asyncio.sleep(max(1.0, (target - now).total_seconds()))
-                fired_at = dt.datetime.now(NY)
+                fired_at = dt.datetime.now(GAME_TZ)
                 if await state.get(_LAST_FIRED_KEY) != fired_at.date().isoformat():
                     await state.set(_LAST_FIRED_KEY, fired_at.date().isoformat())
                     await self._run_scheduled(fired_at)
@@ -174,7 +174,7 @@ class ReportingCog(commands.Cog):
     async def _post_overviews(self, fired_at: dt.datetime) -> None:
         """The built-in overview posts: member digest to the reports
         channel, admin digest to the admin log — every morning for the
-        finished game day, plus the finished month on the NY 1st. Needs
+        finished game day, plus the finished month on the 1st. Needs
         no per-entry config (the channels are already part of the bot's
         setup); ``reports.overviews`` turns the pair off."""
         if not getattr(self.bot.cfg.reports, "overviews", True):
@@ -219,7 +219,7 @@ class ReportingCog(commands.Cog):
         period = resolve_period(period_name)
         data = await gather_overview(self.bot.db, period, admin=False)
         label = (
-            period.start.astimezone(NY).strftime("%d %b %Y")
+            period.start.astimezone(GAME_TZ).strftime("%d %b %Y")
             if period.start is not None else period.label
         )
         heading = (

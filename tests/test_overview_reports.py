@@ -17,8 +17,9 @@ from fra_bot.reporting.period import UTC, resolve_period
 from fra_bot.reporting.registry import ReportRegistry
 from fra_bot.reporting.reports import register_builtin_reports
 
-# 2026-07-07 15:30 UTC — mid game day, mid month.
-NOW = dt.datetime(2026, 7, 7, 15, 30, tzinfo=UTC)
+# 2026-07-07 11:30 UTC — mid game day (the game resets at midnight UTC),
+# mid month.
+NOW = dt.datetime(2026, 7, 7, 11, 30, tzinfo=UTC)
 
 
 @pytest_asyncio.fixture
@@ -118,7 +119,7 @@ async def test_gather_counts_and_trends(db):
 
 
 async def test_credit_deltas_feed_top_earners(db):
-    # "Yesterday" runs July 6 04:00 UTC -> July 7 04:00 UTC; the baseline
+    # "Yesterday" runs July 6 00:00 UTC -> July 7 00:00 UTC; the baseline
     # snapshot sits before the window, the final one inside it.
     await _member(db, 1, "Alice")
     await _member(db, 2, "Bob")
@@ -163,7 +164,7 @@ async def test_outlook_burn_rate_names_the_runway(db):
 
 async def test_donation_pace_projects_the_month(db):
     treasury = TreasuryRepo(db)
-    # NOW is July 7 NY -> monthly key 2026-07, 7 days gone of 31.
+    # NOW is July 7 (game clock) -> monthly key 2026-07, 7 days gone of 31.
     await treasury.store_income_snapshot(
         "monthly", "2026-07",
         [{"username": "Alice", "amount": 700_000},
