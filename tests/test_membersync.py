@@ -311,3 +311,263 @@ def test_setup_hook_imports_every_cog_it_registers():
 
 def test_membersync_cog_module_imports():
     from fra_bot.cogs.membersync import MemberSyncCog  # noqa: F401
+
+
+# -- server rejoin under another name -----------------------------------------
+
+async def test_rejoin_with_matching_nickname_is_not_held(db):
+    svc = MemberSyncService(db)
+    await _seed_member(db, 42, "Alice")
+    await svc.request_verification(100, "Alice", None, 1)
+    outcome = await svc.check_rejoin(100, "alice ")
+    assert outcome.outcome == "already_verified" and outcome.mc_user_id == 42
+    assert (await svc.links.get_by_discord(100))["rejoin_pending_at"] is None
+    # No link at all → nothing to guard.
+    assert await svc.check_rejoin(999, "Whoever") is None
+
+
+async def test_rejoin_under_another_name_holds_the_link(db, monkeypatch):
+    """The reported bypass: leave Discord, come back as someone else, and
+    `!verify` answered "already verified" + the hourly restore re-granted
+    the role. Now the link is held and the member must rename first."""
+    svc = MemberSyncService(db, mc=_FakeMC())
+    monkeypatch.setattr(
+        "fra_bot.services.membersync.parse_logs_page",
+        lambda html: _LogsPage([]),
+    )
+    for i in range(MIN_SAFE_ROSTER_COUNT + 5):
+        await _seed_member(db, 1000 + i, f"Member{i}")
+    await _seed_member(db, 42, "Alice")
+    await svc.request_verification(100, "Alice", None, 1)
+
+    held = await svc.check_rejoin(100, "TotallyNotAlice")
+    assert held.outcome == "rename_required"
+    assert held.expected_name == "Alice" and held.mc_user_id == 42
+    # The hold blocks both bypasses.
+    assert (100, 42) not in await svc.restore_candidates()
+    again = await svc.request_verification(100, "TotallyNotAlice", None, 1)
+    assert again.outcome == "rename_required"
+    assert again.expected_name == "Alice"
+    assert await svc.links.queue_get(100) is None    # a rename, not a wait
+    # Still held (nickname change to another non-roster name resolves nothing).
+    assert await svc.resolve_rejoin_hold(100, "StillWrong") is None
+
+    # Renaming to the MC name re-verifies and lifts the hold.
+    fixed = await svc.request_verification(100, "Alice", None, 1)
+    assert fixed.outcome == "approved" and fixed.mc_user_id == 42
+    assert (await svc.links.get_by_discord(100))["rejoin_pending_at"] is None
+    assert (100, 42) in await svc.restore_candidates()
+
+
+async def test_held_member_is_reverified_by_a_nickname_change(db):
+    svc = MemberSyncService(db)
+    await _seed_member(db, 42, "Alice")
+    await svc.request_verification(100, "Alice", None, 1)
+    await svc.check_rejoin(100, "Nope")
+    # The hold survives a second rejoin check and keeps its first stamp.
+    first = (await svc.links.get_by_discord(100))["rejoin_pending_at"]
+    await svc.check_rejoin(100, "StillNope")
+    assert (await svc.links.get_by_discord(100))["rejoin_pending_at"] == first
+
+    outcome = await svc.resolve_rejoin_hold(100, "Alice")
+    assert outcome.outcome == "approved" and outcome.mc_user_id == 42
+    assert (await svc.links.get_by_discord(100))["rejoin_pending_at"] is None
+    # No hold any more → a later nickname change is not our business.
+    assert await svc.resolve_rejoin_hold(100, "Alice") is None
+
+
+async def test_held_links_count_as_unlinked_for_verifyall(db):
+    svc = MemberSyncService(db)
+    await _seed_member(db, 42, "Alice")
+    await svc.request_verification(100, "Alice", None, 1)
+    await svc.check_rejoin(100, "Nope")
+    matches = await svc.backfill_matches({100: "Alice"})
+    assert [(d, r["mc_user_id"]) for d, r in matches] == [(100, 42)]
+    await svc.approve_manual(100, 42, reviewer_id=1)   # !link / !verifyall
+    assert (await svc.links.get_by_discord(100))["rejoin_pending_at"] is None
+
+
+def _cog_harness(db):
+    """A MemberSyncCog wired to fakes: one guild (id 1), Verified role id 7."""
+    from types import SimpleNamespace
+
+    from fra_bot.cogs.membersync import MemberSyncCog
+
+    role = SimpleNamespace(id=7)
+    members = {}
+
+    class Guild:
+        id = 1
+
+        def get_role(self, role_id):
+            return role if role_id == 7 else None
+
+        def get_member(self, member_id):
+            return members.get(member_id)
+
+    guild = Guild()
+
+    class Member:
+        bot = False
+
+        def __init__(self, name, roles=(), member_id=100):
+            self.id = member_id
+            self.display_name = name
+            self.guild = guild
+            self.roles = list(roles)
+            self.mention = f"<@{member_id}>"
+            self.dms = []
+
+        async def send(self, text):
+            self.dms.append(text)
+
+        async def add_roles(self, r, reason=None):
+            self.roles.append(r)
+
+        async def remove_roles(self, r, reason=None):
+            self.roles.remove(r)
+
+    admin, actions = [], []
+
+    async def notify_admin(msg):
+        admin.append(msg)
+
+    async def log_member_action(**kw):
+        actions.append(kw)
+
+    bot = SimpleNamespace(
+        cfg=SimpleNamespace(discord=SimpleNamespace(guild_id=1, verified_role_id=7)),
+        get_guild=lambda gid: guild if gid == 1 else None,
+        guilds=[guild],
+        notify_admin=notify_admin,
+        log_member_action=log_member_action,
+    )
+    cog = MemberSyncCog.__new__(MemberSyncCog)
+    cog.bot = bot
+    cog.service = MemberSyncService(db)
+    return SimpleNamespace(
+        cog=cog, role=role, Member=Member, members=members,
+        admin=admin, actions=actions,
+    )
+
+
+async def test_cog_holds_rejoiner_then_reverifies_on_rename(db):
+    h = _cog_harness(db)
+    cog, role, Member, admin, actions = h.cog, h.role, h.Member, h.admin, h.actions
+    await _seed_member(db, 42, "Alice")
+    await cog.service.request_verification(100, "Alice", None, 1)
+
+    # Rejoins as someone else: held, told to rename, admins informed.
+    member = Member("Imposter")
+    await cog.on_member_join(member)
+    assert role not in member.roles
+    assert member.dms and "**Alice**" in member.dms[0] and "Imposter" in member.dms[0]
+    assert admin and "held" in admin[0]
+
+    # Renames to the MC name: verified again on the spot.
+    renamed = Member("Alice")
+    renamed.dms = member.dms
+    await cog.on_member_update(member, renamed)
+    assert role in renamed.roles
+    assert actions and actions[-1]["mc_user_id"] == 42
+    assert "verified" in renamed.dms[-1]
+
+    # Rejoining with the right name: role straight back, no DM, no admin note.
+    admin.clear()
+    again = Member("Alice")
+    await cog.on_member_join(again)
+    assert role in again.roles and again.dms == [] and admin == []
+
+
+async def _restore_ready_roster(db):
+    for i in range(MIN_SAFE_ROSTER_COUNT + 5):
+        await _seed_member(db, 1000 + i, f"Member{i}")
+
+
+async def test_restore_loop_holds_a_rejoin_the_bot_never_saw(db):
+    """Rejoined under another name while the bot was offline: no
+    on_member_join ever fired, so the hourly restore must do the name check
+    at grant time instead of handing the role straight back."""
+    h = _cog_harness(db)
+    await _restore_ready_roster(db)
+    await _seed_member(db, 42, "Alice")
+    await h.cog.service.request_verification(100, "Alice", None, 1)
+    member = h.Member("Imposter")
+    h.members[100] = member
+    keeper = h.Member("Member3", roles=[h.role], member_id=200)  # untouched
+    h.members[200] = keeper
+    await h.cog.service.approve_manual(200, 1003, reviewer_id=1)
+
+    await h.cog.prune_loop.coro(h.cog)
+    assert h.role not in member.roles
+    assert member.dms and "**Alice**" in member.dms[0]
+    assert (await h.cog.service.links.get_by_discord(100))["rejoin_pending_at"]
+    assert keeper.dms == [] and h.role in keeper.roles
+    # Second pass: held → skipped, no second DM.
+    await h.cog.prune_loop.coro(h.cog)
+    assert len(member.dms) == 1 and h.role not in member.roles
+
+    # Same situation but the nickname matches → restored as before.
+    honest = h.Member("Member7", member_id=300)
+    h.members[300] = honest
+    await h.cog.service.approve_manual(300, 1007, reviewer_id=1)
+    await h.cog.prune_loop.coro(h.cog)
+    assert h.role in honest.roles and honest.dms == []
+
+
+async def test_verify_without_role_runs_the_rejoin_check(db):
+    from types import SimpleNamespace
+
+    h = _cog_harness(db)
+    await _seed_member(db, 42, "Alice")
+    await h.cog.service.request_verification(100, "Alice", None, 1)
+    member = h.Member("Imposter")          # rejoined while the bot was offline
+    sent = []
+
+    async def send(text):
+        sent.append(text)
+
+    ctx = SimpleNamespace(author=member, guild=member.guild, send=send)
+    await h.cog.verify.callback(h.cog, ctx)
+    assert h.role not in member.roles
+    assert "different name" in sent[-1]
+    assert member.dms and "**Alice**" in member.dms[0]
+
+    # A verified member who merely changed their nickname keeps working.
+    other = h.Member("NickChanged", roles=[h.role], member_id=200)
+    await _seed_member(db, 43, "Bob")
+    await h.cog.service.approve_manual(200, 43, reviewer_id=1)
+    ctx2 = SimpleNamespace(author=other, guild=other.guild, send=send)
+    await h.cog.verify.callback(h.cog, ctx2)
+    assert sent[-1] == "✅ You are already verified." and other.dms == []
+
+
+async def test_global_name_change_releases_the_hold(db):
+    from types import SimpleNamespace
+
+    h = _cog_harness(db)
+    await _seed_member(db, 42, "Alice")
+    await h.cog.service.request_verification(100, "Alice", None, 1)
+    member = h.Member("Imposter")
+    h.members[100] = member
+    await h.cog.on_member_join(member)
+    # No server nickname: the account-wide name changes (on_user_update).
+    member.display_name = "Alice"
+    user = SimpleNamespace(id=100, bot=False)
+    await h.cog.on_user_update(user, user)
+    assert h.role in member.roles
+    assert (await h.cog.service.links.get_by_discord(100))["rejoin_pending_at"] is None
+
+
+async def test_hold_lifts_on_the_linked_name_even_if_the_account_is_inactive(db):
+    svc = MemberSyncService(db)
+    await _seed_member(db, 42, "Alice")
+    await svc.request_verification(100, "Alice", None, 1)
+    await svc.check_rejoin(100, "Nope")
+    await db.execute("UPDATE members SET is_active = 0 WHERE mc_user_id = 42")
+    outcome = await svc.request_verification(100, "Alice", None, 1)
+    assert outcome.outcome == "already_verified"
+    assert (await svc.links.get_by_discord(100))["rejoin_pending_at"] is None
+    await svc.check_rejoin(100, "Nope")
+    released = await svc.resolve_rejoin_hold(100, "alice")
+    assert released is not None and released.mc_user_id == 42

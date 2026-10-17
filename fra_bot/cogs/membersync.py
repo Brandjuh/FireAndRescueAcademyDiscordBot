@@ -4,6 +4,10 @@ upkeep. All texts mirror the reference bot verbatim.
 The verified role is granted when a member proves alliance membership
 (nickname matches the roster, or a supplied MC id) and removed by the
 hourly prune once a linked member leaves the alliance.
+
+A linked member who rejoins the server under a nickname that no longer
+matches their MissionChief name is held (DM + admin note) until the
+nickname matches again; the rename re-verifies them automatically.
 """
 
 from __future__ import annotations
@@ -68,6 +72,25 @@ _NAME_MISMATCH = (
     "**Need help?** Contact an administrator — they can link your account "
     "manually."
 )
+
+_REJOIN_RENAME = (
+    "👋 **Welcome back to Fire & Rescue Academy!**\n\n"
+    "Your Discord account is linked to the MissionChief account "
+    "{account}, but your server nickname is now **{name}**.\n\n"
+    "**Before you can be verified again:**\n"
+    "1. Set your **Discord server nickname** to your **MissionChief name "
+    "exactly** (including capitalization)\n"
+    "2. That's it — you're re-verified automatically as soon as it "
+    "matches (or run `!verify`)\n\n"
+    "**Need help?** Contact an administrator."
+)
+
+
+def _rejoin_account(expected_name: str | None, mc_user_id: int | None) -> str:
+    if expected_name:
+        return f"**{expected_name}**"
+    return f"`{mc_user_id}`" if mc_user_id else "on record"
+
 
 _CONTRIBUTION_REMINDER = (
     "💰 **One more thing:** your alliance donation is currently below the "
@@ -139,6 +162,18 @@ class MemberSyncCog(commands.Cog):
             ctx.author.id, ctx.author.display_name, None, ctx.guild.id
         )
         if outcome.outcome == "already_verified":
+            role = self._role(ctx.guild)
+            if role is not None and role not in ctx.author.roles:
+                # Missing the role = possibly a rejoin the bot never saw
+                # (it was offline): the nickname check applies first.
+                held = await self._hold_if_renamed(ctx.author)
+                if held is not None:
+                    await ctx.send(
+                        "❌ You rejoined the server under a different name — "
+                        "set your server nickname to your MissionChief name "
+                        "first, then you'll be verified again. Check your DMs."
+                    )
+                    return
             await self._grant_role(ctx.author, reason="MemberSync: ensure verified role")
             await ctx.send("✅ You are already verified.")
             return
@@ -178,6 +213,20 @@ class MemberSyncCog(commands.Cog):
                 dm += "\n\n" + _CONTRIBUTION_REMINDER
             await self._dm(ctx.author, dm)
             return
+        if outcome.outcome == "rename_required":
+            await self._dm(
+                ctx.author,
+                _REJOIN_RENAME.format(
+                    account=_rejoin_account(outcome.expected_name, outcome.mc_user_id),
+                    name=ctx.author.display_name,
+                ),
+            )
+            await ctx.send(
+                "❌ You rejoined the server under a different name — set your "
+                "server nickname to your MissionChief name first, then you'll "
+                "be verified again. Check your DMs."
+            )
+            return
         if outcome.outcome == "name_mismatch":
             await self._dm(
                 ctx.author,
@@ -207,6 +256,116 @@ class MemberSyncCog(commands.Cog):
             )
         else:
             raise error
+
+    # -- server rejoin ----------------------------------------------------------
+
+    def _is_our_guild(self, guild: discord.Guild) -> bool:
+        ours = self._guild()
+        return ours is not None and guild.id == ours.id
+
+    async def _hold_if_renamed(self, member: discord.Member):
+        """Run the rejoin nickname check for a linked member. On a mismatch
+        the link is held, the Verified role (if any) removed, the member
+        DMed and the admins told — returns that ``rename_required`` outcome.
+        Returns ``None`` when there is nothing to hold (no link, or the
+        nickname still matches)."""
+        outcome = await self.service.check_rejoin(member.id, member.display_name)
+        if outcome is None or outcome.outcome != "rename_required":
+            return None
+        role = self._role(member.guild)
+        if role is not None and role in member.roles:
+            try:
+                await member.remove_roles(
+                    role, reason="MemberSync: rejoined under another name"
+                )
+            except discord.HTTPException as exc:
+                log.warning("membersync: could not remove role from %s: %s",
+                            member, exc)
+        account = _rejoin_account(outcome.expected_name, outcome.mc_user_id)
+        await self._dm(
+            member, _REJOIN_RENAME.format(account=account, name=member.display_name)
+        )
+        await self.bot.notify_admin(
+            f"🔁 {member.mention} rejoined as **{member.display_name}** — "
+            f"linked to MC {account} (`{outcome.mc_user_id}`). Verified is "
+            "held until the nickname matches."
+        )
+        return outcome
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member) -> None:
+        """A linked member rejoining under a mismatching nickname is held
+        until they rename — before this, leaving and rejoining under any
+        name got the Verified role straight back."""
+        if member.bot or not self._is_our_guild(member.guild):
+            return
+        try:
+            if await self._hold_if_renamed(member) is not None:
+                return
+            link = await self.service.links.get_by_discord(member.id)
+            if link is None or link["status"] != "approved":
+                return
+            # Same name as before: entitled again if still in the alliance
+            # (the hourly restore would get there too).
+            active = await self.service.members.active_members()
+            if link["mc_user_id"] in active:
+                await self._grant_role(
+                    member, reason="MemberSync: rejoined, nickname matches"
+                )
+        except Exception:
+            log.exception("membersync: rejoin check failed for %s", member)
+
+    async def _release_hold(self, member: discord.Member) -> None:
+        """A held member's name changed: verify them on the spot if it now
+        matches."""
+        outcome = await self.service.resolve_rejoin_hold(
+            member.id, member.display_name
+        )
+        if outcome is None:
+            return
+        await self.bot.log_member_action(
+            action="verified",
+            detail=f"re-verified after rejoin, linked to MC {outcome.mc_user_id}",
+            discord_user_id=member.id,
+            mc_user_id=outcome.mc_user_id,
+            actor_name=member.display_name,
+        )
+        await self._grant_role(member, reason="MemberSync: rejoin nickname fixed")
+        await self._dm(
+            member,
+            f"✅ Thanks! Your nickname matches your MissionChief account "
+            f"`{outcome.mc_user_id}` again — you're verified.",
+        )
+
+    @commands.Cog.listener()
+    async def on_member_update(
+        self, before: discord.Member, after: discord.Member
+    ) -> None:
+        """Server nickname changed."""
+        if (
+            after.bot or before.display_name == after.display_name
+            or not self._is_our_guild(after.guild)
+        ):
+            return
+        try:
+            await self._release_hold(after)
+        except Exception:
+            log.exception("membersync: rejoin re-verify failed for %s", after)
+
+    @commands.Cog.listener()
+    async def on_user_update(self, before: discord.User, after: discord.User) -> None:
+        """Account-wide display name changed — that IS the display name of a
+        member without a server nickname (no member update is sent)."""
+        if after.bot:
+            return
+        guild = self._guild()
+        member = guild.get_member(after.id) if guild is not None else None
+        if member is None:
+            return
+        try:
+            await self._release_hold(member)
+        except Exception:
+            log.exception("membersync: rejoin re-verify failed for %s", member)
 
     # -- staff commands -------------------------------------------------------
 
@@ -390,6 +549,12 @@ class MemberSyncCog(commands.Cog):
             for discord_id, mc_user_id in await self.service.restore_candidates():
                 member = guild.get_member(discord_id)
                 if member is None or role in member.roles:
+                    continue
+                # Missing the role: possibly a rejoin under another name the
+                # bot never saw (offline at the time). Checked at grant time,
+                # not from the candidate snapshot, so a hold set meanwhile
+                # by on_member_join is honoured too.
+                if await self._hold_if_renamed(member) is not None:
                     continue
                 try:
                     await member.add_roles(
