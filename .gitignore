@@ -1,12 +1,13 @@
-# Python
+# Python (no trailing slash on the venvs: "dir/" only matches a directory,
+# so a symlinked .venv slipped past it once and a pull deleted the real one)
 __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
 build/
 dist/
-.venv/
-venv/
+.venv
+venv
 
 # Runtime data (never commit)
 data/
