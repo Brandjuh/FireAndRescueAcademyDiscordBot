@@ -22,6 +22,13 @@ answered with evidence instead of blind polling:
 An hourly prune removes the verified role once a linked member leaves the
 alliance — gated on roster health so a broken scrape can never mass-derole
 the server, and skipping fresh links the roster hasn't swept yet.
+
+A link survives leaving the Discord server, so a member who comes BACK
+under a different nickname used to be "already verified" (and auto-
+restored) without the nickname ever being checked again. On rejoin the
+nickname must match the linked MissionChief name; otherwise the link is
+put on hold (``rejoin_pending_at``) and grants nothing until the member
+renames and re-verifies — the same name proof as a first verification.
 """
 
 from __future__ import annotations
@@ -57,11 +64,15 @@ LOGS_PATH = "/alliance_logfiles"
 class VerifyOutcome:
     outcome: str                 # already_verified | already_queued | approved
     #                            | approved_from_logs | name_mismatch | queued
+    #                            | rename_required (link on rejoin hold)
     mc_user_id: int | None = None
     mc_name: str | None = None
     attempts: int = 0
     contribution_rate: float | None = None
     roster_eta: dt.datetime | None = None
+    #: rename_required: the linked MC name the nickname must match (None
+    #: when the roster no longer knows the linked account).
+    expected_name: str | None = None
 
 
 class MemberSyncService:
@@ -170,8 +181,15 @@ class MemberSyncService:
         guild_id: int | None,
     ) -> VerifyOutcome:
         link = await self.links.get_by_discord(discord_id)
-        if link is not None and link["status"] == "approved":
+        on_hold = (
+            link is not None and link["status"] == "approved"
+            and link["rejoin_pending_at"] is not None
+        )
+        if link is not None and link["status"] == "approved" and not on_hold:
             return VerifyOutcome("already_verified", link["mc_user_id"])
+        # A link on rejoin hold proves nothing by itself: the member is
+        # verified exactly like a first-timer (nickname vs roster), and the
+        # approval's upsert clears the hold.
 
         queued = await self.links.queue_get(discord_id)
         if queued is not None:
@@ -210,6 +228,21 @@ class MemberSyncService:
             return VerifyOutcome(
                 "approved_from_logs", match["mc_user_id"], match["name"]
             )
+        if on_hold and self._same_name(
+            display_name, await self._linked_name(link["mc_user_id"])
+        ):
+            # Already renamed to the linked name (its account just isn't on
+            # the active roster): the rename IS the proof — lift the hold
+            # instead of asking for a rename that already happened.
+            await self.links.clear_rejoin_pending(discord_id)
+            return VerifyOutcome("already_verified", link["mc_user_id"])
+        if on_hold:
+            # An existing member who rejoined the server: the fix is a
+            # rename, not waiting for a roster sweep — never queue them.
+            return VerifyOutcome(
+                "rename_required", link["mc_user_id"],
+                expected_name=await self._linked_name(link["mc_user_id"]),
+            )
         if checked:
             # The logs are readable and show no join by this name: the
             # nickname almost certainly doesn't match — say so instead of
@@ -225,6 +258,67 @@ class MemberSyncService:
         last_run = await self.runs.last_success("members")
         return VerifyOutcome(
             "queued", mc_user_id, roster_eta=self.next_roster_eta(last_run)
+        )
+
+    # -- server rejoin ---------------------------------------------------------
+
+    async def _linked_name(self, mc_user_id: int) -> str | None:
+        row = await self.members.get(mc_user_id)
+        return str(row["name"]) if row is not None and row["name"] else None
+
+    @staticmethod
+    def _same_name(display_name: str | None, expected: str | None) -> bool:
+        return bool(
+            expected and display_name
+            and display_name.strip().casefold() == expected.casefold()
+        )
+
+    async def check_rejoin(
+        self, discord_id: int, display_name: str | None
+    ) -> VerifyOutcome | None:
+        """A member (re)joined the Discord server. ``None`` when they have no
+        approved link (nothing to guard). ``already_verified`` when their
+        nickname still matches the linked MC name (the hold, if any, is
+        lifted); otherwise the link goes on hold → ``rename_required``."""
+        link = await self.links.get_by_discord(discord_id)
+        if link is None or link["status"] != "approved":
+            return None
+        expected = await self._linked_name(link["mc_user_id"])
+        if self._same_name(display_name, expected):
+            await self.links.clear_rejoin_pending(discord_id)
+            return VerifyOutcome("already_verified", link["mc_user_id"], expected)
+        await self.links.mark_rejoin_pending(discord_id)
+        return VerifyOutcome(
+            "rename_required", link["mc_user_id"], expected_name=expected
+        )
+
+    async def resolve_rejoin_hold(
+        self, discord_id: int, display_name: str | None
+    ) -> VerifyOutcome | None:
+        """A held member changed their nickname: approve when it now matches
+        the linked name or an active roster name (roster only — no
+        MissionChief traffic on a Discord event). ``None`` when there is no
+        hold or still no match."""
+        link = await self.links.get_by_discord(discord_id)
+        if (
+            link is None or link["status"] != "approved"
+            or link["rejoin_pending_at"] is None
+        ):
+            return None
+        expected = await self._linked_name(link["mc_user_id"])
+        if self._same_name(display_name, expected):
+            await self.links.clear_rejoin_pending(discord_id)
+            return VerifyOutcome("approved", link["mc_user_id"], expected)
+        member = await self.lookup(display_name)
+        if member is None:
+            return None
+        await self.links.upsert(
+            discord_id, member["mc_user_id"], status="approved", reviewer_id=0
+        )
+        await self.links.queue_remove(discord_id)
+        return VerifyOutcome(
+            "approved", member["mc_user_id"], member["name"],
+            contribution_rate=member["contribution_rate"],
         )
 
     async def approve_manual(
@@ -245,6 +339,7 @@ class MemberSyncService:
         existing members never have to run `!verify` themselves."""
         linked = {
             link["discord_id"] for link in await self.links.all_approved()
+            if link["rejoin_pending_at"] is None
         }
         matches: list[tuple[int, aiosqlite.Row]] = []
         for discord_id, name in display_names.items():
@@ -326,8 +421,10 @@ class MemberSyncService:
         active = await self.members.active_members()
         if len(active) < MIN_SAFE_ROSTER_COUNT:
             return []
+        # A link on rejoin hold is skipped: restoring it is exactly the
+        # leave-and-rejoin bypass of the nickname check.
         return [
             (link["discord_id"], link["mc_user_id"])
             for link in await self.links.all_approved()
-            if link["mc_user_id"] in active
+            if link["mc_user_id"] in active and link["rejoin_pending_at"] is None
         ]

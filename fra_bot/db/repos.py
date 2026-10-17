@@ -127,6 +127,12 @@ class MembersRepo:
         ) as cur:
             return {row["mc_user_id"]: row for row in await cur.fetchall()}
 
+    async def get(self, mc_user_id: int) -> aiosqlite.Row | None:
+        async with self._db.conn.execute(
+            "SELECT * FROM members WHERE mc_user_id = ?", (mc_user_id,)
+        ) as cur:
+            return await cur.fetchone()
+
     async def former_members(self) -> dict[int, aiosqlite.Row]:
         """Everyone the roster has seen leave. Positive proof that a name
         belonged to a real member who is gone — an absence from
@@ -2164,7 +2170,7 @@ class LinksRepo:
                 "VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(discord_id) DO UPDATE SET mc_user_id = excluded.mc_user_id, "
                 "status = excluded.status, reviewer_id = excluded.reviewer_id, "
-                "updated_at = excluded.updated_at",
+                "updated_at = excluded.updated_at, rejoin_pending_at = NULL",
                 (discord_id, mc_user_id, status, reviewer_id, now, now),
             )
 
@@ -2173,6 +2179,21 @@ class LinksRepo:
             "DELETE FROM member_links WHERE discord_id = ?", (discord_id,)
         )
         return n > 0
+
+    async def mark_rejoin_pending(self, discord_id: int) -> None:
+        """Hold a link after a server rejoin under a mismatching nickname.
+        Keeps the first timestamp; re-verifying (``upsert``) clears it."""
+        await self._db.execute(
+            "UPDATE member_links SET rejoin_pending_at = ? "
+            "WHERE discord_id = ? AND rejoin_pending_at IS NULL",
+            (utcnow_iso(), discord_id),
+        )
+
+    async def clear_rejoin_pending(self, discord_id: int) -> None:
+        await self._db.execute(
+            "UPDATE member_links SET rejoin_pending_at = NULL WHERE discord_id = ?",
+            (discord_id,),
+        )
 
     # -- verification queue ------------------------------------------------
 
