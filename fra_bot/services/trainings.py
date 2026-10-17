@@ -548,15 +548,18 @@ class TrainingsService(BoardRequestService):
                             log.debug("training availability: academy %s failed (%s)",
                                       building_id, exc)
                             continue
+                        if page.action is None and page.all_full:
+                            # The game hides the form while every classroom
+                            # is busy and says so: a real 0.
+                            continue
                         if page.action is None:
                             # Fetched fine but NO education form was parsed —
                             # a layout change or half-rendered page. That is
                             # "unreadable", not "0 free classrooms": counting
                             # it as 0 would feed auto-scale a false shortage.
-                            # WARNING, not debug: if the game were ever to
-                            # hide the form on a fully-booked academy, this
-                            # would (safely) hold auto-scale back — the
-                            # operator must be able to see that happening.
+                            # WARNING, not debug: an unrecognised page holds
+                            # auto-scale back (safely) — the operator must be
+                            # able to see that happening.
                             complete[discipline] = False
                             log.warning(
                                 "training availability: academy %s has no "
@@ -1061,6 +1064,12 @@ class TrainingsService(BoardRequestService):
                 busy = True
                 continue
 
+            if page.action is None and page.all_full:
+                # Fully booked: the game hides the form. Busy (retry later),
+                # not a broken academy.
+                last_reason = f"academy {academy.building_id} has no free classroom"
+                busy = True
+                continue
             if page.action is None or page.authenticity_token is None:
                 last_reason = f"academy {academy.building_id} has no education form"
                 continue

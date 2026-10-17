@@ -20,6 +20,10 @@ from dataclasses import dataclass, field
 from bs4 import BeautifulSoup
 
 _BUILDING_ID_RE = re.compile(r"/buildings/(\d+)")
+# A fully booked academy renders this INSTEAD of the education form (seen
+# live on a Coastal Rescue School running four classes): no form there is
+# "0 free classrooms", not an unreadable page.
+_ALL_FULL_RE = re.compile(r"classrooms are all full", re.IGNORECASE)
 
 _DISCIPLINE_KEYWORDS = [
     ("coastal", ("coastal", "water rescue", "water_rescue", "lifeguard")),
@@ -109,6 +113,9 @@ class AcademyPage:
     available_rooms: int = 0
     costs: list[int] = field(default_factory=list)
     courses: dict[str, str] = field(default_factory=dict)  # label -> option value
+    #: No education form because every classroom is in use (the game says
+    #: so on the page) — a reading of 0 free rooms, not a parse failure.
+    all_full: bool = False
 
     def find_course_value(self, training_name: str) -> str | None:
         from ..trainings_catalog import normalized_equals
@@ -169,4 +176,6 @@ def parse_academy_page(html: str) -> AcademyPage:
             if courses:
                 page.courses = courses
 
+    if page.action is None and _ALL_FULL_RE.search(soup.get_text(" ")):
+        page.all_full = True
     return page

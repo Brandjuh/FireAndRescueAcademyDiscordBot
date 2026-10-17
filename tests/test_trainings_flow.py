@@ -1490,3 +1490,21 @@ async def test_empty_alliance_api_still_falls_back_to_the_scrape(db):
     })
     academies = await svc._find_academies("fire")
     assert [a.building_id for a in academies] == [4951748]
+
+
+async def test_open_training_full_academy_is_busy_not_broken(db):
+    # A fully booked academy hides its form; that must read as "no free
+    # classroom" (busy → retried later), not "has no education form".
+    import json
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+    svc, _ = _service(db, dry_run=True)
+    svc._auto.preferred_academies = {}
+    svc.client = FakeClient({
+        "/api/alliance_buildings": json.dumps([{"id": 700, "building_type": 24}]),
+        "/buildings/700": "<p>The classrooms are all full.</p>",
+    })
+    match = TrainingMatch(discipline="coastal", name="Ocean Navigation",
+                          duration_days=5, count=1)
+    outcome = await svc._open_training(match)
+    assert outcome["status"] == "busy"
+    assert "no free classroom" in outcome["reason"]
