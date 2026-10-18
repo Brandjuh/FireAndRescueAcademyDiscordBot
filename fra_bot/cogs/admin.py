@@ -1077,6 +1077,62 @@ class AdminCog(commands.Cog):
             outcome = await keeper.ensure("classes", channel=channel, force=True)
         await ctx.send(f"✅ Class-availability panel {outcome} in <#{channel.id}>.")
 
+    @fra.command(name="classes", aliases=["openclasses"])
+    async def open_classes(
+        self, ctx: commands.Context, count: int, *, course: str
+    ) -> None:
+        """Override: open <count> classes of one course right away — no cap
+        of 4, no queue. Stops when the classrooms run out and reports how
+        many were opened. Example: !fra classes 10 Coastal - Ocean Navigation"""
+        from ..mc.trainings_catalog import match_trainings
+        from ..services.trainings import merged_course_catalog
+
+        if count < 1:
+            await ctx.send("Count must be at least 1.")
+            return
+        service = self.bot.trainings
+        catalog = await merged_course_catalog(service.state)
+        matches, ambiguous = match_trainings(course, catalog)
+        if ambiguous or len(matches) != 1:
+            hint = ""
+            if ambiguous:
+                hint = " " + " ".join(service._ambiguity_help(a) for a in ambiguous)
+            elif matches:
+                hint = " Found: " + ", ".join(m.name for m in matches) + "."
+            await ctx.send(
+                f"❌ `{course}` must name exactly one course.{hint}"[:1900]
+            )
+            return
+        match = matches[0]
+        await ctx.send(
+            f"⏳ Opening {count}× **{match.name}** ({match.discipline})…"
+        )
+        async with ctx.typing():
+            result = await service.open_classes_override(match, count)
+        opened = len(result["opened"])
+        lines = [f"**{match.name}**: {opened} of {count} classes opened."]
+        if result["dry_run"]:
+            lines.append("🧪 Dry-run — nothing was really opened.")
+        if result["uncertain"]:
+            lines.append(
+                f"⚠️ {len(result['uncertain'])} more submitted but not "
+                "confirmed — academies "
+                + ", ".join(str(b) for b in result["uncertain"])
+            )
+        if result["stopped"] == "busy":
+            lines.append(
+                f"No free classroom left — stopped. ({result['reason']})"
+            )
+        elif result["stopped"]:
+            lines.append(f"Stopped: {result['reason']}")
+        buildings = list(dict.fromkeys(result["opened"]))
+        if buildings:
+            lines.append("Academies: " + ", ".join(
+                f"<https://www.missionchief.com/buildings/{b}>"
+                for b in buildings[:10]
+            ) + (" …" if len(buildings) > 10 else ""))
+        await ctx.send("\n".join(lines)[:1900])
+
     @fra.command(name="missionpanel")
     async def mission_panel(self, ctx: commands.Context) -> None:
         """(Re)post the mission-request panel to the configured channel. The

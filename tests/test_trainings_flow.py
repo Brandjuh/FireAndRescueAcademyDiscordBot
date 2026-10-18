@@ -98,6 +98,7 @@ def _service(db, dry_run):
     from fra_bot.db.repos import (
         BoardDeletionRepo,
         BoardRepo,
+        MemberPrefsRepo,
         MembersRepo,
         RemindersRepo,
         RunsRepo,
@@ -116,6 +117,7 @@ def _service(db, dry_run):
     svc.board_repo = BoardRepo(db)
     svc.requests = AutomationRepo(db)
     svc.members = MembersRepo(db)
+    svc.prefs = MemberPrefsRepo(db)
     svc.runs = RunsRepo(db)
     svc.state = StateRepo(db)
     svc.deletions = BoardDeletionRepo(db)

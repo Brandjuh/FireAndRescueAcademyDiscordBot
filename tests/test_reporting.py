@@ -218,7 +218,12 @@ async def test_treasury_report_summarises_expenses(db, registry):
     assert "Bob: 2,500" in joined        # top spender
 
 
-async def test_income_daily_uses_latest_snapshot(db, registry):
+async def test_income_daily_uses_latest_snapshot(db, registry, monkeypatch):
+    # Outside the post-reset grace window, whatever the wall clock says:
+    # in the first hours after 00:00 UTC "today" deliberately shows the
+    # finished day.
+    monkeypatch.setattr("fra_bot.reporting.reports._just_after_reset",
+                        lambda game_now: False)
     from fra_bot.db.repos import TreasuryRepo, game_period_keys
 
     day_key, _ = game_period_keys()
@@ -273,7 +278,12 @@ async def test_income_daily_falls_back_to_finished_day(db, registry):
     assert "Alice" in result.description
 
 
-async def test_income_daily_explicit_yesterday_ignores_today(db, registry):
+async def test_income_daily_explicit_yesterday_ignores_today(db, registry, monkeypatch):
+    # Outside the post-reset grace window, whatever the wall clock says:
+    # in the first hours after 00:00 UTC "today" deliberately shows the
+    # finished day.
+    monkeypatch.setattr("fra_bot.reporting.reports._just_after_reset",
+                        lambda game_now: False)
     from fra_bot.db.repos import TreasuryRepo, game_period_keys
     from fra_bot.reporting.reports import _prev_game_keys
 

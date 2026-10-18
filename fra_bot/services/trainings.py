@@ -998,6 +998,9 @@ class TrainingsService(BoardRequestService):
 
         if not requester:
             return
+        if not await self.prefs.ingame_pms_enabled_for_name(requester):
+            log.info("training: %s opted out of in-game PMs — no PM", requester)
+            return
         lines: list[str] = []
         for entry in opened:
             lines.append(
@@ -1017,6 +1020,40 @@ class TrainingsService(BoardRequestService):
             )
         except Exception:  # noqa: BLE001 - a PM must never fail the request
             log.exception("training: in-game PM to %s failed", requester)
+
+    async def open_classes_override(
+        self, match: TrainingMatch, count: int, *,
+        duration: int = ALLIANCE_SIGNUP_SECONDS,
+    ) -> dict:
+        """Admin override: open ``count`` copies of one course with no
+        per-request cap, no queue and no retry — it stops at the first
+        copy that cannot be opened (classrooms full, course not offered).
+
+        Returns ``{"opened": [building_id, ...], "uncertain": [...],
+        "stopped": status or None, "reason": str or None, "dry_run": bool}``.
+        An ``uncertain`` copy was submitted but not confirmed; it still
+        counts toward ``count`` (re-posting it risks a double open)."""
+        opened: list[int] = []
+        uncertain: list[int] = []
+        dry_run = False
+        for _ in range(max(0, int(count))):
+            outcome = await self._open_training(match, duration=duration)
+            if outcome["status"] == "opened":
+                opened.append(outcome["building_id"])
+                dry_run = dry_run or bool(outcome.get("dry_run"))
+                continue
+            if outcome["status"] == "uncertain":
+                uncertain.append(outcome["building_id"])
+                continue
+            log.info("training override: %s stopped after %d opened (%s)",
+                     match.name, len(opened), outcome.get("reason"))
+            return {"opened": opened, "uncertain": uncertain,
+                    "stopped": outcome["status"],
+                    "reason": outcome.get("reason"), "dry_run": dry_run}
+        log.info("training override: %s — %d of %d opened", match.name,
+                 len(opened), count)
+        return {"opened": opened, "uncertain": uncertain, "stopped": None,
+                "reason": None, "dry_run": dry_run}
 
     async def _open_training(
         self, match: TrainingMatch, *, duration: int = ALLIANCE_SIGNUP_SECONDS

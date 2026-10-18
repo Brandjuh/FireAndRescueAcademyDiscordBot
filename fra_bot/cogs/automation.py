@@ -336,8 +336,18 @@ class AutomationCog(commands.Cog):
         mirrored into the DM forum like every outgoing message. The MC name
         resolves from the request's verified identity (``requester_mc_id``
         → roster); older rows fall back to the stored requester name."""
-        from ..db.repos import MembersRepo
+        from ..db.repos import MemberPrefsRepo, MembersRepo
 
+        prefs = MemberPrefsRepo(self.bot.db)
+        if row["requester_mc_id"]:
+            if not await prefs.ingame_pms_enabled(int(row["requester_mc_id"])):
+                log.info("request %s: DMs closed and in-game PMs opted out — "
+                         "outcome only in the admin log", row["id"])
+                return
+        elif not await prefs.ingame_pms_enabled_for_name(row["requester_name"]):
+            log.info("request %s: DMs closed and in-game PMs opted out — "
+                     "outcome only in the admin log", row["id"])
+            return
         name = None
         if row["requester_mc_id"]:
             roster = await MembersRepo(self.bot.db).active_members()

@@ -204,8 +204,9 @@ def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", alliance_json="[]"
                             reverse_address=reverse_address)
     svc.state = StateRepo(db)
     svc.runs = RunsRepo(db)
-    from fra_bot.db.repos import BoardDeletionRepo
+    from fra_bot.db.repos import BoardDeletionRepo, MemberPrefsRepo
     svc.deletions = BoardDeletionRepo(db)
+    svc.prefs = MemberPrefsRepo(db)
     svc._geocoder = FakeGeo()
     svc._overpass = FakeOverpass(OVERPASS_DATA if overpass_data is None else overpass_data)
     svc._builder = FakeBuilder()

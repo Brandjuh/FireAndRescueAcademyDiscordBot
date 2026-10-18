@@ -1752,3 +1752,27 @@ async def test_copy_kind_skips_locations_already_large(db):
                    active=1, created_by="admin")
     added, skipped = await repo.copy_kind(from_kind="event", to_kind="large")
     assert added == [] and skipped == ["Kansas City, KS"]
+
+
+async def test_one_off_board_request_respects_pm_opt_out(db, monkeypatch):
+    from fra_bot.db.repos import MemberPrefsRepo
+
+    sent = []
+
+    async def fake_send(client, recipient, subject, body):
+        sent.append((recipient, subject, body))
+        return True
+
+    monkeypatch.setattr("fra_bot.mc.messages.send_ingame_message", fake_send)
+    await db.execute(
+        "INSERT INTO members (mc_user_id, name, contribution_rate, is_active, "
+        "first_seen_at, last_seen_at) "
+        "VALUES (4242, 'Alice', 10.0, 1, '2026-01-01', '2026-07-01')"
+    )
+    await MemberPrefsRepo(db).set_ingame_pms(4242, False)
+    sched = _scheduler(_cfg(dry_run=False, min_rate=0), FakeClient(_ELIGIBLE), db)
+    sched.board = FakeBoard([])
+    mid = await _enqueue(sched, source="board", requester_name="Alice")
+    await sched._advance()
+    assert (await sched.missions.get(mid))["status"] == "done"
+    assert sent == []

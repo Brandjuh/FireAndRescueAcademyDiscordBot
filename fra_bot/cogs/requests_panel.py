@@ -709,7 +709,8 @@ class RequestsCog(commands.Cog):
                 "are refused.\n\n"
                 "_You need a verified account (`!verify`) with enough alliance "
                 "contribution. Accepted requests run within ~5 minutes; results "
-                "are announced in the log channel._"
+                "are announced in the log channel. No in-game PMs about your "
+                "requests? `/ingame-pms off`._"
             ),
         )
 
@@ -756,7 +757,7 @@ class RequestsCog(commands.Cog):
         """Closed Discord DMs: deliver the reminder as an in-game PM via the
         member's verified link. No link or PM failure -> dropped (logged) —
         never posted in a channel."""
-        from ..db.repos import LinksRepo, MembersRepo
+        from ..db.repos import LinksRepo, MemberPrefsRepo, MembersRepo
 
         try:
             link = await LinksRepo(self.bot.db).get_by_discord(
@@ -765,6 +766,12 @@ class RequestsCog(commands.Cog):
             if link is None or link["status"] != "approved":
                 log.warning("Reminder for %s dropped: DMs closed and no "
                             "verified MC link", row["discord_user_id"])
+                return
+            if not await MemberPrefsRepo(self.bot.db).ingame_pms_enabled(
+                int(link["mc_user_id"])
+            ):
+                log.info("Reminder for %s dropped: DMs closed and in-game "
+                         "PMs opted out", row["discord_user_id"])
                 return
             roster = await MembersRepo(self.bot.db).active_members()
             member = roster.get(int(link["mc_user_id"]))

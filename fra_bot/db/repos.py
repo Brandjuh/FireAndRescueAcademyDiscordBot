@@ -425,6 +425,47 @@ class MembersRepo:
         return out
 
 
+class MemberPrefsRepo:
+    """Per-member notification preferences (``member_prefs``). No row means
+    the defaults: in-game PMs on."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def ingame_pms_enabled(self, mc_user_id: int | None) -> bool:
+        if mc_user_id is None:
+            return True
+        async with self._db.conn.execute(
+            "SELECT ingame_pms FROM member_prefs WHERE mc_user_id = ?",
+            (int(mc_user_id),),
+        ) as cur:
+            row = await cur.fetchone()
+        return row is None or bool(row["ingame_pms"])
+
+    async def ingame_pms_enabled_for_name(self, name: str | None) -> bool:
+        """The preference behind a MissionChief username (board requests
+        carry only the name). Unknown names keep the default; when a name
+        matches several roster rows, one opt-out is enough."""
+        if not name:
+            return True
+        async with self._db.conn.execute(
+            "SELECT MIN(p.ingame_pms) AS pms FROM members m "
+            "JOIN member_prefs p ON p.mc_user_id = m.mc_user_id "
+            "WHERE m.name = ? COLLATE NOCASE",
+            (name,),
+        ) as cur:
+            row = await cur.fetchone()
+        return row is None or row["pms"] is None or bool(row["pms"])
+
+    async def set_ingame_pms(self, mc_user_id: int, enabled: bool) -> None:
+        await self._db.execute(
+            "INSERT INTO member_prefs (mc_user_id, ingame_pms, updated_at) "
+            "VALUES (?, ?, ?) ON CONFLICT(mc_user_id) DO UPDATE SET "
+            "ingame_pms = excluded.ingame_pms, updated_at = excluded.updated_at",
+            (int(mc_user_id), 1 if enabled else 0, utcnow_iso()),
+        )
+
+
 class ApplicationsRepo:
     def __init__(self, db: Database) -> None:
         self._db = db
