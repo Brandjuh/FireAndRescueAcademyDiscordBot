@@ -33,8 +33,9 @@ import discord
 
 from ..config import Config
 from ..db.database import Database
-from ..db.repos import DmMirrorRepo, DmSystemRepo, MembersRepo
+from ..db.repos import DmMirrorRepo, DmSystemRepo, MemberPrefsRepo, MembersRepo
 from ..mc import mailbox
+from ..mc.pm_optout import confirmation_text, parse_pm_command
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 
@@ -111,6 +112,7 @@ class DmMirrorService:
         self._repo = DmMirrorRepo(db)
         self._system = DmSystemRepo(db)
         self._members = MembersRepo(db)
+        self._prefs = MemberPrefsRepo(db)
         # Bodies we just POSTed into the game from a forum thread: the next
         # scan skips mirroring them back (they are already in the thread as
         # the staff member's message). Memory-only — after a restart such a
@@ -373,6 +375,11 @@ class DmMirrorService:
             await self._record(row, known["thread_id"], messages)
             return False, 0
 
+        # Only messages newer than the stored marker may carry a command —
+        # a rebuilt thread replays the whole history below, and an old
+        # "PM OFF" must not be re-applied (and re-confirmed) by that.
+        new_messages = list(fresh)
+
         thread = None
         created = False
         if known is not None and known["thread_id"] is not None:
@@ -397,7 +404,58 @@ class DmMirrorService:
             self._echoes.pop(row.conversation_id, None)
 
         await self._record(row, thread.id, messages)
+        await self._apply_pm_command(thread, row, new_messages)
         return created, posted
+
+    async def _apply_pm_command(self, thread, row, messages) -> None:
+        """A member's "PM OFF" / "PM ON" reply sets their in-game PM
+        preference (for members without Discord). The last command in the
+        batch wins; the member gets a confirmation in the same
+        conversation and staff see a note in the thread. Never raises —
+        a preference hiccup must not stall the mirror."""
+        enabled = None
+        for message in messages:
+            if _norm_body(message.author) != _norm_body(row.sender):
+                continue  # our own (outgoing) messages are never commands
+            command = parse_pm_command(message.body)
+            if command is not None:
+                enabled = command
+        if enabled is None:
+            return
+        try:
+            mc_user_id = await self._mc_id_for(row.sender)
+            if mc_user_id is None:
+                log.info("PM command from %s ignored: not on the roster",
+                         row.sender)
+                return
+            await self._prefs.set_ingame_pms(mc_user_id, enabled)
+            state = "ON" if enabled else "OFF"
+            log.info("in-game PMs %s for %s (PM command)", state, row.sender)
+            ok, detail = await self.reply_to_conversation(
+                row.conversation_id, confirmation_text(enabled)
+            )
+            note = f"⚙️ In-game PMs turned **{state}** by the member's PM command"
+            if not ok:
+                note += f" (confirmation not sent: {detail})"
+            await thread.send(
+                content=note, allowed_mentions=discord.AllowedMentions.none()
+            )
+            log_action = getattr(self._bot, "log_member_action", None)
+            if log_action is not None:
+                await log_action(
+                    action="profile_updated",
+                    detail=f"in-game PMs {state.lower()} (in-game PM command)",
+                    mc_user_id=mc_user_id, actor_name=row.sender,
+                )
+        except Exception:  # noqa: BLE001 — see docstring
+            log.exception("PM command from %s failed", row.sender)
+
+    async def _mc_id_for(self, username: str) -> int | None:
+        wanted = " ".join(str(username or "").split()).casefold()
+        for mc_user_id, member in (await self._members.active_members()).items():
+            if " ".join(str(member["name"]).split()).casefold() == wanted:
+                return int(mc_user_id)
+        return None
 
     async def _create_thread(self, forum, row, messages):
         embed = discord.Embed(

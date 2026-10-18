@@ -961,6 +961,7 @@ class BuildingsService(BoardRequestService):
         coords: str | None, address: str | None, link: str | None,
     ) -> None:
         from ..mc.messages import send_ingame_message
+        from ..mc.pm_optout import PM_OPTOUT_FOOTER
 
         if not requester:
             return
@@ -979,6 +980,7 @@ class BuildingsService(BoardRequestService):
             lines.append(f"📫 Address: {address}")
         if link:
             lines.append(f"Building: {link}")
+        lines.extend(["", PM_OPTOUT_FOOTER])
         try:
             await send_ingame_message(
                 self.client, requester, "Building request", "\n".join(lines)

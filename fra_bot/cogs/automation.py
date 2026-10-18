@@ -361,10 +361,13 @@ class AutomationCog(commands.Cog):
                 "the admin log", row["id"],
             )
             return
+        from ..mc.pm_optout import PM_OPTOUT_FOOTER
+
         plain = text.replace("**", "").replace("`", "")
+        plain = plain[:2000 - len(PM_OPTOUT_FOOTER) - 2] + "\n\n" + PM_OPTOUT_FOOTER
         try:
             result = await self.bot.dm_mirror.send_new(
-                name, f"{str(row['kind']).title()} request", plain[:2000]
+                name, f"{str(row['kind']).title()} request", plain
             )
         except Exception:
             log.exception("request %s: in-game PM fallback errored", row["id"])

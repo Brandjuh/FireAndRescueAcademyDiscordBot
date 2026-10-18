@@ -1115,6 +1115,7 @@ class MissionScheduler:
         """The personal success notification for board requesters — an
         in-game MissionChief PM, like the reference bot sends."""
         from ..mc.messages import send_ingame_message
+        from ..mc.pm_optout import PM_OPTOUT_FOOTER
 
         if not requester or requester == "member":
             return
@@ -1125,7 +1126,7 @@ class MissionScheduler:
             await send_ingame_message(
                 self.client, requester, "Event request",
                 f"Your event request has been started: {kind_label} at "
-                f"{address}. Have fun!",
+                f"{address}. Have fun!\n\n{PM_OPTOUT_FOOTER}",
             )
         except Exception:  # noqa: BLE001 - a PM must never fail the start
             log.exception("mission: in-game PM to %s failed", requester)

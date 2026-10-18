@@ -995,6 +995,7 @@ class TrainingsService(BoardRequestService):
         """The reference bot's success notification for board requesters:
         an in-game MissionChief PM (board posts carry no Discord identity)."""
         from ..mc.messages import send_ingame_message
+        from ..mc.pm_optout import PM_OPTOUT_FOOTER
 
         if not requester:
             return
@@ -1014,6 +1015,8 @@ class TrainingsService(BoardRequestService):
                 )
         lines.append("")
         lines.append(COURSE_JOIN_INSTRUCTIONS)
+        lines.append("")
+        lines.append(PM_OPTOUT_FOOTER)
         try:
             await send_ingame_message(
                 self.client, requester, "Training request", "\n".join(lines)
