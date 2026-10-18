@@ -361,7 +361,8 @@ class ProfileCog(commands.Cog):
             "📭 In-game PMs are **off**: the bot sends you no in-game "
             "messages about your requests (board replies and Discord DMs "
             "still come). Alliance-donation warnings are always sent. Turn "
-            "them back on with `/ingame-pms on`."
+            "them back on with `/ingame-pms on` — or in the game, by "
+            "replying PM ON to any message from the bot."
         )
 
 

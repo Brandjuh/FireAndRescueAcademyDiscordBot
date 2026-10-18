@@ -850,3 +850,98 @@ async def test_repost_rejects_unknown_id_and_missing_channel(db):
     service_off, _, _, _ = _service(db, _cfg())   # channel 0
     ok, detail = await service_off.repost_system("5")
     assert not ok and "not configured" in detail
+
+
+# ---------------------------------------------------------------------------
+# "PM OFF" / "PM ON" — the in-game opt-out for members without Discord
+# ---------------------------------------------------------------------------
+
+def _with_reply(body, *, author="Alex1129", when="2026-07-11T11:00:00+00:00"):
+    return CONV_9001_HTML.replace(
+        '<div class="well" data-message-time="2026-07-11T10:00:00+00:00">',
+        f'<div class="well" data-message-time="{when}">'
+        f'<a href="/profile/111">{author}</a><p>{body}</p></div>'
+        '<div class="well" data-message-time="2026-07-11T10:00:00+00:00">',
+        1,
+    )
+
+
+async def _roster(db, mc_id=111, name="Alex1129"):
+    await db.execute(
+        "INSERT INTO members (mc_user_id, name, is_active, first_seen_at, "
+        "last_seen_at) VALUES (?, ?, 1, '2026-01-01', '2026-07-01')",
+        (mc_id, name),
+    )
+
+
+def _replies(mc):
+    return [dict(data).get("message[body]") for _, data in mc.posts]
+
+
+def test_parse_pm_command_accepts_only_the_bare_command():
+    from fra_bot.mc.pm_optout import parse_pm_command
+
+    assert parse_pm_command("PM OFF") is False
+    assert parse_pm_command("  pm off. ") is False
+    assert parse_pm_command("!pms on") is True
+    assert parse_pm_command("PM: stop") is False
+    assert parse_pm_command("in-game PMs on") is True
+    assert parse_pm_command("Messages off") is False
+    # A sentence that merely contains it is a message for staff.
+    assert parse_pm_command("Could you turn PM off for me?") is None
+    assert parse_pm_command("Why did I get a warning?") is None
+    assert parse_pm_command("") is None and parse_pm_command(None) is None
+
+
+async def test_pm_off_reply_sets_the_preference_and_confirms(db):
+    from fra_bot.db.repos import MemberPrefsRepo
+
+    await _roster(db)
+    service, forum, mc, _ = _service(db)
+    await service.scan()
+    assert await MemberPrefsRepo(db).ingame_pms_enabled(111) is True
+
+    mc.conversations["9001"] = _with_reply("PM OFF")
+    await service.scan()
+    assert await MemberPrefsRepo(db).ingame_pms_enabled(111) is False
+    replies = _replies(mc)
+    assert len(replies) == 1 and "OFF" in replies[0]
+    thread = next(t for t in forum.threads if "#9001" in t.name)
+    assert "PM OFF" in thread.messages[-2]            # the member's message
+    assert "turned **OFF**" in thread.messages[-1]    # the staff note
+
+    # Rescanning the same page must not re-apply or re-confirm it.
+    await service.scan()
+    assert len(_replies(mc)) == 1
+
+    mc.conversations["9001"] = _with_reply(
+        "pm on", when="2026-07-11T12:00:00+00:00"
+    ).replace(
+        '<div class="well" data-message-time="2026-07-11T11:00:00+00:00">',
+        '<div class="well" data-message-time="2026-07-11T11:00:00+00:00">'
+        '<a href="/profile/111">Alex1129</a><p>PM OFF</p></div>'
+        '<div class="well" data-message-time="2026-07-11T10:30:00+00:00">',
+        1,
+    )
+    await service.scan()
+    assert await MemberPrefsRepo(db).ingame_pms_enabled(111) is True
+    assert "ON" in _replies(mc)[-1]
+
+
+async def test_pm_command_from_non_member_or_bot_is_ignored(db):
+    from fra_bot.db.repos import MemberPrefsRepo
+
+    service, forum, mc, _ = _service(db)        # Alex1129 not on the roster
+    await service.scan()
+    mc.conversations["9001"] = _with_reply("PM OFF")
+    await service.scan()
+    assert mc.posts == []
+
+    await _roster(db)
+    # Our own outgoing "PM OFF" (e.g. a staff reply) is never a command.
+    mc.conversations["9001"] = _with_reply(
+        "PM OFF", author="FRA-Bot", when="2026-07-11T13:00:00+00:00"
+    )
+    await service.scan()
+    assert mc.posts == []
+    assert await MemberPrefsRepo(db).ingame_pms_enabled(111) is True

@@ -33,7 +33,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from ..db.repos import AutomationRepo, RemindersRepo, StateRepo
+from ..db.repos import (
+    AutomationRepo,
+    LinksRepo,
+    MemberPrefsRepo,
+    RemindersRepo,
+    StateRepo,
+)
 from ..geo.geocoder import GeocodeError
 from ..geo.maps_links import find_maps_links
 from ..mc.trainings_catalog import DISCIPLINES
@@ -56,6 +62,7 @@ log = logging.getLogger(__name__)
 
 PANEL_TRAINING_ID = "fra:request:training"
 PANEL_BUILDING_ID = "fra:request:building"
+PANEL_NOTIFY_ID = "fra:request:notifications"
 #: Sentinel thread id marking a request that came from Discord, not a board.
 DISCORD_THREAD = 0
 
@@ -283,6 +290,98 @@ class RequestPanelView(discord.ui.View):
     ) -> None:
         await interaction.response.send_modal(BuildingRequestModal(self._cog))
 
+    @discord.ui.button(
+        label="Notifications",
+        style=discord.ButtonStyle.secondary,
+        emoji="🔔",
+        custom_id=PANEL_NOTIFY_ID,
+    )
+    async def notifications(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self._cog.open_notification_settings(interaction)
+
+
+class NotificationSettingsView(discord.ui.View):
+    """The member's own toggles (ephemeral): in-game PMs about their
+    requests, and whether their rank promotions are announced."""
+
+    def __init__(
+        self, cog: "RequestsCog", user_id: int, mc_user_id: int, *,
+        pms: bool, rank: bool,
+    ) -> None:
+        super().__init__(timeout=600)
+        self._cog = cog
+        self._user_id = user_id
+        self._mc_user_id = mc_user_id
+        self.pms = pms
+        self.rank = rank
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self.toggle_pms.label = f"In-game PMs: {'ON' if self.pms else 'OFF'}"
+        self.toggle_pms.style = (
+            discord.ButtonStyle.success if self.pms
+            else discord.ButtonStyle.secondary
+        )
+        self.toggle_rank.label = (
+            f"Rank announcements: {'ON' if self.rank else 'OFF'}"
+        )
+        self.toggle_rank.style = (
+            discord.ButtonStyle.success if self.rank
+            else discord.ButtonStyle.secondary
+        )
+
+    def content(self) -> str:
+        return notification_settings_text(pms=self.pms, rank=self.rank)
+
+    @discord.ui.button(label="In-game PMs", emoji="📬", row=0)
+    async def toggle_pms(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.pms = not self.pms
+        await self._cog.prefs.set_ingame_pms(self._mc_user_id, self.pms)
+        await self._changed(
+            interaction, f"in-game PMs {'on' if self.pms else 'off'}"
+        )
+
+    @discord.ui.button(label="Rank announcements", emoji="🎖️", row=0)
+    async def toggle_rank(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.rank = not self.rank
+        await self._cog.prefs.set_rank_announce(self._mc_user_id, self.rank)
+        await self._changed(
+            interaction,
+            f"rank announcements {'on' if self.rank else 'off'}",
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self._user_id
+
+    async def _changed(self, interaction: discord.Interaction, detail: str) -> None:
+        self._refresh()
+        await interaction.response.edit_message(content=self.content(), view=self)
+        await self._cog.bot.log_member_action(
+            action="profile_updated", detail=detail,
+            discord_user_id=interaction.user.id, mc_user_id=self._mc_user_id,
+            actor_name=interaction.user.display_name,
+        )
+
+
+def notification_settings_text(*, pms: bool, rank: bool) -> str:
+    return (
+        "🔔 **Your notifications** — tap a button to switch it.\n"
+        f"📬 **In-game PMs: {'ON' if pms else 'OFF'}** — messages in "
+        "MissionChief when your training, event or building request is "
+        "handled. (Alliance-donation warnings are always sent.)\n"
+        f"🎖️ **Rank announcements: {'ON' if rank else 'OFF'}** — a "
+        "congratulation with your name when you reach a new credit rank. "
+        "Your rank role is updated either way.\n"
+        "_In the game itself: reply **PM OFF** or **PM ON** to any message "
+        "from the bot._"
+    )
+
 
 def training_request_payload(
     discipline: str, training: str, *, user_id: int, channel_id: int | None,
@@ -330,6 +429,7 @@ class RequestsCog(commands.Cog):
         self.bot = bot
         self.requests = AutomationRepo(bot.db)
         self.reminders = RemindersRepo(bot.db)
+        self.prefs = MemberPrefsRepo(bot.db)
         self._lock = asyncio.Lock()
         self._kick_tasks: set[asyncio.Task] = set()
         self.reminder_loop.start()
@@ -626,6 +726,27 @@ class RequestsCog(commands.Cog):
 
     # -- slash commands (same flows as the panel buttons) -----------------
 
+    async def open_notification_settings(
+        self, interaction: discord.Interaction
+    ) -> None:
+        link = await LinksRepo(self.bot.db).get_by_discord(interaction.user.id)
+        if link is None or link["status"] != "approved":
+            await interaction.response.send_message(
+                "You need a verified account first (`!verify`) — your "
+                "settings are stored on your MissionChief account.",
+                ephemeral=True,
+            )
+            return
+        mc_user_id = int(link["mc_user_id"])
+        view = NotificationSettingsView(
+            self, interaction.user.id, mc_user_id,
+            pms=await self.prefs.ingame_pms_enabled(mc_user_id),
+            rank=await self.prefs.rank_announce_enabled(mc_user_id),
+        )
+        await interaction.response.send_message(
+            view.content(), view=view, ephemeral=True
+        )
+
     async def open_training_chooser(self, interaction: discord.Interaction) -> None:
         """The training flow behind the panel button and ``/training``,
         headed by the cached free-class counts so members see availability
@@ -709,8 +830,10 @@ class RequestsCog(commands.Cog):
                 "are refused.\n\n"
                 "_You need a verified account (`!verify`) with enough alliance "
                 "contribution. Accepted requests run within ~5 minutes; results "
-                "are announced in the log channel. No in-game PMs about your "
-                "requests? `/ingame-pms off`._"
+                "are announced in the log channel._\n\n"
+                "**🔔 Notifications**\n"
+                "Turn the bot's in-game PMs about your requests and your "
+                "rank-promotion announcements on or off."
             ),
         )
 
@@ -779,7 +902,9 @@ class RequestsCog(commands.Cog):
                 log.warning("Reminder for %s dropped: MC %s not in roster",
                             row["discord_user_id"], link["mc_user_id"])
                 return
-            plain = text.replace("**", "")
+            from ..mc.pm_optout import PM_OPTOUT_FOOTER
+
+            plain = text.replace("**", "") + "\n\n" + PM_OPTOUT_FOOTER
             result = await self.bot.dm_mirror.send_new(
                 str(member["name"]), "Training reminder", plain
             )

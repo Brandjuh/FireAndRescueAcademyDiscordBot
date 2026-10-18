@@ -209,6 +209,23 @@ async def test_unverified_member_gets_role_but_no_announcement(db):
     assert summary["promotions"] == 0 and channel.sent == []
 
 
+async def test_opted_out_member_gets_role_but_no_announcement(db):
+    from fra_bot.db.repos import MemberPrefsRepo
+
+    await _healthy_roster(db)
+    await _seed(db, 42, "Alice", 15_000, discord_id=100)
+    await MemberPrefsRepo(db).set_rank_announce(42, False)
+    service, member, channel, ranks = _rig(db)
+    await service.sync()  # baseline
+    await db.execute(
+        "UPDATE members SET earned_credits = ? WHERE mc_user_id = 42",
+        (2_000_000,),
+    )
+    summary = await service.sync()
+    assert ranks["lieutenant"] in member.roles  # role still follows
+    assert summary["promotions"] == 0 and channel.sent == []
+
+
 async def test_departed_member_loses_rank_roles(db):
     await _healthy_roster(db)
     await _seed(db, 42, "Alice", 15_000, discord_id=100)

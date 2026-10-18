@@ -9,7 +9,8 @@ the ladder below). The hourly sync:
   first sync has established a baseline (no congratulations spam on
   rollout), never for a member's first assignment (unless configured),
   and only for members carrying the verified role, exactly like the old
-  bot;
+  bot — a member can opt out of the announcement (Notifications button
+  on the request panel), the role itself still follows;
 * strips all rank roles from linked members who left the alliance (with
   the same roster-health gate the membersync prune uses).
 
@@ -28,7 +29,7 @@ import discord
 
 from ..config import Config
 from ..db.database import Database
-from ..db.repos import LinksRepo, MembersRepo, StateRepo
+from ..db.repos import LinksRepo, MemberPrefsRepo, MembersRepo, StateRepo
 from .membersync import MIN_SAFE_ROSTER_COUNT
 
 log = logging.getLogger(__name__)
@@ -113,6 +114,7 @@ class RankRolesService:
         self._bot = bot
         self._members = MembersRepo(db)
         self._links = LinksRepo(db)
+        self._prefs = MemberPrefsRepo(db)
         self._state = StateRepo(db)
 
     # ------------------------------------------------------------------
@@ -235,6 +237,10 @@ class RankRolesService:
                     or any(r.id == verified_role_id for r in member.roles)
                 )
             )
+            if announce and not await self._prefs.rank_announce_enabled(
+                link["mc_user_id"]
+            ):
+                announce = False  # the member opted out (role still changes)
 
             if dry_run:
                 if to_add or to_remove:

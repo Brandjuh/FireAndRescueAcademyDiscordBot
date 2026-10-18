@@ -396,13 +396,26 @@ Discord DM; if DMs are closed the bot sends an in-game PM instead
 (mirrored into the DM forum) — it never mentions the member in the
 request channel.
 
-**In-game PMs are optional.** A verified member turns them off with
-`/ingame-pms off` (back on with `/ingame-pms on`; no argument shows the
-current setting). The preference sits on the MissionChief account, so it
-also covers board requests: no "training/event/building started" PMs, no
-closed-DM fallback PMs and no in-game reminder fallback. Alliance-donation
-warnings and removal notices are always sent. Recurring event/mission
-requests never send a PM — not on the first start either.
+**In-game PMs are optional.** Three ways to switch them, all stored on
+the member's MissionChief account (so board requests honour it too):
+
+* the **🔔 Notifications** button on the request panel (verified members);
+* `/ingame-pms off` / `/ingame-pms on` (no argument shows the setting);
+* **in the game**, for members without Discord: reply **PM OFF** or
+  **PM ON** to any message from the bot. The DM-mirror scan picks it up
+  within one interval, confirms in the same conversation and leaves a
+  note in the mirrored thread. Only the bare command counts — a sentence
+  that merely contains it is left for staff. Every notification PM ends
+  with a line explaining this.
+
+Off means no "training/event/building started" PMs, no closed-DM fallback
+PMs and no in-game reminder fallback. Alliance-donation warnings and
+removal notices are always sent. Recurring event/mission requests never
+send a PM — not on the first start either.
+
+**Rank announcements are optional too.** The same Notifications button
+lets a member turn off the congratulation in the promotion channel; their
+credit-rank role is still updated.
 
 ### Missions & events
 

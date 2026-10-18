@@ -458,10 +458,28 @@ class MemberPrefsRepo:
         return row is None or row["pms"] is None or bool(row["pms"])
 
     async def set_ingame_pms(self, mc_user_id: int, enabled: bool) -> None:
+        await self._set(mc_user_id, "ingame_pms", enabled)
+
+    async def rank_announce_enabled(self, mc_user_id: int | None) -> bool:
+        if mc_user_id is None:
+            return True
+        async with self._db.conn.execute(
+            "SELECT rank_announce FROM member_prefs WHERE mc_user_id = ?",
+            (int(mc_user_id),),
+        ) as cur:
+            row = await cur.fetchone()
+        return row is None or bool(row["rank_announce"])
+
+    async def set_rank_announce(self, mc_user_id: int, enabled: bool) -> None:
+        await self._set(mc_user_id, "rank_announce", enabled)
+
+    async def _set(self, mc_user_id: int, column: str, enabled: bool) -> None:
+        if column not in ("ingame_pms", "rank_announce"):
+            raise ValueError(f"unknown preference column {column!r}")
         await self._db.execute(
-            "INSERT INTO member_prefs (mc_user_id, ingame_pms, updated_at) "
+            f"INSERT INTO member_prefs (mc_user_id, {column}, updated_at) "
             "VALUES (?, ?, ?) ON CONFLICT(mc_user_id) DO UPDATE SET "
-            "ingame_pms = excluded.ingame_pms, updated_at = excluded.updated_at",
+            f"{column} = excluded.{column}, updated_at = excluded.updated_at",
             (int(mc_user_id), 1 if enabled else 0, utcnow_iso()),
         )
 

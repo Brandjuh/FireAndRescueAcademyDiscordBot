@@ -199,3 +199,83 @@ async def test_building_pm_respects_opt_out(db, monkeypatch):
     svc.prefs = MemberPrefsRepo(db)
     await svc._notify_ingame_built("Alice", "hospital", "St Mary", None, None, None)
     assert sent == []
+
+
+# -- Notifications button (request panel) ------------------------------------
+
+async def test_rank_announce_pref_defaults_on_and_toggles(db):
+    prefs = MemberPrefsRepo(db)
+    await _member(db, 42, "Alice")
+    assert await prefs.rank_announce_enabled(42) is True
+    await prefs.set_rank_announce(42, False)
+    assert await prefs.rank_announce_enabled(42) is False
+    # The two preferences are independent.
+    assert await prefs.ingame_pms_enabled(42) is True
+
+
+class _Response:
+    def __init__(self):
+        self.sent = []
+        self.edited = []
+
+    async def send_message(self, content=None, *, view=None, ephemeral=False):
+        self.sent.append((content, view, ephemeral))
+
+    async def edit_message(self, *, content=None, view=None):
+        self.edited.append((content, view))
+
+
+def _interaction(user_id=100):
+    return SimpleNamespace(
+        user=SimpleNamespace(id=user_id, display_name="Alice"),
+        response=_Response(),
+    )
+
+
+def _requests_cog(db, actions):
+    from fra_bot.cogs.requests_panel import RequestsCog
+
+    async def log_member_action(**kwargs):
+        actions.append(kwargs)
+
+    cog = RequestsCog.__new__(RequestsCog)
+    cog.bot = SimpleNamespace(db=db, log_member_action=log_member_action)
+    cog.prefs = MemberPrefsRepo(db)
+    return cog
+
+
+async def test_notifications_button_needs_a_verified_link(db):
+    cog = _requests_cog(db, [])
+    interaction = _interaction()
+    await cog.open_notification_settings(interaction)
+    content, view, ephemeral = interaction.response.sent[0]
+    assert "verified" in content and view is None and ephemeral
+
+
+async def test_notifications_toggles_switch_each_preference(db):
+    actions = []
+    cog = _requests_cog(db, actions)
+    await _member(db, 42, "Alice", discord_id=100)
+    interaction = _interaction()
+    await cog.open_notification_settings(interaction)
+    content, view, ephemeral = interaction.response.sent[0]
+    assert ephemeral
+    assert "In-game PMs: ON" in content and "Rank announcements: ON" in content
+    assert view.toggle_pms.label == "In-game PMs: ON"
+
+    click = _interaction()
+    await view.toggle_rank.callback(click)
+    assert await cog.prefs.rank_announce_enabled(42) is False
+    assert await cog.prefs.ingame_pms_enabled(42) is True
+    edited_content, _ = click.response.edited[0]
+    assert "Rank announcements: OFF" in edited_content
+    assert view.toggle_rank.label == "Rank announcements: OFF"
+
+    click = _interaction()
+    await view.toggle_pms.callback(click)
+    assert await cog.prefs.ingame_pms_enabled(42) is False
+    assert [a["detail"] for a in actions] == [
+        "rank announcements off", "in-game PMs off",
+    ]
+    # Someone else's clicks are refused by the view.
+    assert await view.interaction_check(_interaction(user_id=999)) is False
