@@ -1,6 +1,8 @@
 """Member profiles: ``/profile`` to view (everyone), ``/profile-edit``
 to manage your own sections via modals (admins may edit anyone's).
 
+``/ingame-pms`` turns the bot's in-game PM notifications on or off.
+
 Sections: timezone + playtimes, bio, specialties, birthday, vehicles,
 buildings. Every edit lands in the central member-action log, so admins
 see profile changes in the per-member history and the action feed.
@@ -15,7 +17,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ..db.repos import GameSyncRepo, LinksRepo, MemberProfilesRepo, MembersRepo
+from ..db.repos import (
+    GameSyncRepo,
+    LinksRepo,
+    MemberPrefsRepo,
+    MemberProfilesRepo,
+    MembersRepo,
+)
 
 log = logging.getLogger(__name__)
 
@@ -292,6 +300,68 @@ class ProfileCog(commands.Cog):
         current = dict(current_row) if current_row is not None else {}
         await interaction.response.send_modal(
             SectionModal(self, target, section.value, current)
+        )
+
+    @app_commands.command(
+        name="ingame-pms",
+        description="Turn the bot's in-game MissionChief PMs for your "
+                    "requests on or off",
+    )
+    @app_commands.describe(
+        setting="on = receive in-game PMs, off = no in-game PMs "
+                "(empty = show your current setting)",
+    )
+    @app_commands.choices(setting=[
+        app_commands.Choice(name="on", value="on"),
+        app_commands.Choice(name="off", value="off"),
+    ])
+    async def ingame_pms(
+        self, interaction: discord.Interaction,
+        setting: app_commands.Choice[str] | None = None,
+    ) -> None:
+        await interaction.response.send_message(
+            await self.ingame_pms_reply(
+                interaction.user, None if setting is None else setting.value
+            ),
+            ephemeral=True,
+        )
+
+    async def ingame_pms_reply(
+        self, user: discord.abc.User, setting: str | None
+    ) -> str:
+        """Show or change the in-game PM preference; the preference lives on
+        the member's MissionChief id, so a verified link is required."""
+        link = await LinksRepo(self.bot.db).get_by_discord(user.id)
+        if link is None or link["status"] != "approved":
+            return (
+                "You need a verified account first (`!verify`) — the setting "
+                "is stored on your MissionChief account."
+            )
+        prefs = MemberPrefsRepo(self.bot.db)
+        mc_user_id = int(link["mc_user_id"])
+        if setting is None:
+            enabled = await prefs.ingame_pms_enabled(mc_user_id)
+        else:
+            enabled = setting == "on"
+            await prefs.set_ingame_pms(mc_user_id, enabled)
+            await self.bot.log_member_action(
+                action="profile_updated",
+                detail=f"in-game PMs {'on' if enabled else 'off'}",
+                discord_user_id=user.id,
+                mc_user_id=mc_user_id,
+                actor_name=getattr(user, "display_name", str(user)),
+            )
+        if enabled:
+            return (
+                "📬 In-game PMs are **on**: the bot messages you in "
+                "MissionChief when your training, event or building request "
+                "is handled. Turn them off with `/ingame-pms off`."
+            )
+        return (
+            "📭 In-game PMs are **off**: the bot sends you no in-game "
+            "messages about your requests (board replies and Discord DMs "
+            "still come). Alliance-donation warnings are always sent. Turn "
+            "them back on with `/ingame-pms on`."
         )
 
 

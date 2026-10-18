@@ -303,6 +303,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra missionpanel` | Force-repost the mission panel (panels also place/refresh themselves automatically) |
 | `!fra requestpanel` | Force-repost the training/building request panel |
 | `!fra classpanel` | Force-repost the class-availability panel with fresh numbers |
+| `!fra classes <count> <course>` | Override: open `<count>` classes of one course right away (no cap of 4, no queue); stops when the classrooms run out and reports how many opened |
 | `!fra dmpanel` | Force-repost the message panel (configured channel, else the current one) |
 | `!fra rankroles [sync\|dryrun]` | Credit rank roles: status, run a sync now, or preview without changes |
 | `!membersync` | MemberSync health: link count, retry queue, verified-role config |
@@ -394,6 +395,14 @@ copy-paste template. A bare **/mission** shows the same two-way menu;
 Discord DM; if DMs are closed the bot sends an in-game PM instead
 (mirrored into the DM forum) — it never mentions the member in the
 request channel.
+
+**In-game PMs are optional.** A verified member turns them off with
+`/ingame-pms off` (back on with `/ingame-pms on`; no argument shows the
+current setting). The preference sits on the MissionChief account, so it
+also covers board requests: no "training/event/building started" PMs, no
+closed-DM fallback PMs and no in-game reminder fallback. Alliance-donation
+warnings and removal notices are always sent. Recurring event/mission
+requests never send a PM — not on the first start either.
 
 ### Missions & events
 

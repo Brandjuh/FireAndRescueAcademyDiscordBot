@@ -964,6 +964,9 @@ class BuildingsService(BoardRequestService):
 
         if not requester:
             return
+        if not await self.prefs.ingame_pms_enabled_for_name(requester):
+            log.info("building: %s opted out of in-game PMs — no PM", requester)
+            return
         emoji = _TYPE_EMOJI.get(building_type, "🏢")
         lines = [
             "Your building request has been APPROVED.",

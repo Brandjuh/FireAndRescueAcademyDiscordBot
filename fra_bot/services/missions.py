@@ -37,6 +37,7 @@ from ..db.database import Database, utcnow_iso
 from ..db.repos import (
     BoardDeletionRepo,
     EventPingsRepo,
+    MemberPrefsRepo,
     MembersRepo,
     MissionsRepo,
     RotationRepo,
@@ -256,6 +257,7 @@ class MissionScheduler:
         self.rotation = RotationRepo(db)
         self.event_pings = EventPingsRepo(db)
         self.members = MembersRepo(db)
+        self.prefs = MemberPrefsRepo(db)
         self.runs = RunsRepo(db)
         self.state = StateRepo(db)
         self.deletions = BoardDeletionRepo(db)
@@ -1098,7 +1100,8 @@ class MissionScheduler:
         # recurring request keeps starting — from the rotation, several
         # times a day, forever — and the requester would get a private
         # message every single time. They asked for it to keep coming
-        # back; they did not ask to be told each time it does.
+        # back; they did not ask to be told each time it does — not even
+        # the first time (the board reply and the Discord ping cover it).
         recurring = bool(mission["recurring"] or mission["rotation_id"])
         if mission["source"] == "board" and not self.dry_run and not recurring:
             await self._notify_ingame_started(
@@ -1114,6 +1117,9 @@ class MissionScheduler:
         from ..mc.messages import send_ingame_message
 
         if not requester or requester == "member":
+            return
+        if not await self.prefs.ingame_pms_enabled_for_name(requester):
+            log.info("mission: %s opted out of in-game PMs — no PM", requester)
             return
         try:
             await send_ingame_message(

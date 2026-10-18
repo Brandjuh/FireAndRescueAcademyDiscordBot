@@ -124,7 +124,12 @@ async def test_backfill_note_clears_when_done(client):
     assert "Expense backfill in progress" not in text
 
 
-async def test_income_panels_reuse_report_builders(client):
+async def test_income_panels_reuse_report_builders(client, monkeypatch):
+    # Outside the post-reset grace window, whatever the wall clock says:
+    # in the first hours after 00:00 UTC "today" deliberately shows the
+    # finished day.
+    monkeypatch.setattr("fra_bot.reporting.reports._just_after_reset",
+                        lambda game_now: False)
     text = await (await client.get("/finance")).text()
     day_key, month_key = game_period_keys()
     assert f"Daily top contributors ({day_key})" in text

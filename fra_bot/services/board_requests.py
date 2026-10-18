@@ -35,6 +35,7 @@ from ..db.repos import (
     AutomationRepo,
     BoardDeletionRepo,
     BoardRepo,
+    MemberPrefsRepo,
     MembersRepo,
     RunsRepo,
     StateRepo,
@@ -84,6 +85,7 @@ class BoardRequestService:
         self.board_repo = BoardRepo(db)
         self.requests = AutomationRepo(db)
         self.members = MembersRepo(db)
+        self.prefs = MemberPrefsRepo(db)
         self.runs = RunsRepo(db)
         self.state = StateRepo(db)
         self.deletions = BoardDeletionRepo(db)

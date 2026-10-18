@@ -186,7 +186,12 @@ async def test_member_outlook_projects_the_roster(db):
     assert grow and "grow" in grow[0]
 
 
-async def test_admin_extras_and_action_items(db):
+async def test_admin_extras_and_action_items(db, monkeypatch):
+    # Outside the post-reset grace window, whatever the wall clock says:
+    # in the first hours after 00:00 UTC "today" deliberately shows the
+    # finished day.
+    monkeypatch.setattr("fra_bot.reporting.reports._just_after_reset",
+                        lambda game_now: False)
     # Sanctions stamp created_at with the real clock, so this test runs
     # on a real "today" period instead of the frozen NOW.
     await _member(db, 1, "Alice", rate=2.0)   # below the 5% minimum
