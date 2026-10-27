@@ -1510,3 +1510,121 @@ async def test_open_training_full_academy_is_busy_not_broken(db):
     outcome = await svc._open_training(match)
     assert outcome["status"] == "busy"
     assert "no free classroom" in outcome["reason"]
+
+
+# -- unlimited requesters: the `!fra classes` override on the board ----------
+
+
+async def test_unlimited_requester_board_count_is_not_capped(db):
+    """A requester on automation.training.unlimited_requesters keeps the
+    copy count they typed and the row is marked as an override; everyone
+    else stays capped at MAX_CLASSES_PER_REQUEST."""
+    svc, _ = _service(db, dry_run=True)
+    svc._auto.unlimited_requesters = frozenset({42})
+
+    req = await svc.parse_request(BoardPost(1, "Alice", 42, "t", "x10 HazMat"))
+    payload = json.loads(req["payload"])
+    assert payload["trainings"][0]["count"] == 10
+    assert payload["override"] is True
+
+    req = await svc.parse_request(BoardPost(2, "Bob", 7, "t", "x10 HazMat"))
+    payload = json.loads(req["payload"])
+    assert payload["trainings"][0]["count"] == 4
+    assert "override" not in payload
+
+
+async def test_override_row_opens_past_the_cap(db):
+    svc, client = _service(db, dry_run=True)
+    rid = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=3,
+        requester_name="Alice", requester_mc_id=42,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat",
+                           "duration": 3, "count": 7}],
+            "ambiguous": [], "override": True,
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+
+    row = await svc.requests.get(rid)
+    assert row["status"] == "done"
+    results = json.loads(row["payload"])["results"]
+    assert [r["outcome"] for r in results] == ["opened"] * 7
+
+
+async def test_override_row_stops_when_rooms_run_out_without_queueing(db):
+    """Like `!fra classes`: one free room for x3 opens one class, then
+    stops and reports '1 of 3' — no pending_trainings, no retry."""
+    one_room = ACADEMY_PAGE.replace("<option value='2'>2</option>", "")
+    no_rooms = one_room.replace("<option value='1'>1</option>", "")
+    svc, client = _service(db, dry_run=False)
+    calls = {"n": 0}
+    orig_fetch = client.fetch_page
+
+    async def fetch(path, *, referer=None):
+        if path == "/buildings/4951748":
+            calls["n"] += 1
+            return one_room if calls["n"] == 1 else no_rooms
+        return await orig_fetch(path, referer=referer)
+
+    client.fetch_page = fetch
+    replies = []
+
+    async def reply_for(request, content):
+        replies.append(content)
+
+    async def no_pm(requester, opened):
+        return None
+
+    svc.reply_for = reply_for
+    svc._notify_ingame = no_pm
+    rid = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=4,
+        requester_name="Alice", requester_mc_id=42,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat",
+                           "duration": 3, "count": 3}],
+            "ambiguous": [], "override": True,
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+
+    assert len(client.posts) == 1
+    row = await svc.requests.get(rid)
+    assert row["status"] == "done"
+    assert "pending_trainings" not in json.loads(row["payload"])
+    assert "HazMat: opened 1 of 3" in replies[-1]
+
+
+async def test_override_row_with_no_free_room_fails_instead_of_waiting(db):
+    no_rooms = (
+        ACADEMY_PAGE.replace("<option value='2'>2</option>", "")
+        .replace("<option value='1'>1</option>", "")
+    )
+    svc, client = _service(db, dry_run=False)
+    client.pages["/buildings/4951748"] = no_rooms
+    rid = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=5,
+        requester_name="Alice", requester_mc_id=42,
+        payload=json.dumps({
+            "trainings": [{"discipline": "fire", "name": "HazMat",
+                           "duration": 3, "count": 5}],
+            "ambiguous": [], "override": True,
+        }),
+    )
+    await svc.requests.claim(rid)
+    await svc.execute_request(await svc.requests.get(rid), announce=True)
+
+    assert client.posts == []
+    assert (await svc.requests.get(rid))["status"] == "failed"
+
+
+async def test_match_trainings_max_count_none_lifts_the_cap():
+    from fra_bot.mc.trainings_catalog import match_trainings
+
+    (capped,), _ = match_trainings("x12 HazMat")
+    (free,), _ = match_trainings("x12 HazMat", max_count=None)
+    assert capped.count == 4
+    assert free.count == 12

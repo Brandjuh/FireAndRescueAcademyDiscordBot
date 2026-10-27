@@ -154,6 +154,10 @@ class TrainingAutomationConfig:
     #: default: a mistyped course used to disappear without a word. Turn
     #: it off if the topic gets chatty enough for the hint to be noise.
     hint_when_unmatched: bool = True
+    #: MC user ids whose BOARD requests get the `!fra classes` override:
+    #: any copy count ("x10 HazMat"), no cap of 4, no retry queue — it
+    #: opens until the classrooms run out and reports how many fit.
+    unlimited_requesters: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -692,6 +696,13 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 hint_when_unmatched=bool(
                     _get(raw, "automation", "training", "hint_when_unmatched",
                          default=True)
+                ),
+                unlimited_requesters=frozenset(
+                    int(v) for v in (
+                        _get(raw, "automation", "training",
+                             "unlimited_requesters", default=[])
+                        or []
+                    )
                 ),
             ),
             building=BuildingAutomationConfig(
