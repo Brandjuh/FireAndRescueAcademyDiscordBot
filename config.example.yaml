@@ -204,6 +204,10 @@ automation:
     # mistyped course used to vanish without a word. Set to false if the
     # topic gets chatty enough for the hint to become noise.
     hint_when_unmatched: true
+    # MC user ids whose board requests may open ANY number of classes of a
+    # course ("x10 HazMat") — the `!fra classes` override: no cap of 4, no
+    # retry queue; it opens until the classrooms run out and says how many.
+    unlimited_requesters: []
     # OPTIONAL. The bot already finds every academy of the right discipline
     # from the alliance building list and, if one has no free classroom, moves
     # on to the next — you do NOT need to list academies here. This is only a

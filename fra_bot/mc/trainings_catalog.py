@@ -316,32 +316,39 @@ _COUNT_SUFFIX_RE = re.compile(r"\s+[x×]\s*(\d+)\s*$", re.IGNORECASE)
 _MAX_COUNT = 4
 
 
-def _clamp_count(raw: str) -> int:
-    return max(1, min(_MAX_COUNT, int(raw)))
+def _clamp_count(raw, max_count: int | None = _MAX_COUNT) -> int:
+    """``max_count=None`` lifts the cap (the unlimited-requester override)."""
+    count = max(1, int(raw))
+    return count if max_count is None else min(max_count, count)
 
 
-def _extract_count(chunk: str) -> tuple[str, int]:
+def _extract_count(
+    chunk: str, max_count: int | None = _MAX_COUNT
+) -> tuple[str, int]:
     """Split a copy count off a chunk: "3x HazMat" / "x3 HazMat" /
     "HazMat x3" → 3. A bare leading number ("3 HazMat") is deliberately
     NOT a count: course text carries stray numbers too."""
     match = _COUNT_PREFIX_RE.match(chunk)
     if match:
-        return chunk[match.end():], _clamp_count(match.group(1) or match.group(2))
+        return chunk[match.end():], _clamp_count(
+            match.group(1) or match.group(2), max_count
+        )
     match = _COUNT_SUFFIX_RE.search(chunk)
     if match:
-        return chunk[: match.start()], _clamp_count(match.group(1))
+        return chunk[: match.start()], _clamp_count(match.group(1), max_count)
     return chunk, 1
 
 
 def match_trainings(
-    text: str, catalog=None
+    text: str, catalog=None, *, max_count: int | None = _MAX_COUNT
 ) -> tuple[list[TrainingMatch], list[AmbiguousMatch]]:
     """Extract training requests from free-form board text.
 
     ``catalog`` (discipline → {name: days}) overrides the built-in list —
     the trainings service passes the live-harvested academy courses, so a
     course the game added yesterday matches exactly instead of fuzzing
-    onto the nearest stale name.
+    onto the nearest stale name. ``max_count=None`` lifts the per-course
+    copy cap (for ``automation.training.unlimited_requesters``).
     """
     catalog = catalog or DISCIPLINES
     ambiguous = ambiguous_names(catalog)
@@ -354,7 +361,7 @@ def match_trainings(
         if not raw_chunk:
             continue
         forced_discipline, remainder = _detect_prefix(raw_chunk)
-        remainder, count = _extract_count(remainder)
+        remainder, count = _extract_count(remainder, max_count)
         normalized_chunk = _normalize(remainder)
         if not normalized_chunk:
             continue
@@ -390,7 +397,7 @@ def match_trainings(
                 existing = matches.get((discipline, name))
                 chunk_count = count
                 if existing is not None:
-                    chunk_count = min(_MAX_COUNT, existing.count + count)
+                    chunk_count = _clamp_count(existing.count + count, max_count)
                 matches[(discipline, name)] = TrainingMatch(
                     discipline=discipline, name=name, duration_days=days,
                     count=chunk_count,
@@ -483,7 +490,7 @@ def match_trainings(
                     continue
             existing = matches.get((discipline, name))
             if existing is not None:
-                count = min(_MAX_COUNT, existing.count + count)
+                count = _clamp_count(existing.count + count, max_count)
             matches[(discipline, name)] = TrainingMatch(
                 discipline=discipline, name=name, duration_days=days,
                 count=count,

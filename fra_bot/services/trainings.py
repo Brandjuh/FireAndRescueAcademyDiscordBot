@@ -67,6 +67,14 @@ def clamp_class_count(value) -> int:
     except (TypeError, ValueError):
         return 1
 
+
+def _override_count(value) -> int:
+    """An override row's copy count: at least 1, no upper cap."""
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
 GUIDE_MARKER = "[FRA] 📋 How to request a TRAINING"
 
 #: State key holding the last availability walk: {"counts": {...}, "at": epoch}.
@@ -659,24 +667,33 @@ class TrainingsService(BoardRequestService):
         # pages) — the built-in list goes stale as the game adds courses,
         # and a missing name used to fuzz onto the nearest wrong one.
         catalog = await merged_course_catalog(self.state)
-        matches, ambiguous = match_trainings(post.content, catalog)
+        unlimited = self._is_unlimited(post.author_mc_id)
+        matches, ambiguous = match_trainings(
+            post.content, catalog,
+            max_count=None if unlimited else MAX_CLASSES_PER_REQUEST,
+        )
         if not matches and not ambiguous:
             return None  # chatter, not a training request
-        return self.request_data(
-            post,
-            {
-                "trainings": [
-                    {
-                        "discipline": m.discipline, "name": m.name,
-                        "duration": m.duration_days, "count": m.count,
-                    }
-                    for m in matches
-                ],
-                "ambiguous": [
-                    {"name": a.name, "disciplines": list(a.disciplines)} for a in ambiguous
-                ],
-            },
-        )
+        payload = {
+            "trainings": [
+                {
+                    "discipline": m.discipline, "name": m.name,
+                    "duration": m.duration_days, "count": m.count,
+                }
+                for m in matches
+            ],
+            "ambiguous": [
+                {"name": a.name, "disciplines": list(a.disciplines)} for a in ambiguous
+            ],
+        }
+        if unlimited:
+            payload["override"] = True
+        return self.request_data(post, payload)
+
+    def _is_unlimited(self, mc_user_id: int | None) -> bool:
+        """Is this requester on ``automation.training.unlimited_requesters``?"""
+        allowed = getattr(self._auto, "unlimited_requesters", ()) or ()
+        return mc_user_id is not None and int(mc_user_id) in allowed
 
     async def _on_unmatched_post(self, post: BoardPost) -> None:
         """Answer a post in which NO course name was recognized.
@@ -723,13 +740,17 @@ class TrainingsService(BoardRequestService):
             ]
             ambiguous: list[AmbiguousMatch] = []
         else:
+            # An override row (unlimited requester) keeps its count as-is.
+            count_of = (
+                _override_count if payload.get("override") else clamp_class_count
+            )
             match_counts = [
                 (
                     TrainingMatch(
                         discipline=t["discipline"], name=t["name"],
                         duration_days=t.get("duration", 0),
                     ),
-                    clamp_class_count(t.get("count", 1)),
+                    count_of(t.get("count", 1)),
                 )
                 for t in payload.get("trainings", [])
             ]
@@ -810,6 +831,7 @@ class TrainingsService(BoardRequestService):
         opened_any = False
 
         ambiguous_reasons = [self._ambiguity_help(a) for a in ambiguous]
+        override = bool(payload.get("override"))
 
         # A class that had to WAIT for a free classroom (this request was
         # already retried at least once) is opened for 12h so the members who
@@ -856,7 +878,18 @@ class TrainingsService(BoardRequestService):
                         "confirmed — please double-check."
                     )
                     continue
-                if outcome["status"] == "busy":
+                if outcome["status"] == "busy" and override:
+                    # The `!fra classes` override: no queue — stop here and
+                    # say how many of the wanted copies fit.
+                    done = want - remaining
+                    could_not.append(
+                        f"- {match.name}: opened {done} of {want} — no free "
+                        "classroom left for the rest."
+                        if done else
+                        f"- {match.name}: "
+                        f"{_friendly_failure(match.discipline, outcome['reason'])}"
+                    )
+                elif outcome["status"] == "busy":
                     # Classrooms exhausted mid-way: park the copies still
                     # wanted and retry them at the next pass.
                     pending.append({

@@ -303,7 +303,7 @@ Requires Discord administrator permission or a role listed in
 | `!fra missionpanel` | Force-repost the mission panel (panels also place/refresh themselves automatically) |
 | `!fra requestpanel` | Force-repost the training/building request panel |
 | `!fra classpanel` | Force-repost the class-availability panel with fresh numbers |
-| `!fra classes <count> <course>` | Override: open `<count>` classes of one course right away (no cap of 4, no queue); stops when the classrooms run out and reports how many opened |
+| `!fra classes <count> <course>` | Override: open `<count>` classes of one course right away (no cap of 4, no queue); stops when the classrooms run out and reports how many opened. MC users listed in `automation.training.unlimited_requesters` get the same override from the training board: post e.g. `x10 HazMat` |
 | `!fra dmpanel` | Force-repost the message panel (configured channel, else the current one) |
 | `!fra rankroles [sync\|dryrun]` | Credit rank roles: status, run a sync now, or preview without changes |
 | `!membersync` | MemberSync health: link count, retry queue, verified-role config |
