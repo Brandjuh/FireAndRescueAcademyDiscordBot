@@ -50,6 +50,8 @@ DISCIPLINES: dict[str, dict[str, int]] = {
         "Wildland Mobile Command Center Training": 5,
     },
     "police": {
+        "Crime Scene Investigation Training": 5,
+        "Detective Training": 5,
         "Drone Operator": 5,
         "Environmental Game Warden": 4,
         "FBI Bomb Technician": 5,
@@ -186,6 +188,8 @@ TRAINING_CODES: tuple[tuple[str, str, str], ...] = (
     ("fire", "Truck Driver's License", "TDLF"),
     ("fire", "Wildland Lead Pilot Training", "WLP"),
     ("fire", "Wildland Mobile Command Center Training", "WMC"),
+    ("police", "Crime Scene Investigation Training", "CSI"),
+    ("police", "Detective Training", "DET"),
     ("police", "Drone Operator", "DRONE"),
     ("police", "Environmental Game Warden", "EGW"),
     ("police", "FBI Bomb Technician", "BOMB"),

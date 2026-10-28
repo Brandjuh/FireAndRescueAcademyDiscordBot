@@ -190,6 +190,21 @@ def test_copied_guide_line_counts_once():
     assert [(m.name, m.count) for m in matches] == [("HazMat", 2)]
 
 
+def test_detective_and_csi_courses_match_by_name_and_code():
+    for text in ("Detective Training", "detective", "DET"):
+        matches, ambiguous = match_trainings(text)
+        assert not ambiguous
+        assert [(m.discipline, m.name) for m in matches] == [
+            ("police", "Detective Training")
+        ], text
+    for text in ("Crime Scene Investigation Training", "crime scene investigation", "CSI"):
+        matches, ambiguous = match_trainings(text)
+        assert not ambiguous
+        assert [(m.discipline, m.name) for m in matches] == [
+            ("police", "Crime Scene Investigation Training")
+        ], text
+
+
 def test_codes_and_names_mix_across_chunks():
     matches, _ = match_trainings("HAZ and SWAT")
     assert {(m.discipline, m.name) for m in matches} == {
