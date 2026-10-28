@@ -1628,3 +1628,104 @@ async def test_match_trainings_max_count_none_lifts_the_cap():
     (free,), _ = match_trainings("x12 HazMat", max_count=None)
     assert capped.count == 4
     assert free.count == 12
+
+
+async def test_harvested_course_gets_a_stable_auto_code(db):
+    """A course the game added is matched by its generated code and shown
+    with it in the guide; the code never changes on later walks."""
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.trainings import (
+        _discipline_guide,
+        merged_course_catalog,
+        merged_course_codes,
+    )
+
+    svc, client = _service(db, dry_run=True)
+    client.pages["/buildings/4951748"] = RICH_ACADEMY_PAGE
+    await svc._collect_availability()
+    codes = await merged_course_codes(StateRepo(db))
+    assert codes["BNF"] == ("fire", "Brand New Course")
+    assert codes["FFF"] == ("fire", "Foam Firefighting Training")
+    # Courses with a static code never get a second one.
+    assert ("fire", "HazMat") not in codes.values()
+
+    await svc._collect_availability()
+    assert await merged_course_codes(StateRepo(db)) == codes
+
+    request = await svc.parse_request(BoardPost(
+        post_id=1, author_name="Alice", author_mc_id=42,
+        raw_timestamp="", content="2x bnf",
+    ))
+    payload = json.loads(request["payload"])
+    assert payload["trainings"] == [{
+        "discipline": "fire", "name": "Brand New Course",
+        "duration": 0, "count": 2,
+    }]
+
+    catalog = await merged_course_catalog(StateRepo(db))
+    guide = _discipline_guide("fire", catalog, codes)
+    assert "- [BNF] Brand New Course" in guide
+    assert "- [HAZ] HazMat (3 days)" in guide
+
+
+async def test_unknown_academy_type_lands_under_other(db):
+    """A building type the bot doesn't know that turns out to have an
+    education form is an academy: its courses go under "other", in the
+    catalog, the codes and the guide sections. The type is probed once."""
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.trainings import (
+        merged_course_catalog,
+        merged_course_codes,
+    )
+
+    svc, _ = _service(db, dry_run=True)
+    api = json.dumps([
+        {"id": 900, "building_type": 77, "latitude": 1.0, "longitude": 2.0},
+        {"id": 901, "building_type": 88, "latitude": 1.0, "longitude": 2.0},
+    ])
+    page = (
+        "<form action='/buildings/900/education' method='post'>"
+        "<input type='hidden' name='authenticity_token' value='tok'/>"
+        "<select name='building_rooms_use'><option value='1'>1</option>"
+        "<option value='2'>2</option></select>"
+        "<select name='alliance[cost]'><option value='0'>Free</option></select>"
+        "<select name='education_select'>"
+        "<option value='5'>Space Rescue (4 days)</option></select>"
+        "</form>"
+    )
+    fetched = []
+
+    class CountingClient(FakeClient):
+        async def fetch_page(self, path, *, referer=None):
+            fetched.append(path)
+            return await super().fetch_page(path, referer=referer)
+
+    svc.client = CountingClient({
+        "/api/buildings": api, "/buildings/900": page,
+        "/buildings/901": "<html>a hospital-ish page</html>",
+    })
+    counts = await svc._collect_availability()
+    assert counts["other"] == 2
+
+    catalog = await merged_course_catalog(StateRepo(db))
+    assert catalog["other"] == {"Space Rescue": 4}
+    assert (await merged_course_codes(StateRepo(db)))["SRO"] == (
+        "other", "Space Rescue"
+    )
+    assert "[FRA] 📋 Other training request text" in (
+        await svc._guide_markers_in_order()
+    )
+
+    academies = await svc._find_academies("other")
+    assert [a.building_id for a in academies] == [900]
+    # The verdicts are cached: the second lookup probed nothing again.
+    assert fetched.count("/buildings/901") == 1
+
+
+async def test_no_other_section_without_other_courses(db):
+    from fra_bot.db.repos import StateRepo
+    from fra_bot.services.trainings import merged_course_catalog
+
+    svc, _ = _service(db, dry_run=True)
+    assert "other" not in await merged_course_catalog(StateRepo(db))
+    assert len(await svc._guide_markers_in_order()) == 5

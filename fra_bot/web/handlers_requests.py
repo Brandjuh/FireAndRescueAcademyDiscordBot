@@ -58,6 +58,8 @@ _STATUS_BADGE = {"done": "ok", "failed": "off"}
 _DISCIPLINES = (
     ("fire", "Fire"), ("police", "Police"),
     ("ems", "EMS"), ("coastal", "Water Rescue"),
+    # Unknown academy types; the optgroup only renders once it has courses.
+    ("other", "Other"),
 )
 
 

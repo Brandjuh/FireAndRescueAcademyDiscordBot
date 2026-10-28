@@ -72,7 +72,10 @@ _DISCIPLINE_CHOICES = (
     ("ems", "🚑 EMS"),
     ("coastal", "🌊 Water Rescue"),
 )
-_DISCIPLINE_LABEL = dict(_DISCIPLINE_CHOICES)
+#: Academies of a building type the bot doesn't know yet; offered only
+#: once the live catalog actually holds courses for it.
+_OTHER_CHOICE = ("other", "📦 Other")
+_DISCIPLINE_LABEL = dict((*_DISCIPLINE_CHOICES, _OTHER_CHOICE))
 
 
 async def _send(interaction: discord.Interaction, content: str) -> None:
@@ -91,7 +94,7 @@ class TrainingChooserView(discord.ui.View):
     #: Courses per select page; the 25th slot is the page-flip option.
     PAGE_SIZE = 24
 
-    def __init__(self, cog: "RequestsCog") -> None:
+    def __init__(self, cog: "RequestsCog", *, show_other: bool = False) -> None:
         super().__init__(timeout=300)
         self._cog = cog
         self.discipline: str | None = None
@@ -105,7 +108,10 @@ class TrainingChooserView(discord.ui.View):
             placeholder="1️⃣ Pick the academy type",
             options=[
                 discord.SelectOption(label=label, value=key)
-                for key, label in _DISCIPLINE_CHOICES
+                for key, label in (
+                    (*_DISCIPLINE_CHOICES, _OTHER_CHOICE) if show_other
+                    else _DISCIPLINE_CHOICES
+                )
             ],
             row=0,
         )
@@ -757,9 +763,9 @@ class RequestsCog(commands.Cog):
         line = await self._availability_line()
         if line:
             text = f"{line}\n\n{text}"
-        await interaction.response.send_message(
-            text, view=TrainingChooserView(self), ephemeral=True,
-        )
+        catalog = await merged_course_catalog(StateRepo(self.bot.db))
+        view = TrainingChooserView(self, show_other=bool(catalog.get("other")))
+        await interaction.response.send_message(text, view=view, ephemeral=True)
 
     async def courses_for(self, discipline: str) -> list[tuple[str, int]]:
         """(name, days) choices for the course select: the live-harvested

@@ -1085,14 +1085,20 @@ class AdminCog(commands.Cog):
         of 4, no queue. Stops when the classrooms run out and reports how
         many were opened. Example: !fra classes 10 Coastal - Ocean Navigation"""
         from ..mc.trainings_catalog import match_trainings
-        from ..services.trainings import merged_course_catalog
+        from ..services.trainings import (
+            merged_course_catalog,
+            merged_course_codes,
+        )
 
         if count < 1:
             await ctx.send("Count must be at least 1.")
             return
         service = self.bot.trainings
         catalog = await merged_course_catalog(service.state)
-        matches, ambiguous = match_trainings(course, catalog)
+        matches, ambiguous = match_trainings(
+            course, catalog,
+            extra_codes=await merged_course_codes(service.state),
+        )
         if ambiguous or len(matches) != 1:
             hint = ""
             if ambiguous:

@@ -590,3 +590,29 @@ def test_parse_full_academy_is_zero_rooms_not_unreadable():
     assert parse_academy_page("<h1>Prison</h1>").all_full is False
     # With a form the notice is irrelevant.
     assert parse_academy_page(ACADEMY_PAGE_HTML).all_full is False
+
+
+def test_generated_codes_avoid_codes_and_name_words():
+    from fra_bot.mc.trainings_catalog import (
+        DISCIPLINES,
+        generate_course_code,
+        static_code_words,
+    )
+
+    taken = static_code_words(DISCIPLINES)
+    assert generate_course_code("police", "Detective Training", taken) == "DETEC"
+    assert generate_course_code("other", "Space Rescue", taken) == "SRO"
+    # "Critical Care" initials are taken (CCF/CCE) only per academy;
+    # a plain CC is short, so the academy letter is added.
+    assert generate_course_code("fire", "Crowd Control", taken) == "CCF2"
+    # A word of a course name is never handed out as a code.
+    assert generate_course_code("fire", "Hazmatic", {"hazma"}) == "HAZMAF"
+
+
+def test_extra_codes_resolve_but_never_override_static_codes():
+    catalog = {"fire": {"HazMat": 3, "Brand New Course": 2}}
+    extra = {"BNC": ("fire", "Brand New Course"), "HAZ": ("fire", "Brand New Course")}
+    matches, _ = match_trainings("BNC", catalog, extra_codes=extra)
+    assert [(m.name, m.duration_days) for m in matches] == [("Brand New Course", 2)]
+    matches, _ = match_trainings("HAZ", catalog, extra_codes=extra)
+    assert [m.name for m in matches] == ["HazMat"]
