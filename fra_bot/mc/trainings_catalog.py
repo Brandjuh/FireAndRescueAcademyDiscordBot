@@ -101,6 +101,7 @@ DISCIPLINE_PREFIXES: dict[str, str] = {
     "ems / rescue": "ems",
     "water rescue": "coastal",
     "coastal": "coastal",
+    "other": "other",
 }
 
 MATCH_THRESHOLD = 0.78
@@ -234,15 +235,73 @@ def _build_code_lookup() -> dict[str, tuple[str, str]]:
 _CODE_LOOKUP = _build_code_lookup()
 
 
-def course_code(discipline: str, name: str) -> str | None:
+def course_code(
+    discipline: str, name: str, extra_codes=None
+) -> str | None:
     """The board shorthand for one course, for the guide renderer.
     Normalized name comparison, so a live-harvested spelling that only
-    differs in casing still finds its code."""
+    differs in casing still finds its code. ``extra_codes`` (code →
+    (discipline, name)) are the auto-assigned codes of harvested courses."""
     key = _normalize(name)
     for code_discipline, code_name, code in TRAINING_CODES:
         if code_discipline == discipline and _normalize(code_name) == key:
             return code
+    for code, (code_discipline, code_name) in (extra_codes or {}).items():
+        if code_discipline == discipline and _normalize(code_name) == key:
+            return code
     return None
+
+
+#: Words that carry no meaning in a generated code's initials.
+_CODE_FILLER_WORDS = {"and", "of", "for", "the", "a", "an"}
+_CODE_SUFFIX_WORDS = {"training", "course", "certificate", "certification"}
+#: Academy letter appended when a generated code is taken (cf. CCF/CCE).
+_CODE_ACADEMY_LETTER = {
+    "fire": "F", "police": "P", "ems": "E", "coastal": "C", "other": "O",
+}
+
+
+def generate_course_code(discipline: str, name: str, taken) -> str:
+    """A fresh board code for a course the game added after
+    :data:`TRAINING_CODES` was written: the initials of a multi-word name
+    ("Crime Scene Investigation Training" → CSI) or the first five letters
+    of a single word ("Detective" → DETEC), at least three characters.
+    ``taken`` holds every code already in use AND every word of every
+    course name — a code that equals a name word would hijack name
+    matching, because codes win per chunk. On a clash the academy letter
+    and then a digit are appended. The caller persists the result: codes
+    are stable, so this runs once per course, never per render."""
+    taken = {_normalize(t) for t in taken}
+    words = [w for w in _normalize(name).split() if w not in _CODE_FILLER_WORDS]
+    while len(words) > 1 and words[-1] in _CODE_SUFFIX_WORDS:
+        words.pop()
+    if not words:
+        words = ["course"]
+    if len(words) > 1:
+        base = "".join(w[0] for w in words)
+    else:
+        base = words[0][:5]
+    letter = _CODE_ACADEMY_LETTER.get(discipline, "O").lower()
+    if len(base) < 3:
+        base += letter
+    candidates = [base, base + letter] if not base.endswith(letter) else [base]
+    for candidate in candidates:
+        if len(candidate) >= 3 and candidate not in taken:
+            return candidate.upper()
+    n = 2
+    while f"{candidates[-1]}{n}" in taken:
+        n += 1
+    return f"{candidates[-1]}{n}".upper()
+
+
+def static_code_words(catalog) -> set[str]:
+    """Everything a generated code must not collide with: the static
+    codes plus every word of every course name in ``catalog``."""
+    out = {_normalize(code) for _, _, code in TRAINING_CODES}
+    for trainings in catalog.values():
+        for name in trainings:
+            out.update(_normalize(name).split())
+    return out
 
 
 def _strip_suffixes(variant: str) -> list[str]:
@@ -344,7 +403,11 @@ def _extract_count(
 
 
 def match_trainings(
-    text: str, catalog=None, *, max_count: int | None = _MAX_COUNT
+    text: str,
+    catalog=None,
+    *,
+    max_count: int | None = _MAX_COUNT,
+    extra_codes=None,
 ) -> tuple[list[TrainingMatch], list[AmbiguousMatch]]:
     """Extract training requests from free-form board text.
 
@@ -353,8 +416,15 @@ def match_trainings(
     course the game added yesterday matches exactly instead of fuzzing
     onto the nearest stale name. ``max_count=None`` lifts the per-course
     copy cap (for ``automation.training.unlimited_requesters``).
+    ``extra_codes`` (code → (discipline, name)) adds the auto-assigned
+    codes of harvested courses; a static code always wins.
     """
     catalog = catalog or DISCIPLINES
+    code_lookup = {
+        _normalize(code): tuple(target)
+        for code, target in (extra_codes or {}).items()
+    }
+    code_lookup.update(_CODE_LOOKUP)
     ambiguous = ambiguous_names(catalog)
     matches: dict[tuple[str, str], TrainingMatch] = {}
     ambiguities: dict[str, AmbiguousMatch] = {}
@@ -379,7 +449,7 @@ def match_trainings(
         # (discipline, name) for the same reason.
         coded: dict[tuple[str, str], int] = {}
         for word in normalized_chunk.split():
-            resolved = _CODE_LOOKUP.get(word)
+            resolved = code_lookup.get(word)
             if resolved is None:
                 continue
             discipline, name = resolved

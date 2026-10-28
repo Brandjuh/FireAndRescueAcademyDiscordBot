@@ -35,7 +35,11 @@ from ..mc.trainings_catalog import (
     DISCIPLINES,
     AmbiguousMatch,
     TrainingMatch,
+    ambiguous_names,
+    course_code,
+    generate_course_code,
     match_trainings,
+    static_code_words,
     suggest_courses,
 )
 from .board_requests import BoardRequestService
@@ -52,6 +56,9 @@ MAX_ACADEMY_LIST_PAGES = 10
 # academies apart from stations, without depending on a scraped list-page
 # "start course" button that can render differently per academy.
 ACADEMY_TYPE_IDS = {"fire": 4, "police": 7, "ems": 19, "coastal": 24}
+#: Building types known NOT to be academies, never probed (see
+#: _probe_academy_types). Every other unknown type-id is checked once.
+KNOWN_NON_ACADEMY_TYPE_IDS = frozenset({0, 1, 2, 3, 5, 6, 9, 10})
 ALLIANCE_SIGNUP_SECONDS = 3600            # normal class: open to the alliance 1h
 ALLIANCE_SIGNUP_SECONDS_DEFERRED = 43200  # a class that had to wait: open 12h
 BOARD_FEE = 0                   # board classes are free
@@ -94,6 +101,18 @@ AVAILABILITY_STALE_SECONDS = 2 * 3600
 #: education dropdowns ARE the authoritative course list — the built-in
 #: catalog is a snapshot that goes stale as the game adds courses.
 TRAINING_COURSES_STATE_KEY = "training_courses"
+#: State key holding the board codes auto-assigned to harvested courses the
+#: static TRAINING_CODES don't know: {code: [discipline, name]}. Persisted
+#: because codes are STABLE — generating them per render could hand a code
+#: to a different course once a later addition clashes with it.
+AUTO_CODES_STATE_KEY = "training_codes_auto"
+#: State key caching which unknown building type-ids turned out to be
+#: academies: {type_id: {"academy": bool, "at": epoch}}. A new academy type
+#: the game introduces lands under "other" without a code change.
+ACADEMY_TYPE_PROBES_STATE_KEY = "training_academy_type_probes"
+#: A "not an academy" verdict is re-checked after this long — the probe
+#: page may have been unreadable (a rotted session parses as no form).
+ACADEMY_TYPE_PROBE_RECHECK_SECONDS = 7 * 24 * 3600
 
 _DAYS_SUFFIX_RE = re.compile(r"\s*\(\s*(\d+)\s*days?\s*\)\s*$", re.IGNORECASE)
 
@@ -136,38 +155,89 @@ async def merged_course_catalog(state):
     open time with a real reason — far cheaper than refusing a valid
     request on the board.
     """
-    merged = {key: dict(DISCIPLINES.get(key, {})) for key in _AGENCY_ORDER}
+    merged = {key: dict(DISCIPLINES.get(key, {})) for key in _ALL_AGENCIES}
     raw = await state.get(TRAINING_COURSES_STATE_KEY)
-    if not raw:
-        return merged
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return merged
+    data = None
+    if raw:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
     courses = data.get("courses") if isinstance(data, dict) else None
-    if not isinstance(courses, dict):
-        return merged
-    for key in _AGENCY_ORDER:
-        live = courses.get(key)
-        if not isinstance(live, dict):
-            continue
-        for name, days in live.items():
-            name, days = str(name), int(days or 0)
-            # A harvested 0 means the dropdown carried no duration; it
-            # must not erase one the catalog already knows.
-            if days or name not in merged[key]:
-                merged[key][name] = days
+    if isinstance(courses, dict):
+        for key in _ALL_AGENCIES:
+            live = courses.get(key)
+            if not isinstance(live, dict):
+                continue
+            for name, days in live.items():
+                name, days = str(name), int(days or 0)
+                # A harvested 0 means the dropdown carried no duration; it
+                # must not erase one the catalog already knows.
+                if days or name not in merged[key]:
+                    merged[key][name] = days
+    # "other" only exists once an academy of an unknown type was harvested
+    # — no empty Other choice in the forms or on the board before that.
+    if not merged[OTHER]:
+        del merged[OTHER]
     return merged
+
+
+async def merged_course_codes(state) -> dict[str, tuple[str, str]]:
+    """Auto-assigned board codes of harvested courses: code →
+    (discipline, name). Pass as ``extra_codes`` to the matcher and the
+    guide renderer; the static TRAINING_CODES are always included there."""
+    raw = await state.get(AUTO_CODES_STATE_KEY)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(code): (str(target[0]), str(target[1]))
+        for code, target in data.items()
+        if isinstance(target, (list, tuple)) and len(target) == 2
+    }
+
+
+async def assign_auto_codes(state) -> dict[str, tuple[str, str]]:
+    """Give every course in the merged catalog that has no code yet a
+    generated one, and persist it. Idempotent: an assigned code is never
+    changed or reused."""
+    catalog = await merged_course_catalog(state)
+    codes = await merged_course_codes(state)
+    taken = static_code_words(catalog) | set(codes)
+    added = False
+    for key in _ALL_AGENCIES:
+        for name in sorted(catalog.get(key, {})):
+            if course_code(key, name, codes):
+                continue
+            code = generate_course_code(key, name, taken)
+            codes[code] = (key, name)
+            taken.add(code)
+            added = True
+            log.info("training: auto-assigned board code [%s] to %s %s",
+                     code, key, name)
+    if added:
+        await state.set(AUTO_CODES_STATE_KEY, json.dumps(
+            {code: list(target) for code, target in codes.items()}
+        ))
+    return codes
 
 # Display order + labels for the per-agency guide posts (the reference bot's
 # split: one overview post + one post per academy type, so no single post
 # grows past what the forum accepts).
 _AGENCY_ORDER = ("fire", "police", "ems", "coastal")
+#: Catch-all for academies of a building type the bot doesn't know yet
+#: (see ACADEMY_TYPE_PROBES_STATE_KEY). Shown only once it has courses.
+OTHER = "other"
+_ALL_AGENCIES = (*_AGENCY_ORDER, OTHER)
 _AGENCY_TITLES = {
     "fire": "🚒 Fire Station",
     "police": "🚓 Police",
     "ems": "🚑 EMS / Rescue",
     "coastal": "🌊 Water Rescue",
+    OTHER: "📦 Other",
 }
 # Prefix used in request text for courses that exist in several academy
 # types. These resolve in the request parser (DISCIPLINE_PREFIXES).
@@ -176,20 +246,23 @@ _AGENCY_PREFIX = {
     "police": "Police",
     "ems": "EMS",
     "coastal": "Water Rescue",
+    OTHER: "Other",
 }
+
+
+def _agency_keys(present) -> tuple[str, ...]:
+    """The four fixed agencies, plus "other" when ``present`` (a catalog
+    or a counts dict) has it."""
+    return _ALL_AGENCIES if OTHER in present else _AGENCY_ORDER
 
 
 def _section_marker(key: str) -> str:
     return f"[FRA] 📋 {_AGENCY_PREFIX[key]} training request text"
 
 
-def _ambiguous_course_names() -> set[str]:
-    """Course names that exist in more than one academy type."""
-    seen: dict[str, int] = {}
-    for courses in DISCIPLINES.values():
-        for name in courses:
-            seen[name] = seen.get(name, 0) + 1
-    return {name for name, count in seen.items() if count > 1}
+def _ambiguous_course_names(catalog) -> set[str]:
+    """Normalized course names that exist in more than one academy type."""
+    return set(ambiguous_names(catalog))
 
 
 # The reference bot's "how to join" instructions, appended to every success
@@ -332,7 +405,7 @@ class TrainingsService(BoardRequestService):
         if counts is None:
             lines.append("- being refreshed — the numbers appear here shortly")
         else:
-            for key in _AGENCY_ORDER:
+            for key in _agency_keys(counts):
                 count = counts.get(key, 0)
                 unit = "class" if count == 1 else "classes"
                 lines.append(f"- {_AGENCY_TITLES[key]}: {count} {unit}")
@@ -360,9 +433,15 @@ class TrainingsService(BoardRequestService):
     def _guide_order_key(self) -> str:
         return f"board_guide_order_checked:training:{self.thread_id}"
 
-    def _guide_markers_in_order(self) -> list[str]:
-        """The five guide markers in the order they must appear on the board."""
-        return [GUIDE_MARKER] + [_section_marker(key) for key in _AGENCY_ORDER]
+    async def _guide_keys(self) -> tuple[str, ...]:
+        """Agencies with a guide section: "other" joins once it has courses."""
+        return _agency_keys(await merged_course_catalog(self.state))
+
+    async def _guide_markers_in_order(self) -> list[str]:
+        """The guide markers in the order they must appear on the board."""
+        return [GUIDE_MARKER] + [
+            _section_marker(key) for key in await self._guide_keys()
+        ]
 
     async def _maybe_repair_guide_order(self, now_epoch: float) -> None:
         """Ensure the guide posts sit in the canonical order and none is
@@ -379,7 +458,7 @@ class TrainingsService(BoardRequestService):
         if (now_epoch - last) < 3600:
             return
 
-        markers = self._guide_markers_in_order()
+        markers = await self._guide_markers_in_order()
         try:
             found = await self.board.find_bot_posts(self.thread_id, markers)
         except MissionChiefError as exc:
@@ -408,7 +487,7 @@ class TrainingsService(BoardRequestService):
             *(
                 (self._section_id_key(key), self._section_hash_key(key),
                  self._section_refreshed_key(key))
-                for key in _AGENCY_ORDER
+                for key in _ALL_AGENCIES
             ),
         ):
             await self.state.delete(id_key)
@@ -447,8 +526,10 @@ class TrainingsService(BoardRequestService):
             )
         except MissionChiefError as exc:
             log.warning("training: could not maintain guide overview: %s", exc)
-        for key in _AGENCY_ORDER:
-            text = _discipline_guide(key)
+        catalog = await merged_course_catalog(self.state)
+        codes = await merged_course_codes(self.state)
+        for key in _agency_keys(catalog):
+            text = _discipline_guide(key, catalog, codes)
             try:
                 await ensure_guide_post(
                     self.board, self.state, self.thread_id,
@@ -475,7 +556,7 @@ class TrainingsService(BoardRequestService):
             ("overview", GUIDE_MARKER, self._guide_id_key(),
              self._guide_hash_key(), self._guide_refreshed_key()),
         ]
-        for key in _AGENCY_ORDER:
+        for key in await self._guide_keys():
             sections.append((
                 key, _section_marker(key), self._section_id_key(key),
                 self._section_hash_key(key), self._section_refreshed_key(key),
@@ -535,16 +616,15 @@ class TrainingsService(BoardRequestService):
                     log.info("training availability: no academies detected — skipping")
                     return None
 
-                counts = {key: 0 for key in _AGENCY_ORDER}
+                keys = _agency_keys(academies)
+                counts = {key: 0 for key in keys}
                 # Per-discipline completeness: a discipline is only trustworthy
                 # if EVERY one of its academies' detail pages was read. A
                 # partial outage (some detail pages 429/parse-fail) would
                 # otherwise report a fresh "0" that means "unknown", not "no
                 # free classrooms" — which auto-scale must never build on.
-                complete = {key: True for key in _AGENCY_ORDER}
-                harvest: dict[str, dict[str, int]] = {
-                    key: {} for key in _AGENCY_ORDER
-                }
+                complete = {key: True for key in keys}
+                harvest: dict[str, dict[str, int]] = {key: {} for key in keys}
                 for discipline, ids in academies.items():
                     for building_id in ids:
                         try:
@@ -624,6 +704,9 @@ class TrainingsService(BoardRequestService):
             "courses": stored,
             "at": int(dt.datetime.now(dt.timezone.utc).timestamp()),
         }))
+        # A course the game just added gets its board code right away, so
+        # the guide lists it as [CODE] on the next upkeep.
+        await assign_auto_codes(self.state)
 
     async def cached_availability(self) -> dict | None:
         """The last availability walk as ``{"counts": {...}, "at": epoch}``,
@@ -671,6 +754,7 @@ class TrainingsService(BoardRequestService):
         matches, ambiguous = match_trainings(
             post.content, catalog,
             max_count=None if unlimited else MAX_CLASSES_PER_REQUEST,
+            extra_codes=await merged_course_codes(self.state),
         )
         if not matches and not ambiguous:
             return None  # chatter, not a training request
@@ -1304,6 +1388,7 @@ class TrainingsService(BoardRequestService):
         seen: set[int] = set()
         alliance_ok = False
         id_to_disc = {tid: disc for disc, tid in ACADEMY_TYPE_IDS.items()}
+        unknown: dict[int, list[int]] = {}
         for path in (API_BUILDINGS_PATH, API_ALLIANCE_BUILDINGS_PATH):
             try:
                 # No coordinate requirement: we only need id + type here,
@@ -1320,11 +1405,74 @@ class TrainingsService(BoardRequestService):
             if path == API_ALLIANCE_BUILDINGS_PATH and buildings:
                 alliance_ok = True
             for b in buildings:
+                if b.building_id is None or b.building_id in seen:
+                    continue
                 disc = id_to_disc.get(b.building_type_id)
-                if disc and b.building_id is not None and b.building_id not in seen:
+                if disc:
                     seen.add(b.building_id)
                     out[disc].append(b.building_id)
+                elif (
+                    b.building_type_id is not None
+                    and b.building_type_id not in KNOWN_NON_ACADEMY_TYPE_IDS
+                ):
+                    seen.add(b.building_id)
+                    unknown.setdefault(b.building_type_id, []).append(b.building_id)
+        academy_types = await self._probe_academy_types(unknown)
+        for type_id in sorted(academy_types):
+            out.setdefault(OTHER, []).extend(unknown[type_id])
         return out, alliance_ok
+
+    async def _probe_academy_types(
+        self, unknown: dict[int, list[int]]
+    ) -> set[int]:
+        """Which of these unknown building type-ids are academies.
+
+        The game occasionally adds a building type; when it is an academy,
+        its courses belong in the forms under "other". One building per
+        type is opened once and checked for an education form (or the
+        "classrooms are all full" notice); the verdict is cached, so steady
+        state costs no fetch at all. A "no" is re-checked weekly — the
+        probe may have hit an unreadable page."""
+        raw = await self.state.get(ACADEMY_TYPE_PROBES_STATE_KEY)
+        try:
+            probes = json.loads(raw) if raw else {}
+        except ValueError:
+            probes = {}
+        if not isinstance(probes, dict):
+            probes = {}
+        now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+        changed = False
+        academies: set[int] = set()
+        for type_id, ids in unknown.items():
+            verdict = probes.get(str(type_id))
+            if isinstance(verdict, dict) and (
+                verdict.get("academy")
+                or now - int(verdict.get("at") or 0)
+                < ACADEMY_TYPE_PROBE_RECHECK_SECONDS
+            ):
+                if verdict.get("academy"):
+                    academies.add(type_id)
+                continue
+            try:
+                page = parse_academy_page(
+                    await self.client.fetch_page(f"/buildings/{ids[0]}")
+                )
+            except MissionChiefError as exc:
+                log.debug("training: probe of building type %s failed (%s)",
+                          type_id, exc)
+                continue
+            is_academy = page.action is not None or page.all_full
+            probes[str(type_id)] = {"academy": is_academy, "at": now}
+            changed = True
+            if is_academy:
+                academies.add(type_id)
+                log.warning(
+                    "training: building type %s is an academy the bot does "
+                    "not know — its courses are listed under Other", type_id,
+                )
+        if changed:
+            await self.state.set(ACADEMY_TYPE_PROBES_STATE_KEY, json.dumps(probes))
+        return academies
 
     async def _academies_from_list(self, discipline: str) -> list[AcademyListing]:
         listings: list[AcademyListing] = []
@@ -1431,12 +1579,14 @@ def _overview_guide(min_rate: float) -> str:
     ])
 
 
-def _discipline_guide(key: str) -> str:
+def _discipline_guide(key: str, catalog=None, extra_codes=None) -> str:
     """One agency's request-text post (the old bot's per-agency guide):
     every course with its shorthand code and duration, with the
     disambiguating prefix spelled out for courses that exist in several
-    academy types (the code itself never needs one)."""
-    ambiguous = _ambiguous_course_names()
+    academy types (the code itself never needs one). ``catalog`` is the
+    merged live catalog, so a course the game added shows up here too."""
+    catalog = catalog or DISCIPLINES
+    ambiguous = _ambiguous_course_names(catalog)
     prefix = _AGENCY_PREFIX[key]
     lines = [
         _section_marker(key),
@@ -1446,21 +1596,18 @@ def _discipline_guide(key: str) -> str:
         "just type the [code] on its own (any capitalisation, brackets "
         "optional):",
     ]
-    from ..mc.trainings_catalog import (
-        PREFERRED_DISCIPLINE,
-        _normalize,
-        course_code,
-    )
+    from ..mc.trainings_catalog import PREFERRED_DISCIPLINE, _normalize
 
-    for name, days in sorted(DISCIPLINES.get(key, {}).items()):
+    for name, days in sorted(catalog.get(key, {}).items()):
         unit = "day" if days == 1 else "days"
-        code = course_code(key, name)
+        code = course_code(key, name, extra_codes)
         tag = f"[{code}] " if code else ""
-        if name in ambiguous and PREFERRED_DISCIPLINE.get(_normalize(name)) == key:
+        normalized = _normalize(name)
+        if normalized in ambiguous and PREFERRED_DISCIPLINE.get(normalized) == key:
             # The bare name resolves HERE by preference (it names its own
             # academy) — no prefix needed in this section.
             lines.append(f"- {tag}{name} ({days} {unit})")
-        elif name in ambiguous:
+        elif normalized in ambiguous:
             lines.append(
                 f"- {tag}{prefix} - {name} ({days} {unit}) - opens {name}"
             )

@@ -18,7 +18,7 @@ import logging
 import discord
 from discord.ext import commands
 
-from ..services.trainings import _AGENCY_ORDER, _AGENCY_TITLES
+from ..services.trainings import _AGENCY_TITLES, _agency_keys
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class ClassesPanelCog(commands.Cog):
         lines: list[str] = []
         counts = (self._data or {}).get("counts") or {}
         if counts:
-            for key in _AGENCY_ORDER:
+            for key in _agency_keys(counts):
                 count = int(counts.get(key, 0))
                 unit = "class" if count == 1 else "classes"
                 lines.append(f"{_AGENCY_TITLES[key]}: **{count}** {unit}")
