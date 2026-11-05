@@ -12,7 +12,7 @@ import fra_bot.cogs.notifications as notifications
 from fra_bot.cogs.notifications import NotificationsCog, _ROUTE_SEND_BUDGET
 from fra_bot.core import log_routes as lr
 from fra_bot.db.database import Database
-from fra_bot.db.repos import LogsRepo, StateRepo
+from fra_bot.db.repos import LinksRepo, LogsRepo, StateRepo
 
 
 @pytest.fixture(autouse=True)
@@ -174,6 +174,7 @@ def _cog(bot):
     cog = NotificationsCog.__new__(NotificationsCog)
     cog.bot = bot
     cog._logs = LogsRepo(bot.db)
+    cog._links = LinksRepo(bot.db)
     cog._state = StateRepo(bot.db)
     return cog
 
@@ -302,3 +303,46 @@ async def test_mirror_copy_is_the_full_embed(db):
     assert "Contributed to the alliance" in embed.title
     assert "Alice" in embed.description
     assert "+5,000" in embed.description
+
+
+async def test_log_embed_links_verified_members_to_discord(db):
+    # Executor and affected member with an approved verification get a [D]
+    # link to their Discord profile; an unlinked member gets none.
+    links = LinksRepo(db)
+    await links.upsert(111, 42, status="approved")
+    logs = LogsRepo(db)
+    await logs.insert_batch([{
+        "raw_timestamp": "2026-01-01 12:00", "event_at": None,
+        "action_key": "kicked_from_alliance", "description": "kicked",
+        "executed_name": "Alice", "executed_mc_id": 42,
+        "affected_name": "Bob", "affected_type": "user", "affected_mc_id": 7,
+        "signature": "d1",
+    }], mark_posted=False)
+    row = (await logs.pending_posts())[0]
+    main = FakeChannel(1)
+    cog = _cog(FakeBot(db, [main], main_id=1))
+    await cog._publish_alliance_logs()
+    desc = main.sent[0].description
+    assert "[Alice](https://www.missionchief.com/profile/42) [[D]](https://discord.com/users/111)" in desc
+    assert "[Bob](https://www.missionchief.com/profile/7)" in desc
+    assert desc.count("[[D]]") == 1
+
+    await links.upsert(222, 7, status="approved")
+    embed = NotificationsCog._alliance_log_embed(row, await cog._discord_ids_for_log(row))
+    assert "[[D]](https://discord.com/users/222)" in embed.description
+
+
+async def test_log_embed_no_discord_link_for_buildings(db):
+    # A building id that happens to equal a linked MC user id must not get a
+    # Discord link.
+    await LinksRepo(db).upsert(111, 42, status="approved")
+    row = {
+        "action_key": "building_constructed", "description": "",
+        "executed_name": "Alice", "executed_mc_id": 5,
+        "affected_name": "Station", "affected_type": "building", "affected_mc_id": 42,
+        "contribution_amount": 0, "event_at": None, "raw_timestamp": "x",
+    }
+    cog = _cog(FakeBot(db, [], main_id=1))
+    ids = await cog._discord_ids_for_log(row)
+    assert ids == {}
+    assert "[[D]]" not in NotificationsCog._alliance_log_embed(row, ids).description
