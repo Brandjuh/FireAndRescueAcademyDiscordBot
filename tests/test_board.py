@@ -616,3 +616,32 @@ def test_extra_codes_resolve_but_never_override_static_codes():
     assert [(m.name, m.duration_days) for m in matches] == [("Brand New Course", 2)]
     matches, _ = match_trainings("HAZ", catalog, extra_codes=extra)
     assert [m.name for m in matches] == ["HazMat"]
+
+
+def test_academy_form_without_room_dropdown_means_one_free_room():
+    # Live page of a 1-classroom academy with that classroom free: the game
+    # omits the building_rooms_use dropdown. Read as 0 this made FRA call
+    # every such academy full (and skip it for trainings).
+    from fra_bot.mc.parsers.academy import parse_academy_page
+
+    html = (
+        "<form action='/buildings/5769006/education' method='post'>"
+        "<input type='hidden' name='utf8' value='✓'/>"
+        "<input type='hidden' name='authenticity_token' value='tok'/>"
+        "<select name='education_select'><option value=''>Select an education</option>"
+        "<option value='hazmat:3'>HazMat (3 days)</option></select>"
+        "<select name='alliance[duration]'><option value='3600'>1 hour</option></select>"
+        "<select name='alliance[cost]'><option value='0'>0 Credits</option></select>"
+        "<input type='submit' name='commit' value='Educate'/></form>"
+    )
+    page = parse_academy_page(html)
+    assert page.action == "/buildings/5769006/education"
+    assert page.available_rooms == 1
+    assert page.all_full is False
+
+
+def test_academy_all_full_page_still_reads_zero():
+    from fra_bot.mc.parsers.academy import parse_academy_page
+
+    page = parse_academy_page("<p>The classrooms are all full.</p>")
+    assert page.available_rooms == 0 and page.all_full is True
