@@ -1879,3 +1879,94 @@ async def test_availability_walk_pauses_while_circuit_is_open(db):
     assert counts["coastal"] == 6
     assert (await svc.cached_availability())["complete"]["coastal"] is True
     assert await svc.state.get(tr.AVAILABILITY_WALK_STATE_KEY) is None
+
+
+# -- "all classrooms full" memo ----------------------------------------------
+
+def _full_coastal_service(db, pages):
+    import json
+
+    svc, _ = _service(db, dry_run=True)
+    svc._auto.preferred_academies = {}
+    api = json.dumps([{"id": i, "building_type": 24} for i in pages])
+    svc.client = FakeClient({"/api/alliance_buildings": api, **{
+        f"/buildings/{i}": page for i, page in pages.items()
+    }})
+    fetched = []
+    orig = svc.client.fetch_page
+
+    async def counting(path, *, referer=None):
+        fetched.append(path)
+        return await orig(path, referer=referer)
+
+    svc.client.fetch_page = counting
+    return svc, fetched
+
+
+_FULL = "<p>The classrooms are all full.</p>"
+
+
+async def test_full_discipline_is_searched_once_then_remembered(db):
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+
+    svc, fetched = _full_coastal_service(db, {700: _FULL, 701: _FULL})
+    match = TrainingMatch(discipline="coastal", name="Ocean Navigation",
+                          duration_days=5, count=1)
+    first = await svc._open_training(match)
+    assert first["status"] == "busy"
+    assert "all 2 coastal academies had no free classroom" in first["reason"]
+    pages_after_first = [p for p in fetched if p.startswith("/buildings/")]
+    assert len(pages_after_first) == 2
+
+    # A second request (another course, same discipline) skips the search.
+    other = TrainingMatch(discipline="coastal", name="Other", duration_days=1, count=1)
+    second = await svc._open_training(other)
+    assert second["status"] == "busy"
+    assert second["reason"] == first["reason"]
+    assert [p for p in fetched if p.startswith("/buildings/")] == pages_after_first
+
+
+async def test_full_memo_expires(db, monkeypatch):
+    import fra_bot.services.trainings as tr
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+
+    svc, fetched = _full_coastal_service(db, {700: _FULL})
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(tr.time, "monotonic", lambda: clock["t"])
+    match = TrainingMatch(discipline="coastal", name="Ocean Navigation",
+                          duration_days=5, count=1)
+    await svc._open_training(match)
+    clock["t"] += tr.FULL_MEMO_SECONDS + 1
+    await svc._open_training(match)
+    assert fetched.count("/buildings/700") == 2               # searched again
+
+
+async def test_partly_unreadable_discipline_is_not_remembered(db):
+    # One academy failed to load: "all full" is not proven, so the next
+    # request must still search.
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+
+    svc, fetched = _full_coastal_service(db, {700: _FULL, 701: "<p>odd page</p>"})
+    match = TrainingMatch(discipline="coastal", name="Ocean Navigation",
+                          duration_days=5, count=1)
+    await svc._open_training(match)
+    await svc._open_training(match)
+    assert fetched.count("/buildings/700") == 2
+
+
+async def test_full_memo_only_blocks_its_own_discipline(db):
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+
+    svc, _ = _full_coastal_service(db, {700: _FULL})
+    await svc._open_training(TrainingMatch(
+        discipline="coastal", name="Ocean Navigation", duration_days=5, count=1))
+    assert svc._full_memo_reason("coastal") is not None
+    assert svc._full_memo_reason("fire") is None
+
+
+async def test_availability_walk_clears_full_memo_on_a_free_room(db):
+    svc, _ = _service(db, dry_run=False)
+    _three_coastal_academies(svc)                             # rooms 1/2/3 free
+    svc._remember_full("coastal", 3)
+    await svc._collect_availability()
+    assert svc._full_memo_reason("coastal") is None

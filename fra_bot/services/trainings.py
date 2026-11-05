@@ -63,6 +63,12 @@ ALLIANCE_SIGNUP_SECONDS = 3600            # normal class: open to the alliance 1
 ALLIANCE_SIGNUP_SECONDS_DEFERRED = 43200  # a class that had to wait: open 12h
 BOARD_FEE = 0                   # board classes are free
 RETRY_MINUTES = 15              # backoff between busy retries (bounded by MAX_ATTEMPTS)
+#: After a search finds EVERY academy of a discipline full, other requests
+#: for that discipline skip the search for this long. Without it each waiting
+#: request re-read all 30-40 academy pages on every retry, which ate most of
+#: the MissionChief request budget. Just under RETRY_MINUTES, so the first
+#: request whose retry comes due searches again and refreshes the memo.
+FULL_MEMO_SECONDS = (RETRY_MINUTES - 1) * 60
 CLASS_CAPACITY = 10             # people per class (game constant, informational)
 MAX_CLASSES_PER_REQUEST = 4     # copies of one course per request/run
 
@@ -392,6 +398,37 @@ class TrainingsService(BoardRequestService):
         super().__init__(cfg, client, db)
         self._auto = cfg.automation.training
         self.reminders = RemindersRepo(db)
+
+    # -- "all classrooms full" memo ----------------------------------------
+
+    def _full_memos(self) -> dict[str, tuple[float, str]]:
+        """discipline -> (monotonic expiry, human reason). In memory only: a
+        restart simply searches again."""
+        return self.__dict__.setdefault("_full_memo", {})
+
+    def _full_memo_reason(self, discipline: str) -> str | None:
+        memo = self._full_memos().get(discipline)
+        if memo is None:
+            return None
+        if time.monotonic() >= memo[0]:
+            self._full_memos().pop(discipline, None)
+            return None
+        return memo[1]
+
+    def _remember_full(self, discipline: str, academies: int) -> None:
+        checked = dt.datetime.now(dt.timezone.utc).strftime("%H:%M UTC")
+        reason = (
+            f"all {academies} {discipline} academies had no free classroom "
+            f"(checked {checked})"
+        )
+        self._full_memos()[discipline] = (time.monotonic() + FULL_MEMO_SECONDS, reason)
+        log.info("training: %s — skipping %s searches for %d min",
+                 reason, discipline, FULL_MEMO_SECONDS // 60)
+
+    def _forget_full(self, discipline: str) -> None:
+        if self._full_memos().pop(discipline, None) is not None:
+            log.info("training: a %s classroom is free again — searching on the "
+                     "next attempt", discipline)
 
     @property
     def thread_id(self) -> int:
@@ -732,6 +769,10 @@ class TrainingsService(BoardRequestService):
             )
             return
         walk["counts"][discipline] += max(0, page.available_rooms)
+        if page.available_rooms > 0:
+            # The availability walk saw a free room: let waiting requests
+            # search right away instead of sitting out the memo.
+            self._forget_full(discipline)
         # Free ride: the education dropdown on this page IS the authoritative
         # course list — harvest it so the Discord chooser never misses a
         # newly added course.
@@ -1283,6 +1324,12 @@ class TrainingsService(BoardRequestService):
           * ``busy``      — transient (no free classroom / list failed); retry
           * ``failed``    — permanent (course not offered here)
         """
+        memo = self._full_memo_reason(match.discipline)
+        if memo is not None:
+            # Another request just read every academy of this discipline and
+            # found them all full: don't spend 30-40 page loads to learn the
+            # same thing again.
+            return {"status": "busy", "reason": memo}
         try:
             academies = await self._find_academies(match.discipline)
         except MissionChiefError as exc:
@@ -1314,6 +1361,7 @@ class TrainingsService(BoardRequestService):
 
         last_reason = "no suitable academy"
         busy = False
+        full = 0  # academies read fine and without any free classroom
         for academy in academies:
             path = f"/buildings/{academy.building_id}"
             try:
@@ -1328,10 +1376,13 @@ class TrainingsService(BoardRequestService):
                 # not a broken academy.
                 last_reason = f"academy {academy.building_id} has no free classroom"
                 busy = True
+                full += 1
                 continue
             if page.action is None or page.authenticity_token is None:
                 last_reason = f"academy {academy.building_id} has no education form"
                 continue
+            if page.available_rooms < 1:
+                full += 1  # counted for the memo, whatever the course checks say
             course_value = page.find_course_value(match.name)
             if course_value is None:
                 last_reason = (
@@ -1410,6 +1461,12 @@ class TrainingsService(BoardRequestService):
                 }
             return {"status": "opened", "building_id": academy.building_id}
 
+        if busy and full == len(academies):
+            # EVERY academy was read and none has a free classroom — true for
+            # any course of this discipline, so other requests can skip the
+            # search until the memo expires.
+            self._remember_full(match.discipline, full)
+            last_reason = self._full_memo_reason(match.discipline) or last_reason
         return {"status": "busy" if busy else "failed", "reason": last_reason}
 
     async def _find_academies(self, discipline: str) -> list[AcademyListing]:
