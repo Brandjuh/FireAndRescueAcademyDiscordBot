@@ -152,6 +152,7 @@ def parse_academy_page(html: str) -> AcademyPage:
     later forms override earlier values (per field, where present)."""
     soup = BeautifulSoup(html, "lxml")
     page = AcademyPage()
+    rooms_dropdown_seen = False
 
     for form in soup.find_all("form"):
         action = form.get("action") or ""
@@ -170,6 +171,7 @@ def parse_academy_page(html: str) -> AcademyPage:
                 if (opt.get("value") or "").isdigit()
             ]
             page.available_rooms = max(options) if options else 0
+            rooms_dropdown_seen = True
 
         cost_select = form.find("select", attrs={"name": "alliance[cost]"})
         if cost_select is not None:
@@ -190,6 +192,13 @@ def parse_academy_page(html: str) -> AcademyPage:
             if courses:
                 page.courses = courses
 
+    if page.action is not None and not rooms_dropdown_seen and page.courses:
+        # With exactly ONE free classroom the game leaves the room-count
+        # dropdown out of the education form (there is nothing to choose).
+        # The form itself only shows while a classroom is free — when all
+        # are busy it is replaced by "classrooms are all full" — so a form
+        # with courses but without the dropdown means one free room, not 0.
+        page.available_rooms = 1
     if page.action is None and _ALL_FULL_RE.search(soup.get_text(" ")):
         page.all_full = True
     return page
