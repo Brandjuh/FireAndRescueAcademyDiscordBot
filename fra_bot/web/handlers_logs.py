@@ -20,6 +20,7 @@ from ..cogs.display import (
     ACTION_DISPLAY,
     FALLBACK_DISPLAY,
     format_log_description,
+    leaver_from_description,
 )
 from ..core.log_routes import UNKNOWN, known_action_keys
 from .handlers import _bot, _flash
@@ -75,8 +76,14 @@ def _row_html(row) -> str:
         else:
             affected = esc(row["affected_name"])
 
+    executed_name = row["executed_name"]
+    description = row["description"] or ""
+    leaver = leaver_from_description(row["action_key"], executed_name, description)
+    if leaver is not None:
+        executed_name, description = leaver
+
     parts = []
-    detail = format_log_description(row["action_key"], row["description"] or "")
+    detail = format_log_description(row["action_key"], description)
     if detail:
         parts.append(esc(detail))
     if row["contribution_amount"]:
@@ -87,7 +94,7 @@ def _row_html(row) -> str:
         "<tr>"
         f"<td>{when}</td>"
         f"<td>{esc(emoji)} {esc(title)}</td>"
-        f"<td>{_member_cell(row['executed_name'], row['executed_mc_id'])}</td>"
+        f"<td>{_member_cell(executed_name, row['executed_mc_id'])}</td>"
         f"<td>{affected}</td>"
         f"<td>{detail_html}</td>"
         "</tr>"

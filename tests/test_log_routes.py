@@ -346,3 +346,15 @@ async def test_log_embed_no_discord_link_for_buildings(db):
     ids = await cog._discord_ids_for_log(row)
     assert ids == {}
     assert "[[D]]" not in NotificationsCog._alliance_log_embed(row, ids).description
+
+
+async def test_log_embed_names_leaver_without_executor(db):
+    row = {
+        "action_key": "left_alliance", "description": "Left the alliance\n        (JoeSned)",
+        "executed_name": None, "executed_mc_id": None,
+        "affected_name": None, "affected_type": None, "affected_mc_id": None,
+        "contribution_amount": 0, "event_at": None, "raw_timestamp": "x",
+    }
+    desc = NotificationsCog._alliance_log_embed(row).description
+    assert desc.startswith("**By:** JoeSned\nLeft the alliance\n")
+    assert "(JoeSned)" not in desc
