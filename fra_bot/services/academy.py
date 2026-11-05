@@ -23,6 +23,7 @@ import datetime
 import json
 import logging
 import re
+import time
 
 import aiosqlite
 
@@ -40,6 +41,14 @@ KIND = "academy"
 BUILDING_KIND = "building"                  # member hospital/prison requests
 ALLIANCE_BUILDINGS_PATH = "/verband/gebauede"
 MAX_LIST_PAGES = 12
+#: Progress of an unfinished extension sweep (see sweep_extensions).
+EXTENSION_SWEEP_STATE_KEY = "academy_extension_sweep"
+#: One tick stops itself after this long, well inside the scheduler's 60-min
+#: hard cap, and the next tick carries on where it stopped.
+EXTENSION_SWEEP_TICK_BUDGET_S = 45 * 60
+#: A paused sweep older than this starts over with a fresh academy list.
+EXTENSION_SWEEP_MAX_AGE_S = 24 * 3600
+EXTENSION_SWEEP_LOG_EVERY = 25
 # Transient build/geocode failures are bounded; a funds-wait does NOT bump
 # attempts, so a low-funds build can wait as long as it needs to.
 MAX_ATTEMPTS = 8
@@ -344,21 +353,89 @@ class AcademyService:
     async def sweep_extensions(self) -> int:
         """Buy any now-available extension on each of our ``[AA]`` academies.
         Scheduled periodically so the sequential (7-day) extensions max out
-        over time. Returns the number of extensions bought this run."""
+        over time. Returns the number of extensions bought this run.
+
+        RESUMABLE: visiting 80+ academies as bulk traffic can take longer
+        than one scheduler tick (killed after 60 min, which used to restart
+        the sweep from the first academy every time). The position is saved
+        after every academy, a tick stops itself after
+        :data:`EXTENSION_SWEEP_TICK_BUDGET_S`, and the next tick carries on."""
         if self._upgrader is None or self.dry_run:
             return 0
-        try:
-            academies = await self._list_our_academies()
-        except MissionChiefError as exc:
-            log.info("academy sweep: could not list buildings (%s)", exc)
-            return 0
+        from ..core.pacing import bulk_traffic
+
+        tick_started = time.monotonic()
+        sweep = await self._load_extension_sweep()
+        if sweep is None:
+            try:
+                with bulk_traffic():
+                    academies = await self._list_our_academies()
+            except MissionChiefError as exc:
+                log.info("academy sweep: could not list buildings (%s)", exc)
+                return 0
+            sweep = {
+                "started_at": datetime.datetime.now(datetime.timezone.utc).timestamp(),
+                "ticks": 1,
+                "academies": [[int(b), str(n)] for b, n in academies],
+                "pos": 0,
+                "bought": 0,
+            }
+            await self._save_extension_sweep(sweep)
+
+        academies = sweep["academies"]
+        total = len(academies)
         bought = 0
-        for building_id, name in academies:
-            bought += await self._extend_one(building_id, name)
-        if bought:
-            log.info("academy sweep: bought %d extension(s) across %d academies",
-                     bought, len(academies))
+        while sweep["pos"] < total:
+            if time.monotonic() - tick_started > EXTENSION_SWEEP_TICK_BUDGET_S:
+                log.info("academy sweep: paused at %d/%d academies (tick budget "
+                         "used); resumes next run", sweep["pos"], total)
+                return bought
+            building_id, name = academies[sweep["pos"]]
+            got = await self._extend_one(building_id, name)
+            bought += got
+            sweep["bought"] += got
+            sweep["pos"] += 1
+            await self._save_extension_sweep(sweep)
+            if sweep["pos"] % EXTENSION_SWEEP_LOG_EVERY == 0 and sweep["pos"] < total:
+                log.info("academy sweep: at %d/%d academies", sweep["pos"], total)
+
+        await self.state.delete(EXTENSION_SWEEP_STATE_KEY)
+        minutes = (
+            datetime.datetime.now(datetime.timezone.utc).timestamp() - sweep["started_at"]
+        ) / 60
+        log.info("academy sweep: complete — %d academies, %d extension(s) bought, "
+                 "%.0f min over %d run(s)", total, sweep["bought"], minutes,
+                 sweep["ticks"])
         return bought
+
+    async def _load_extension_sweep(self) -> dict | None:
+        """The unfinished sweep to resume, or None to start a new one."""
+        raw = await self.state.get(EXTENSION_SWEEP_STATE_KEY)
+        if not raw:
+            return None
+        try:
+            sweep = json.loads(raw)
+            started = float(sweep["started_at"])
+            sweep["academies"] = [[int(b), str(n)] for b, n in sweep["academies"]]
+            sweep["pos"] = int(sweep["pos"])
+            sweep["bought"] = int(sweep.get("bought") or 0)
+        except (ValueError, TypeError, KeyError):
+            await self.state.delete(EXTENSION_SWEEP_STATE_KEY)
+            return None
+        age = datetime.datetime.now(datetime.timezone.utc).timestamp() - started
+        if age > EXTENSION_SWEEP_MAX_AGE_S:
+            log.info("academy sweep: discarding a sweep started %.0f h ago at "
+                     "%d/%d academies; starting over", age / 3600, sweep["pos"],
+                     len(sweep["academies"]))
+            await self.state.delete(EXTENSION_SWEEP_STATE_KEY)
+            return None
+        sweep["ticks"] = int(sweep.get("ticks") or 1) + 1
+        log.info("academy sweep: resuming at %d/%d academies",
+                 sweep["pos"], len(sweep["academies"]))
+        return sweep
+
+    async def _save_extension_sweep(self, sweep: dict) -> None:
+        await self.state.set(EXTENSION_SWEEP_STATE_KEY, json.dumps(sweep))
 
     async def _extend_one(self, building_id: int, name: str) -> int:
         try:

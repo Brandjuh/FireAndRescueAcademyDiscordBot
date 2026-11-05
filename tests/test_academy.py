@@ -517,3 +517,54 @@ def test_role_gate_admins_and_configured_role():
     # role_id 0 = admins only: a random role is not enough.
     cfg.automation.academy.role_id = 0
     assert _member_may_build(_member(role_ids=(999,)), cfg) is False
+
+
+async def test_sweep_extensions_pauses_on_budget_and_resumes(db, monkeypatch):
+    up = _FakeUpgrader()
+    svc, _ = _make(db)
+    svc._upgrader = up
+    listed = []
+
+    async def fake_list():
+        listed.append(1)
+        return [(1000 + i, f"[AA] Fire academy #{i:03d}") for i in range(3)]
+
+    svc._list_our_academies = fake_list
+    clock = {"t": 0.0}
+    monkeypatch.setattr(acad.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(acad, "EXTENSION_SWEEP_TICK_BUDGET_S", 30 * 60)
+    orig = up.upgrade_one
+
+    async def slow(*args, **kwargs):
+        clock["t"] += 20 * 60
+        return await orig(*args, **kwargs)
+
+    up.upgrade_one = slow
+    assert await svc.sweep_extensions() == 2                 # paused after two
+    assert [c["building_id"] for c in up.calls] == [1000, 1001]
+
+    clock["t"] = 0.0
+    assert await svc.sweep_extensions() == 1                 # only the rest
+    assert [c["building_id"] for c in up.calls] == [1000, 1001, 1002]
+    assert listed == [1]                                     # list read once
+    assert await svc.state.get(acad.EXTENSION_SWEEP_STATE_KEY) is None
+
+
+async def test_sweep_extensions_restarts_a_stale_sweep(db):
+    import json
+    import time as _time
+
+    up = _FakeUpgrader()
+    svc, _ = _make(db)
+    svc._upgrader = up
+
+    async def fake_list():
+        return [(2000, "[AA] Fire academy #001")]
+
+    svc._list_our_academies = fake_list
+    await svc.state.set(acad.EXTENSION_SWEEP_STATE_KEY, json.dumps({
+        "started_at": _time.time() - acad.EXTENSION_SWEEP_MAX_AGE_S - 60,
+        "ticks": 1, "academies": [[1, "old"], [2, "old"]], "pos": 1, "bought": 0,
+    }))
+    assert await svc.sweep_extensions() == 1
+    assert [c["building_id"] for c in up.calls] == [2000]

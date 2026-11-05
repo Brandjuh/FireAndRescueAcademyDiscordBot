@@ -1729,3 +1729,153 @@ async def test_no_other_section_without_other_courses(db):
     svc, _ = _service(db, dry_run=True)
     assert "other" not in await merged_course_catalog(StateRepo(db))
     assert len(await svc._guide_markers_in_order()) == 5
+
+
+# ---------------------------------------------------------------------------
+# Resumable availability walk
+# ---------------------------------------------------------------------------
+
+def _coastal_page(building_id, rooms):
+    options = "".join(f"<option value='{n}'>{n}</option>" for n in range(1, rooms + 1))
+    return (
+        f"<form action='/buildings/{building_id}/education' method='post'>"
+        "<input type='hidden' name='authenticity_token' value='tok'/>"
+        f"<select name='building_rooms_use'>{options}</select>"
+        "<select name='alliance[cost]'><option value='0'>Free</option></select>"
+        "<select name='education_select'><option value='7'>Ocean Navigation</option></select>"
+        "</form>"
+    )
+
+
+def _three_coastal_academies(svc):
+    import json
+    api = json.dumps([
+        {"id": i, "building_type": 24, "latitude": 1.0, "longitude": 2.0}
+        for i in (801, 802, 803)
+    ])
+    svc.client = FakeClient({
+        "/api/buildings": api,
+        "/buildings/801": _coastal_page(801, 1),
+        "/buildings/802": _coastal_page(802, 2),
+        "/buildings/803": _coastal_page(803, 3),
+    })
+    fetched = []
+    orig = svc.client.fetch_page
+
+    async def counting(path, *, referer=None):
+        fetched.append(path)
+        return await orig(path, referer=referer)
+
+    svc.client.fetch_page = counting
+    return fetched
+
+
+async def test_availability_walk_pauses_on_budget_and_resumes(db, monkeypatch):
+    import fra_bot.services.trainings as tr
+
+    svc, _ = _service(db, dry_run=False)
+    fetched = _three_coastal_academies(svc)
+    # A fake clock: every academy page "takes" 20 minutes, the tick budget
+    # is 30, so one tick reads two academies and then pauses.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(tr.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(tr, "AVAILABILITY_WALK_TICK_BUDGET_S", 30 * 60)
+    orig = svc.client.fetch_page
+
+    async def slow(path, *, referer=None):
+        if path.startswith("/buildings/"):
+            clock["t"] += 20 * 60
+        return await orig(path, referer=referer)
+
+    svc.client.fetch_page = slow
+
+    assert await svc._collect_availability() is None          # paused
+    assert await svc.cached_availability() is None            # nothing final yet
+    assert [p for p in fetched if p.startswith("/buildings/")] == [
+        "/buildings/801", "/buildings/802",
+    ]
+
+    clock["t"] = 0.0                                          # a new tick
+    counts = await svc._collect_availability()
+    assert counts is not None and counts["coastal"] == 1 + 2 + 3
+    # The resumed tick read ONLY the remaining academy, not the list again.
+    assert [p for p in fetched if p.startswith("/buildings/")] == [
+        "/buildings/801", "/buildings/802", "/buildings/803",
+    ]
+    assert fetched.count("/api/buildings") == 1
+    assert await svc.state.get(tr.AVAILABILITY_WALK_STATE_KEY) is None
+    cached = await svc.cached_availability()
+    assert cached["complete"]["coastal"] is True
+
+
+async def test_availability_walk_survives_a_killed_tick(db):
+    # The scheduler cancels a tick mid-fetch: the academies read before it
+    # stay counted and the interrupted one is read again next time.
+    import asyncio
+
+    import fra_bot.services.trainings as tr
+
+    svc, _ = _service(db, dry_run=False)
+    fetched = _three_coastal_academies(svc)
+    orig = svc.client.fetch_page
+    kill = {"on": "/buildings/803"}
+
+    async def dying(path, *, referer=None):
+        if path == kill["on"]:
+            kill["on"] = None
+            raise asyncio.CancelledError
+        return await orig(path, referer=referer)
+
+    svc.client.fetch_page = dying
+    with pytest.raises(asyncio.CancelledError):
+        await svc._collect_availability()
+    assert await svc.state.get(tr.AVAILABILITY_WALK_STATE_KEY) is not None
+
+    counts = await svc._collect_availability()
+    assert counts["coastal"] == 6
+    assert fetched.count("/buildings/801") == 1               # not re-read
+
+
+async def test_availability_walk_restarts_when_too_old(db):
+    import json
+
+    import fra_bot.services.trainings as tr
+
+    svc, _ = _service(db, dry_run=False)
+    fetched = _three_coastal_academies(svc)
+    stale = tr._new_availability_walk({"coastal": [801, 802, 803]})
+    stale["started_at"] -= tr.AVAILABILITY_WALK_MAX_AGE_S + 60
+    stale["pos"] = 2
+    stale["counts"]["coastal"] = 99                           # must not leak in
+    await svc.state.set(tr.AVAILABILITY_WALK_STATE_KEY, json.dumps(stale))
+
+    counts = await svc._collect_availability()
+    assert counts["coastal"] == 6
+    assert fetched.count("/buildings/801") == 1               # started over
+
+
+async def test_availability_walk_pauses_while_circuit_is_open(db):
+    # An open circuit breaker must not mark the remaining academies
+    # unreadable (a fast run of failures would finish a junk walk).
+    import time as _time
+
+    import fra_bot.services.trainings as tr
+    from fra_bot.core.pacing import CircuitOpenError
+
+    svc, _ = _service(db, dry_run=False)
+    _three_coastal_academies(svc)
+    orig = svc.client.fetch_page
+    state = {"open": True}
+
+    async def breaker(path, *, referer=None):
+        if path == "/buildings/802" and state["open"]:
+            raise CircuitOpenError(_time.time() + 60)
+        return await orig(path, referer=referer)
+
+    svc.client.fetch_page = breaker
+    assert await svc._collect_availability() is None
+    state["open"] = False
+    counts = await svc._collect_availability()
+    assert counts["coastal"] == 6
+    assert (await svc.cached_availability())["complete"]["coastal"] is True
+    assert await svc.state.get(tr.AVAILABILITY_WALK_STATE_KEY) is None

@@ -16,6 +16,7 @@ import datetime as dt
 import json
 import logging
 import re
+import time
 
 from ..config import Config
 from ..core.pacing import CircuitOpenError
@@ -90,6 +91,15 @@ GUIDE_MARKER = "[FRA] 📋 How to request a TRAINING"
 #: (it held the board-trainings job lock for its whole duration and
 #: starved every scheduled poll).
 AVAILABILITY_STATE_KEY = "training_availability"
+#: Progress of an unfinished availability walk (see _collect_availability).
+AVAILABILITY_WALK_STATE_KEY = "training_availability_walk"
+#: One tick stops itself after this long, well inside the scheduler's 60-min
+#: hard cap, so it pauses cleanly instead of being killed mid-request.
+AVAILABILITY_WALK_TICK_BUDGET_S = 45 * 60
+#: A paused walk older than this is restarted: its first readings would be
+#: too stale to add to the new ones.
+AVAILABILITY_WALK_MAX_AGE_S = 6 * 3600
+AVAILABILITY_WALK_LOG_EVERY = 25
 #: Cache older than this gets an honest "(numbers from …)" note on the
 #: guide — one missed hourly walk is fine, silence about a frozen cache
 #: is not.
@@ -355,6 +365,25 @@ def _board_reply(
     return "\n".join(parts)
 
 
+def _new_availability_walk(academies: dict[str, list[int]]) -> dict:
+    """Fresh walk state: the academy queue plus empty accumulators."""
+    keys = _agency_keys(academies)
+    return {
+        "started_at": dt.datetime.now(dt.timezone.utc).timestamp(),
+        "ticks": 1,
+        "queue": [(d, int(b)) for d, ids in academies.items() for b in ids],
+        "pos": 0,
+        "counts": {key: 0 for key in keys},
+        # Per-discipline completeness: a discipline is only trustworthy if
+        # EVERY one of its academies' detail pages was read. A partial outage
+        # (some detail pages 429/parse-fail) would otherwise report a fresh
+        # "0" that means "unknown", not "no free classrooms" — which
+        # auto-scale must never build on.
+        "complete": {key: True for key in keys},
+        "harvest": {key: {} for key in keys},
+    }
+
+
 class TrainingsService(BoardRequestService):
     kind = "training"
     guide_marker = GUIDE_MARKER
@@ -598,84 +627,153 @@ class TrainingsService(BoardRequestService):
         """Free classrooms per discipline across all alliance academies.
 
         Returns ``None`` if the building list can't be read (shown as
-        "temporarily unavailable"); a per-academy page failure just omits that
-        academy's rooms. The walk is many paced page fetches, so it runs as
-        BULK traffic — it yields to member requests (opening a training has
-        first priority, guide upkeep does not). The result is cached in
-        state so the Discord training chooser can show the numbers instantly
-        without walking the academies per click."""
+        "temporarily unavailable") or when the walk is not finished yet; a
+        per-academy page failure just omits that academy's rooms. The walk
+        is many paced page fetches, so it runs as BULK traffic — it yields
+        to member requests (opening a training has first priority, guide
+        upkeep does not). The result is cached in state so the Discord
+        training chooser can show the numbers instantly without walking the
+        academies per click.
+
+        RESUMABLE: with 100+ academies and bulk getting only a share of the
+        pacer, one walk can take longer than a scheduler tick (killed after
+        60 min, which used to throw the whole walk away). Progress is saved
+        after every academy, a tick stops itself after
+        :data:`AVAILABILITY_WALK_TICK_BUDGET_S`, and the next call carries on
+        where it stopped. A walk older than
+        :data:`AVAILABILITY_WALK_MAX_AGE_S` is discarded and restarted."""
         from ..core.pacing import bulk_traffic
 
+        tick_started = time.monotonic()
         try:
             with bulk_traffic():
-                # Find academies by building TYPE-ID (the icon = the type), the
-                # same reliable signal _find_academies uses; scrape fallback.
-                academies = await self._academy_ids_by_discipline()
-                if not any(academies.values()):
-                    log.info("training availability: no academies detected — skipping")
-                    return None
+                walk = await self._load_availability_walk()
+                if walk is None:
+                    # Find academies by building TYPE-ID (the icon = the
+                    # type), the same reliable signal _find_academies uses;
+                    # scrape fallback.
+                    academies = await self._academy_ids_by_discipline()
+                    if not any(academies.values()):
+                        log.info("training availability: no academies detected — skipping")
+                        return None
+                    walk = _new_availability_walk(academies)
+                    await self._save_availability_walk(walk)
 
-                keys = _agency_keys(academies)
-                counts = {key: 0 for key in keys}
-                # Per-discipline completeness: a discipline is only trustworthy
-                # if EVERY one of its academies' detail pages was read. A
-                # partial outage (some detail pages 429/parse-fail) would
-                # otherwise report a fresh "0" that means "unknown", not "no
-                # free classrooms" — which auto-scale must never build on.
-                complete = {key: True for key in keys}
-                harvest: dict[str, dict[str, int]] = {key: {} for key in keys}
-                for discipline, ids in academies.items():
-                    for building_id in ids:
-                        try:
-                            page = parse_academy_page(
-                                await self.client.fetch_page(f"/buildings/{building_id}")
-                            )
-                        except MissionChiefError as exc:
-                            complete[discipline] = False
-                            log.debug("training availability: academy %s failed (%s)",
-                                      building_id, exc)
-                            continue
-                        if page.action is None and page.all_full:
-                            # The game hides the form while every classroom
-                            # is busy and says so: a real 0.
-                            continue
-                        if page.action is None:
-                            # Fetched fine but NO education form was parsed —
-                            # a layout change or half-rendered page. That is
-                            # "unreadable", not "0 free classrooms": counting
-                            # it as 0 would feed auto-scale a false shortage.
-                            # WARNING, not debug: an unrecognised page holds
-                            # auto-scale back (safely) — the operator must be
-                            # able to see that happening.
-                            complete[discipline] = False
-                            log.warning(
-                                "training availability: academy %s has no "
-                                "readable education form — %s counted as "
-                                "unreadable, not 0", building_id, discipline,
-                            )
-                            continue
-                        counts[discipline] += max(0, page.available_rooms)
-                        # Free ride: the education dropdown on this page IS the
-                        # authoritative course list — harvest it so the Discord
-                        # chooser never misses a newly added course.
-                        for label in page.courses:
-                            name, days = _clean_course_label(label)
-                            if not name:
-                                continue
-                            if days is None:
-                                days = _static_days(discipline, name)
-                            harvest[discipline].setdefault(name, days)
+                queue = walk["queue"]
+                total = len(queue)
+                while walk["pos"] < total:
+                    if time.monotonic() - tick_started > AVAILABILITY_WALK_TICK_BUDGET_S:
+                        log.info(
+                            "training availability: walk paused at %d/%d "
+                            "academies (tick budget used); resumes next run",
+                            walk["pos"], total,
+                        )
+                        return None
+                    discipline, building_id = queue[walk["pos"]]
+                    await self._read_one_academy(walk, discipline, building_id)
+                    walk["pos"] += 1
+                    await self._save_availability_walk(walk)
+                    if walk["pos"] % AVAILABILITY_WALK_LOG_EVERY == 0 and walk["pos"] < total:
+                        log.info("training availability: walk at %d/%d academies",
+                                 walk["pos"], total)
+        except CircuitOpenError as exc:
+            log.info("training availability: walk paused (%s); resumes next run", exc)
+            return None
         except MissionChiefError as exc:
             log.warning("training availability: could not read academy list: %s", exc)
             return None
 
+        counts = walk["counts"]
         await self.state.set(AVAILABILITY_STATE_KEY, json.dumps({
             "counts": counts,
-            "complete": complete,
+            "complete": walk["complete"],
             "at": int(dt.datetime.now(dt.timezone.utc).timestamp()),
+            "walk_started_at": walk["started_at"],
         }))
-        await self._store_course_harvest(harvest)
+        await self.state.delete(AVAILABILITY_WALK_STATE_KEY)
+        await self._store_course_harvest(walk["harvest"])
+        minutes = (dt.datetime.now(dt.timezone.utc).timestamp() - walk["started_at"]) / 60
+        log.info(
+            "training availability: walk complete — %d academies in %.0f min "
+            "over %d run(s)", len(walk["queue"]), minutes, walk["ticks"],
+        )
         return counts
+
+    async def _read_one_academy(
+        self, walk: dict, discipline: str, building_id: int
+    ) -> None:
+        """Fold one academy's detail page into the walk's counts/harvest."""
+        try:
+            page = parse_academy_page(
+                await self.client.fetch_page(f"/buildings/{building_id}")
+            )
+        except CircuitOpenError:
+            raise  # traffic paused: stop here, resume this academy later
+        except MissionChiefError as exc:
+            walk["complete"][discipline] = False
+            log.debug("training availability: academy %s failed (%s)",
+                      building_id, exc)
+            return
+        if page.action is None and page.all_full:
+            # The game hides the form while every classroom is busy and
+            # says so: a real 0.
+            return
+        if page.action is None:
+            # Fetched fine but NO education form was parsed — a layout
+            # change or half-rendered page. That is "unreadable", not "0
+            # free classrooms": counting it as 0 would feed auto-scale a
+            # false shortage. WARNING, not debug: an unrecognised page holds
+            # auto-scale back (safely) — the operator must be able to see
+            # that happening.
+            walk["complete"][discipline] = False
+            log.warning(
+                "training availability: academy %s has no readable education "
+                "form — %s counted as unreadable, not 0", building_id, discipline,
+            )
+            return
+        walk["counts"][discipline] += max(0, page.available_rooms)
+        # Free ride: the education dropdown on this page IS the authoritative
+        # course list — harvest it so the Discord chooser never misses a
+        # newly added course.
+        harvest = walk["harvest"][discipline]
+        for label in page.courses:
+            name, days = _clean_course_label(label)
+            if not name:
+                continue
+            if days is None:
+                days = _static_days(discipline, name)
+            harvest.setdefault(name, days)
+
+    async def _load_availability_walk(self) -> dict | None:
+        """The unfinished walk to resume, or None to start a new one (none
+        saved, unreadable, or too old to mix with fresh readings). Counts
+        each resume as one more run."""
+        raw = await self.state.get(AVAILABILITY_WALK_STATE_KEY)
+        if not raw:
+            return None
+        try:
+            walk = json.loads(raw)
+            started = float(walk["started_at"])
+            walk["queue"] = [(str(d), int(b)) for d, b in walk["queue"]]
+            int(walk["pos"])
+            walk["counts"], walk["complete"], walk["harvest"]
+        except (ValueError, TypeError, KeyError):
+            await self.state.delete(AVAILABILITY_WALK_STATE_KEY)
+            return None
+        age = dt.datetime.now(dt.timezone.utc).timestamp() - started
+        if age > AVAILABILITY_WALK_MAX_AGE_S:
+            log.info("training availability: discarding a walk started %.0f min "
+                     "ago at %d/%d academies; starting over",
+                     age / 60, walk["pos"], len(walk["queue"]))
+            await self.state.delete(AVAILABILITY_WALK_STATE_KEY)
+            return None
+        walk["ticks"] = int(walk.get("ticks") or 1) + 1
+        log.info("training availability: resuming walk at %d/%d academies",
+                 walk["pos"], len(walk["queue"]))
+        return walk
+
+    async def _save_availability_walk(self, walk: dict) -> None:
+        await self.state.set(AVAILABILITY_WALK_STATE_KEY, json.dumps(walk))
 
     async def _store_course_harvest(
         self, harvest: dict[str, dict[str, int]]
