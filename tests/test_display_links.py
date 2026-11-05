@@ -1,6 +1,7 @@
 from fra_bot.cogs.display import (
     affected_url,
     format_log_description,
+    leaver_from_description,
     profile_url,
 )
 
@@ -89,3 +90,22 @@ def test_expansion_description_strips_prefix_without_parens():
 def test_expansion_description_empty_when_only_action():
     # Reduces to nothing so the caller drops the redundant line.
     assert format_log_description("expansion_finished", "Expansion finished") == ""
+
+
+def test_format_log_description_collapses_mc_line_breaks():
+    assert format_log_description("chat_ban_set", "Chat ban set\n        (12 Oct 12:56)") \
+        == "Chat ban set (12 Oct 12:56)"
+    assert format_log_description("building_destroyed", "Building destroyed \n        (event)") \
+        == "Building destroyed (event)"
+    assert format_log_description("created_course", "Created a course\n   (SWAT)") == "SWAT"
+
+
+def test_leaver_from_description_takes_name_from_parentheses():
+    assert leaver_from_description(
+        "left_alliance", None, "Left the alliance\n        (JoeSned)"
+    ) == ("JoeSned", "Left the alliance")
+    # A normal row with an executor keeps its own name.
+    assert leaver_from_description("left_alliance", "JoeSned", "Left the alliance") is None
+    # Other actions and rows without parentheses are untouched.
+    assert leaver_from_description("chat_ban_set", None, "Chat ban set (x)") is None
+    assert leaver_from_description("left_alliance", None, "Left the alliance") is None

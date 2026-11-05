@@ -92,6 +92,10 @@ def affected_url(affected_type: str | None, affected_mc_id: int | None) -> str |
     return f"https://www.missionchief.com/{path}/{affected_mc_id}"
 
 
+# MissionChief puts a newline plus indentation between the action and its
+# "(detail)", e.g. "Chat ban set\n        (12 Oct 12:56)"; collapse it.
+_WHITESPACE_RE = re.compile(r"\s+")
+
 # Trailing "(detail)" — the building type / course name in parentheses.
 _PAREN_RE = re.compile(r"\(([^)]+)\)\s*$")
 
@@ -125,6 +129,7 @@ def format_log_description(action_key: str, description: str) -> str:
     expansions fall back to an empty string (the caller drops the line, so
     a bare "Expansion finished" isn't repeated under its own title).
     """
+    description = _WHITESPACE_RE.sub(" ", description or "").strip()
     if action_key in _COURSE_ACTIONS and description:
         match = _PAREN_RE.search(description)
         if match:
@@ -139,3 +144,23 @@ def format_log_description(action_key: str, description: str) -> str:
             return match.group(1).strip()
         return _EXPANSION_PREFIX_RE.sub("", description).strip()
     return description
+
+
+def leaver_from_description(
+    action_key: str, executed_name: str | None, description: str | None
+) -> tuple[str, str] | None:
+    """Some "left the alliance" lines have an empty "by" column and carry the
+    member only in parentheses: "Left the alliance\\n  (JoeSned)". Returns
+    ``(name, description without the name)`` for those, else None. Only the
+    name is known (no profile id), and names are not unique, so callers show
+    it as plain text."""
+    if action_key != "left_alliance" or executed_name or not description:
+        return None
+    text = _WHITESPACE_RE.sub(" ", description).strip()
+    match = _PAREN_RE.search(text)
+    if not match:
+        return None
+    name = match.group(1).strip()
+    if not name:
+        return None
+    return name, text[: match.start()].strip()

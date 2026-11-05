@@ -33,6 +33,7 @@ from .display import (
     MEMBER_EVENT_DISPLAY,
     affected_url,
     format_log_description,
+    leaver_from_description,
     profile_url,
 )
 
@@ -518,12 +519,19 @@ class NotificationsCog(commands.Cog):
             return f" [[D]]({_DISCORD_USER_URL}{did})" if did else ""
 
         title, colour, emoji = ACTION_DISPLAY.get(row["action_key"], FALLBACK_DISPLAY)
+        description = row["description"]
+        leaver = leaver_from_description(
+            row["action_key"], row["executed_name"], description
+        )
         lines = []
         if row["executed_name"]:
             executed = row["executed_name"]
             url = profile_url(row["executed_mc_id"])
             by = f"[{executed}]({url})" if url else executed
             lines.append(f"**By:** {by}{d_link(row['executed_mc_id'])}")
+        elif leaver is not None:
+            lines.append(f"**By:** {leaver[0]}")
+            description = leaver[1]
         if row["affected_name"] and row["affected_name"] != row["executed_name"]:
             affected = row["affected_name"]
             url = affected_url(row["affected_type"], row["affected_mc_id"])
@@ -531,8 +539,8 @@ class NotificationsCog(commands.Cog):
             if (row["affected_type"] or "user") == "user":
                 text += d_link(row["affected_mc_id"])
             lines.append(f"**Affected:** {text}")
-        if row["description"]:
-            desc = format_log_description(row["action_key"], row["description"])
+        if description:
+            desc = format_log_description(row["action_key"], description)
             if desc:  # expansion logs can reduce to nothing (title says it all)
                 lines.append(desc)
         if row["contribution_amount"]:
