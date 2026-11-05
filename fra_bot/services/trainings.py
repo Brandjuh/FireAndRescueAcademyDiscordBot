@@ -42,6 +42,7 @@ from ..mc.trainings_catalog import (
     static_code_words,
     suggest_courses,
 )
+from . import classroom_model
 from .board_requests import BoardRequestService
 from .intake import donation_instructions
 
@@ -369,6 +370,14 @@ def _board_reply(
     if len(parts) == 1:
         return ""
     return "\n".join(parts)
+
+
+def _note_reading(walk: dict, building_id: int, discipline: str, free: int) -> None:
+    """Remember what one academy showed, for the classroom-model check."""
+    walk.setdefault("readings", []).append([
+        int(building_id), discipline, int(free),
+        dt.datetime.now(dt.timezone.utc).timestamp(),
+    ])
 
 
 def _new_availability_walk(academies: dict[str, list[int]]) -> dict:
@@ -729,6 +738,12 @@ class TrainingsService(BoardRequestService):
         }))
         await self.state.delete(AVAILABILITY_WALK_STATE_KEY)
         await self._store_course_harvest(walk["harvest"])
+        # Shadow check of the log-based classroom model against what the
+        # walk really saw (logs only; nothing decides on the model yet).
+        await classroom_model.compare_with_walk(
+            self.state._db, self.state, await merged_course_catalog(self.state),
+            [tuple(r) for r in walk.get("readings", [])],
+        )
         minutes = (dt.datetime.now(dt.timezone.utc).timestamp() - walk["started_at"]) / 60
         log.info(
             "training availability: walk complete — %d academies in %.0f min "
@@ -754,6 +769,7 @@ class TrainingsService(BoardRequestService):
         if page.action is None and page.all_full:
             # The game hides the form while every classroom is busy and
             # says so: a real 0.
+            _note_reading(walk, building_id, discipline, 0)
             return
         if page.action is None:
             # Fetched fine but NO education form was parsed — a layout
@@ -769,6 +785,7 @@ class TrainingsService(BoardRequestService):
             )
             return
         walk["counts"][discipline] += max(0, page.available_rooms)
+        _note_reading(walk, building_id, discipline, max(0, page.available_rooms))
         if page.available_rooms > 0:
             # The availability walk saw a free room: let waiting requests
             # search right away instead of sitting out the memo.
