@@ -19,6 +19,7 @@ from discord.ext import commands, tasks
 from ..core import log_routes
 from ..db.repos import (
     ApplicationsRepo,
+    LinksRepo,
     LogsRepo,
     MemberActionsRepo,
     MembersRepo,
@@ -38,6 +39,8 @@ from .display import (
 log = logging.getLogger(__name__)
 
 _POST_PAUSE_SECONDS = 1.2
+_DISCORD_USER_URL = "https://discord.com/users/"
+
 _BATCH_LIMIT = 20
 # The route (mirror) pass fans each row out to N channels; cap the TOTAL
 # sends per tick (not rows) so a wide "all" route can't monopolise the
@@ -123,6 +126,7 @@ class NotificationsCog(commands.Cog):
         self._members = MembersRepo(bot.db)
         self._apps = ApplicationsRepo(bot.db)
         self._logs = LogsRepo(bot.db)
+        self._links = LinksRepo(bot.db)
         self._state = StateRepo(bot.db)
         self._lock = asyncio.Lock()
 
@@ -483,23 +487,50 @@ class NotificationsCog(commands.Cog):
                 return
             await asyncio.sleep(_POST_PAUSE_SECONDS)
 
+    async def _discord_ids_for_log(self, row) -> dict[int, int]:
+        """MC user id -> Discord id for the people in a log row (the executor
+        and, when the affected entity is a person, the affected member).
+        Only approved verification links count."""
+        mc_ids = [row["executed_mc_id"]]
+        if (row["affected_type"] or "user") == "user":
+            mc_ids.append(row["affected_mc_id"])
+        found: dict[int, int] = {}
+        for mc_id in mc_ids:
+            if not mc_id or int(mc_id) in found:
+                continue
+            link = await self._links.get_by_mc(int(mc_id))
+            if link is not None and link["status"] == "approved":
+                found[int(mc_id)] = int(link["discord_id"])
+        return found
+
     @staticmethod
-    def _alliance_log_embed(row) -> discord.Embed:
+    def _alliance_log_embed(
+        row, discord_ids: dict[int, int] | None = None
+    ) -> discord.Embed:
         """The one embed builder for an alliance-log row, shared by the main
         feed and the route (mirror) pass so a routed copy is byte-identical
-        to the canonical post."""
+        to the canonical post. *discord_ids* (MC user id -> Discord id) adds
+        a ``[D]`` link to the Discord profile of verified members."""
+        discord_ids = discord_ids or {}
+
+        def d_link(mc_id) -> str:
+            did = discord_ids.get(int(mc_id)) if mc_id else None
+            return f" [[D]]({_DISCORD_USER_URL}{did})" if did else ""
+
         title, colour, emoji = ACTION_DISPLAY.get(row["action_key"], FALLBACK_DISPLAY)
         lines = []
         if row["executed_name"]:
             executed = row["executed_name"]
             url = profile_url(row["executed_mc_id"])
-            lines.append(f"**By:** [{executed}]({url})" if url else f"**By:** {executed}")
+            by = f"[{executed}]({url})" if url else executed
+            lines.append(f"**By:** {by}{d_link(row['executed_mc_id'])}")
         if row["affected_name"] and row["affected_name"] != row["executed_name"]:
             affected = row["affected_name"]
             url = affected_url(row["affected_type"], row["affected_mc_id"])
-            lines.append(
-                f"**Affected:** [{affected}]({url})" if url else f"**Affected:** {affected}"
-            )
+            text = f"[{affected}]({url})" if url else affected
+            if (row["affected_type"] or "user") == "user":
+                text += d_link(row["affected_mc_id"])
+            lines.append(f"**Affected:** {text}")
         if row["description"]:
             desc = format_log_description(row["action_key"], row["description"])
             if desc:  # expansion logs can reduce to nothing (title says it all)
@@ -522,7 +553,7 @@ class NotificationsCog(commands.Cog):
         if channel is None:
             return
         for row in await self._logs.pending_posts(limit=_BATCH_LIMIT):
-            embed = self._alliance_log_embed(row)
+            embed = self._alliance_log_embed(row, await self._discord_ids_for_log(row))
             outcome = await self._send_or_skip(
                 channel, embed,
                 lambda r=row: self._logs.mark_posted(r["id"]),
@@ -559,7 +590,9 @@ class NotificationsCog(commands.Cog):
                 if routes else []
             )
             if targets:
-                embed = self._alliance_log_embed(row)
+                embed = self._alliance_log_embed(
+                    row, await self._discord_ids_for_log(row)
+                )
                 for channel_id in targets:
                     channel = self.bot.get_channel(channel_id)
                     if channel is None:
