@@ -1970,3 +1970,16 @@ async def test_availability_walk_clears_full_memo_on_a_free_room(db):
     svc._remember_full("coastal", 3)
     await svc._collect_availability()
     assert svc._full_memo_reason("coastal") is None
+
+
+async def test_finished_walk_runs_the_classroom_model_check(db):
+    import json
+
+    from fra_bot.services import classroom_model as cm
+
+    svc, _ = _service(db, dry_run=False)
+    _three_coastal_academies(svc)
+    await svc._collect_availability()
+    history = json.loads(await svc.state.get(cm.CHECK_STATE_KEY))
+    assert history[-1]["academies"] == 3
+    assert history[-1]["by_discipline"]["coastal"]["walk"] == 6
