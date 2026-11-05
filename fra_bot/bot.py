@@ -11,6 +11,7 @@ from discord.ext import commands
 
 from .config import Config
 from .core.pacing import HumanPacer
+from .core.loop_watchdog import LoopStallWatchdog
 from .core.scheduler import Scheduler
 from .db.database import Database
 from .db.repos import StateRepo
@@ -72,6 +73,7 @@ class FRABot(commands.Bot):
         )
         self.mc = MissionChiefClient(cfg.missionchief, self.pacer)
         self.scheduler = Scheduler()
+        self.loop_watchdog = LoopStallWatchdog()
         self.geocoder = Geocoder(
             StateRepo(self.db),
             base_url=cfg.geocoding.base_url,
@@ -198,6 +200,7 @@ class FRABot(commands.Bot):
         self._jobs_started = False
 
     async def setup_hook(self) -> None:
+        self.loop_watchdog.start()
         await self.db.connect()
         from .db.repos import RunsRepo
 
@@ -1100,6 +1103,7 @@ class FRABot(commands.Bot):
 
     async def close(self) -> None:
         log.info("Shutting down…")
+        self.loop_watchdog.stop()
         if getattr(self, "web", None) is not None:
             await self.web.stop()
         await self.presence.stop()

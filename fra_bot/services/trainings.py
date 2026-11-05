@@ -25,9 +25,8 @@ from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.academy import (
     AcademyListing,
-    find_next_page_path,
     parse_academy_page,
-    parse_alliance_buildings_page,
+    parse_alliance_buildings_off_loop,
 )
 from ..mc.buildings_api import parse_api_buildings
 from ..mc.parsers.board import BoardPost
@@ -1479,8 +1478,8 @@ class TrainingsService(BoardRequestService):
         path = ALLIANCE_BUILDINGS_PATH
         for _ in range(MAX_ACADEMY_LIST_PAGES):
             html = await self.client.fetch_page(path)
-            listings.extend(parse_alliance_buildings_page(html))
-            next_path = find_next_page_path(html)
+            page_listings, next_path = await parse_alliance_buildings_off_loop(html)
+            listings.extend(page_listings)
             if not next_path:
                 break
             path = next_path
@@ -1510,11 +1509,11 @@ class TrainingsService(BoardRequestService):
             path = ALLIANCE_BUILDINGS_PATH
             for _ in range(MAX_ACADEMY_LIST_PAGES):
                 html = await self.client.fetch_page(path)
-                for listing in parse_alliance_buildings_page(html):
+                page_listings, nxt = await parse_alliance_buildings_off_loop(html)
+                for listing in page_listings:
                     if listing.discipline in out and listing.building_id not in seen:
                         seen.add(listing.building_id)
                         out[listing.discipline].append(listing.building_id)
-                nxt = find_next_page_path(html)
                 if not nxt:
                     break
                 path = nxt

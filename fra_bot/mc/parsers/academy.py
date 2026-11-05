@@ -14,6 +14,7 @@ Two pages are involved in opening a training:
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 
@@ -104,6 +105,19 @@ def find_next_page_path(html: str) -> str | None:
                 link = candidate
                 break
     return link["href"] if link is not None and link.get("href") else None
+
+
+async def parse_alliance_buildings_off_loop(
+    html: str,
+) -> tuple[list[AcademyListing], str | None]:
+    """``(listings, next page path)`` for one alliance-buildings page, parsed
+    in a worker thread. These pages are large enough to hold the event loop
+    for seconds on the Pi, and Discord drops any button click the bot can't
+    acknowledge within 3 s."""
+    def parse() -> tuple[list[AcademyListing], str | None]:
+        return parse_alliance_buildings_page(html), find_next_page_path(html)
+
+    return await asyncio.to_thread(parse)
 
 
 @dataclass
