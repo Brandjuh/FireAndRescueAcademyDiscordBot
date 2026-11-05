@@ -183,9 +183,9 @@ class BuildingAutomationConfig:
 class AcademyAutomationConfig:
     """Discord-panel academy builds at a fixed address (overlap allowed).
 
-    ``enabled`` gates the funds-gated retry queue; the panel buttons still
-    enqueue when it is off, but a low-funds build only retries once the
-    queue poller runs. ``role_id`` = 0 means admins only."""
+    ``enabled`` gates the funds-gated retry queue. ``min_alliance_funds``
+    gates auto-scale and web-console builds; Discord panel buttons ignore it.
+    ``role_id`` = 0 means admins only."""
     enabled: bool
     role_id: int
     interval: int

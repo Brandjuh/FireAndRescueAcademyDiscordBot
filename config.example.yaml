@@ -242,8 +242,9 @@ automation:
   academy:
     # Discord-panel academy builds at a FIXED address (duplicates allowed).
     # Staff click Fire/Police/Rescue/Coastal; the bot builds "[AA] <type>
-    # academy #N" (next number scanned live). Too little money -> queued and
-    # retried by this poller once funds recover. Honours dry_run.
+    # academy #N" (next number scanned live). The buttons ignore
+    # min_alliance_funds and always try to build; auto-scale and web-console
+    # builds below it are queued and retried by this poller. Honours dry_run.
     enabled: false            # master switch for the funds-retry queue poller
     role_id: 0                # role allowed to click (0 = admins only)
     interval: 10              # queue retry interval in minutes

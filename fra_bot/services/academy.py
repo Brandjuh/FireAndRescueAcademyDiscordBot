@@ -3,9 +3,12 @@
 A member with the configured role clicks Fire / Police / Rescue / Coastal in
 the academy panel; the bot builds that academy type at ONE fixed address
 (duplicates allowed — no dedup), naming it ``[AA] <label> #N`` where N is the
-next number found by scanning the alliance's LIVE building list. When alliance
-funds are below the floor the build is QUEUED (an ``automation_requests`` row,
-``kind="academy"``) and retried by the queue poller until funds recover.
+next number found by scanning the alliance's LIVE building list. A Discord
+panel click always attempts the build, whatever the alliance balance: staff
+chose it deliberately, and the game itself refuses what the alliance cannot
+afford. Auto-scale and web-console builds stay funds-gated: below the floor they
+are QUEUED (an ``automation_requests`` row, ``kind="academy"``) and retried by
+the queue poller until funds recover.
 Honours the global ``dry_run`` (reports what it would build, spends nothing).
 
 This is a hospital/prison build minus the geocode-from-link, dedup and OSM
@@ -201,23 +204,27 @@ class AcademyService:
                 )
                 return
 
-        # Funds gate → queue when low (never spend below the floor).
-        funds, funds_error = await self._buildings._live_funds()
-        if funds is None:
-            await self.requests.set_status(
-                request_id, "waiting",
-                f"could not read alliance funds ({funds_error}); will retry",
-                bump_attempts=True, announce=False,
-            )
-            return
-        if funds < self._auto.min_alliance_funds:
-            await self.requests.set_status(
-                request_id, "waiting",
-                f"alliance funds {funds:,} below floor "
-                f"{self._auto.min_alliance_funds:,}; queued until funds recover",
-                announce=announce,
-            )
-            return
+        # Funds gate → queue when low. Only a Discord panel click carries a
+        # real user id (auto-scale stores 0, the web console None) and it skips
+        # the gate entirely, including the funds read, so an unreadable kasse
+        # page can't hold it back either.
+        if not payload.get("discord_user_id"):
+            funds, funds_error = await self._buildings._live_funds()
+            if funds is None:
+                await self.requests.set_status(
+                    request_id, "waiting",
+                    f"could not read alliance funds ({funds_error}); will retry",
+                    bump_attempts=True, announce=False,
+                )
+                return
+            if funds < self._auto.min_alliance_funds:
+                await self.requests.set_status(
+                    request_id, "waiting",
+                    f"alliance funds {funds:,} below floor "
+                    f"{self._auto.min_alliance_funds:,}; queued until funds recover",
+                    announce=announce,
+                )
+                return
 
         coords = await self._coordinates()
         if coords is None:
