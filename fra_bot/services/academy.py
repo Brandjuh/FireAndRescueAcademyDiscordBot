@@ -32,7 +32,7 @@ from ..db.repos import AutomationRepo, StateRepo
 from ..geo.geocoder import GeocodeError
 from ..mc.browser_builder import BrowserBuilder, BrowserUnavailable
 from ..mc.errors import MissionChiefError
-from ..mc.parsers.academy import find_next_page_path, parse_alliance_buildings_page
+from ..mc.parsers.academy import parse_alliance_buildings_off_loop
 
 log = logging.getLogger(__name__)
 
@@ -310,11 +310,11 @@ class AcademyService:
         path = ALLIANCE_BUILDINGS_PATH
         for _ in range(MAX_LIST_PAGES):
             html = await self.client.fetch_page(path)
-            for listing in parse_alliance_buildings_page(html):
+            listings, nxt = await parse_alliance_buildings_off_loop(html)
+            for listing in listings:
                 match = pattern.match(listing.name or "")
                 if match:
                     highest = max(highest, int(match.group(1)))
-            nxt = find_next_page_path(html)
             if not nxt:
                 break
             path = nxt
@@ -397,9 +397,9 @@ class AcademyService:
         path = ALLIANCE_BUILDINGS_PATH
         for _ in range(MAX_LIST_PAGES):
             html = await self.client.fetch_page(path)
-            for listing in parse_alliance_buildings_page(html):
+            listings, nxt = await parse_alliance_buildings_off_loop(html)
+            for listing in listings:
                 yield listing
-            nxt = find_next_page_path(html)
             if not nxt:
                 break
             path = nxt

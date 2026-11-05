@@ -106,7 +106,17 @@ class AcademyCog(commands.Cog):
         # Acknowledge within Discord's 3s window BEFORE the (seconds-long)
         # scan + funds read + browser build; surface failures so a swallowed
         # exception isn't a silent hang.
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.NotFound:
+            # Discord already showed the member "interaction failed", so they
+            # may click again; building anyway could buy a second academy.
+            age = (discord.utils.utcnow() - interaction.created_at).total_seconds()
+            log.warning(
+                "academy click (%s) expired before it was acknowledged, %.1fs "
+                "after the click; nothing built", academy_kind, age,
+            )
+            return
         try:
             request_id = await self.service.enqueue(
                 academy_kind,
