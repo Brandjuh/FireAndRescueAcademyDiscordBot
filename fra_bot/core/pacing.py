@@ -64,6 +64,12 @@ class CircuitOpenError(MissionChiefError):
         )
 
 
+#: While bulk traffic is waiting, every Nth request slot goes to bulk. Strict
+#: priority let one sequential interactive job starve bulk completely, until
+#: the scheduler killed the member sweep and availability walk as "hung".
+BULK_SHARE_EVERY = 4
+
+
 class HumanPacer:
     def __init__(
         self,
@@ -89,10 +95,11 @@ class HumanPacer:
         self._waiting = 0
         self._bulk_waiting = 0
         self._priority_waiters = 0
-        # Set whenever NO priority (interactive) request is waiting — bulk
-        # traffic parks on this event so board work always goes first.
-        self._no_priority = asyncio.Event()
-        self._no_priority.set()
+        self._priority_streak = 0
+        # Set while bulk may proceed: no priority (interactive) request is
+        # waiting, or bulk is owed its share of the slots.
+        self._bulk_gate = asyncio.Event()
+        self._bulk_gate.set()
 
     @property
     def circuit_open(self) -> bool:
@@ -141,9 +148,10 @@ class HumanPacer:
         Two priority classes share the pacing budget: interactive work
         (board polls, guides, request execution, admin commands) and BULK
         work (history backfills, full member sweeps — anything running
-        inside :func:`bulk_traffic`). Bulk holds back whenever interactive
+        inside :func:`bulk_traffic`). Bulk holds back while interactive
         requests are waiting, so a member's request never sits behind a
-        stack of backfill pages."""
+        stack of backfill pages, except that every
+        :data:`BULK_SHARE_EVERY`-th slot goes to bulk so it can't starve."""
         bulk = _BULK_TRAFFIC.get()
         self._waiting += 1
         if bulk:
@@ -153,17 +161,23 @@ class HumanPacer:
                 await self._wait_turn_inner(bulk=True)
             else:
                 self._priority_waiters += 1
-                self._no_priority.clear()
+                self._bulk_gate.clear()
                 try:
                     await self._wait_turn_inner()
                 finally:
                     self._priority_waiters -= 1
                     if self._priority_waiters == 0:
-                        self._no_priority.set()
+                        self._bulk_gate.set()
         finally:
             self._waiting -= 1
             if bulk:
                 self._bulk_waiting -= 1
+
+    def _bulk_share_due(self) -> bool:
+        return (
+            self._bulk_waiting > 0
+            and self._priority_streak >= BULK_SHARE_EVERY - 1
+        )
 
     async def _wait_turn_inner(self, *, bulk: bool = False) -> None:
         """Claim the next send slot; sleeps happen OUTSIDE the lock.
@@ -180,8 +194,8 @@ class HumanPacer:
         instead of being sailed past."""
         while True:
             if bulk:
-                while self._priority_waiters:
-                    await self._no_priority.wait()
+                while self._priority_waiters and not self._bulk_share_due():
+                    await self._bulk_gate.wait()
             async with self._lock:
                 now = time.monotonic()
                 if now < self._circuit_open_until:
@@ -198,7 +212,18 @@ class HumanPacer:
 
                 wait_for_jitter = max(0.0, self._next_allowed - now)
                 delay = max(wait_for_window, wait_for_jitter)
+                if not bulk and self._bulk_share_due():
+                    # Step aside so the bulk waiter can take this slot.
+                    delay = max(delay, 0.05)
                 if delay <= 0:
+                    if bulk:
+                        self._priority_streak = 0
+                        if self._priority_waiters:
+                            self._bulk_gate.clear()
+                    elif self._bulk_waiting:
+                        self._priority_streak += 1
+                        if self._bulk_share_due():
+                            self._bulk_gate.set()
                     sent_at = time.monotonic()
                     self._recent.append(sent_at)
                     self._next_allowed = sent_at + random.uniform(

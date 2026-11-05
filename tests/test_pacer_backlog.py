@@ -122,3 +122,54 @@ async def test_circuit_opening_interrupts_a_sleeping_waiter():
     pacer.record_failure()                        # breaker trips (threshold 1)
     with pytest.raises(CircuitOpenError):
         await asyncio.wait_for(task, timeout=5.0)
+
+
+async def test_sustained_interactive_chain_cannot_starve_bulk():
+    """One sequential interactive job must leave bulk its share of the slots."""
+    from fra_bot.core.pacing import BULK_SHARE_EVERY, bulk_traffic
+
+    pacer = HumanPacer(min_delay=0.02, max_delay=0.02, max_per_minute=100000)
+    order: list[str] = []
+    done = asyncio.Event()
+
+    async def chain(label):
+        while not done.is_set():
+            await pacer.wait_turn()
+            order.append(label)
+            await asyncio.sleep(0.002)  # the HTTP request
+
+    async def bulk_chain():
+        with bulk_traffic():
+            await chain("bulk")
+
+    tasks = [asyncio.create_task(chain("member")), asyncio.create_task(bulk_chain())]
+    await asyncio.sleep(1.0)
+    done.set()
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert order.count("bulk") >= len(order) / BULK_SHARE_EVERY - 2
+    assert order.count("member") > order.count("bulk")
+
+
+async def test_cancelled_bulk_waiter_releases_interactive():
+    """A killed bulk job must not leave interactive traffic stepping aside."""
+    from fra_bot.core.pacing import BULK_SHARE_EVERY, bulk_traffic
+
+    pacer = HumanPacer(min_delay=0.01, max_delay=0.01, max_per_minute=100000)
+
+    async def bulk():
+        with bulk_traffic():
+            await pacer.wait_turn()
+
+    pacer._priority_waiters = 1  # bulk parks behind the gate
+    pacer._bulk_gate.clear()
+    waiter = asyncio.create_task(bulk())
+    await asyncio.sleep(0.01)
+    pacer._priority_streak = BULK_SHARE_EVERY
+    waiter.cancel()
+    await asyncio.gather(waiter, return_exceptions=True)
+    pacer._priority_waiters = 0
+    assert pacer.backlog_bulk == 0
+    await asyncio.wait_for(pacer.wait_turn(), timeout=1.0)
