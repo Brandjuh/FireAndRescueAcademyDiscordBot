@@ -144,9 +144,10 @@ class AcademyCog(commands.Cog):
                 "live from the alliance building list.\n\n"
                 "🚒 **Fire academy** · 🚓 **Police academy** · "
                 "🚑 **Rescue academy** · 🌊 **Coastal Rescue school**\n\n"
-                "If the alliance balance is too low the build is **queued** and "
-                "starts automatically once funds recover. Only staff with the "
-                "configured role (or server admins) can use these buttons."
+                "These buttons always try to build, whatever the alliance "
+                "balance; if the alliance can't afford it the game refuses and "
+                "you'll see the error. Only staff with the configured role (or "
+                "server admins) can use these buttons."
             ),
         )
 

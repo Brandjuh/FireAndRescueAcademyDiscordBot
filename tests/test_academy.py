@@ -158,9 +158,47 @@ async def test_build_when_funds_ok(db):
     assert "#005" in row["status_detail"]
 
 
-async def test_low_funds_queues_then_builds_on_recovery(db):
+async def _enqueue_unattended(svc, requester="autoscale", user_id=0):
+    rid = await svc.enqueue("fire", requester_name=requester,
+                            discord_user_id=user_id, channel_id=user_id)
+    return await svc.run_one(rid)
+
+
+async def test_panel_click_builds_below_floor(db):
     svc, buildings = _make(db, funds=1_000, min_funds=2_000_000)
     row = await _enqueue_run(svc)
+    assert row["status"] == "done"
+    assert len(buildings._builder.calls) == 1
+
+
+async def test_panel_click_builds_when_funds_unreadable(db):
+    svc, buildings = _make(db, funds=None)
+    row = await _enqueue_run(svc)
+    assert row["status"] == "done"
+    assert row["attempts"] == 0
+    assert len(buildings._builder.calls) == 1
+
+
+async def test_panel_click_reports_game_refusal(db):
+    svc, buildings = _make(
+        db, funds=1_000,
+        result=BuildResult(False, None, "No enabled alliance build button was found."),
+    )
+    row = await _enqueue_run(svc)
+    assert row["status"] == "failed"
+    assert "build button" in row["status_detail"]
+
+
+async def test_web_console_click_stays_funds_gated(db):
+    svc, buildings = _make(db, funds=1_000, min_funds=2_000_000)
+    row = await _enqueue_unattended(svc, requester="web console", user_id=None)
+    assert row["status"] == "waiting"
+    assert buildings._builder.calls == []
+
+
+async def test_low_funds_queues_then_builds_on_recovery(db):
+    svc, buildings = _make(db, funds=1_000, min_funds=2_000_000)
+    row = await _enqueue_unattended(svc)
     assert row["status"] == "waiting"          # queued, nothing built
     assert buildings._builder.calls == []
     assert "below floor" in row["status_detail"]
@@ -176,7 +214,7 @@ async def test_low_funds_queues_then_builds_on_recovery(db):
 
 async def test_unreadable_funds_waits_and_bumps(db):
     svc, buildings = _make(db, funds=None)
-    row = await _enqueue_run(svc)
+    row = await _enqueue_unattended(svc)
     assert row["status"] == "waiting" and buildings._builder.calls == []
     assert row["attempts"] == 1                # transient -> bumped toward the cap
 
