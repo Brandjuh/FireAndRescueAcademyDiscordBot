@@ -6,8 +6,9 @@ Two safety concerns live here, both pure and unit-tested:
 
 * ``sanitize_dump_path`` keeps the command on-site (no ``http://evil`` —
   ``urljoin`` would otherwise happily fetch an absolute URL).
-* ``redact_html`` strips per-session CSRF tokens before the HTML is shared
-  in Discord. Only the field *names* and structure matter for parsing.
+* ``redact_html`` strips per-session CSRF tokens (and Discord webhook
+  tokens) before the HTML is shared in Discord. Only the field *names* and
+  structure matter for parsing.
 """
 
 from __future__ import annotations
@@ -31,9 +32,17 @@ _META_CONTENT_FIRST = re.compile(
 
 _REDACTION = r"\1REDACTED\2"
 
+# A Discord webhook URL is a credential (anyone holding it can post as the
+# alliance) — the alliance text page carries one. Keep the id, drop the token.
+_DISCORD_WEBHOOK = re.compile(
+    r"(https?://(?:[a-z]+\.)?discord(?:app)?\.com/api/webhooks/\d+/)[\w.-]+",
+    re.IGNORECASE,
+)
+
 
 def redact_html(html: str) -> str:
-    """Blank out per-session CSRF tokens; keep everything else intact."""
+    """Blank out per-session CSRF tokens and Discord webhook tokens; keep
+    everything else intact."""
     for pattern in (
         _TOKEN_NAME_FIRST,
         _TOKEN_VALUE_FIRST,
@@ -41,7 +50,7 @@ def redact_html(html: str) -> str:
         _META_CONTENT_FIRST,
     ):
         html = pattern.sub(_REDACTION, html)
-    return html
+    return _DISCORD_WEBHOOK.sub(r"\1REDACTED", html)
 
 
 def sanitize_dump_path(path: str) -> str:

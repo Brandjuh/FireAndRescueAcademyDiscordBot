@@ -401,6 +401,9 @@ class AutomationConfig:
     leave_feedback: "LeaveFeedbackConfig" = field(
         default_factory=lambda: LeaveFeedbackConfig()
     )
+    announcements: "AnnouncementsConfig" = field(
+        default_factory=lambda: AnnouncementsConfig()
+    )
 
 
 @dataclass(frozen=True)
@@ -412,6 +415,17 @@ class LeaveFeedbackConfig:
     Honours ``dry_run``; ``enabled`` is read live."""
     enabled: bool = True
     delay_minutes: int = 60
+
+
+@dataclass(frozen=True)
+class AnnouncementsConfig:
+    """Keep the game's "Important Alliance Announcements" line current:
+    every ``interval_minutes`` the template saved with ``!fra announce set``
+    is re-rendered (free classes, next tip, …) and saved when it changed.
+    Off by default; manual ``!fra announce`` commands work either way.
+    Honours ``dry_run``; both values are read live."""
+    enabled: bool = False
+    interval_minutes: int = 60
 
 
 DEFAULT_WELCOME_MESSAGE = (
@@ -884,6 +898,15 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 ),
                 delay_minutes=max(0, int(
                     _get(raw, "automation", "leave_feedback", "delay_minutes",
+                         default=60)
+                )),
+            ),
+            announcements=AnnouncementsConfig(
+                enabled=bool(
+                    _get(raw, "automation", "announcements", "enabled", default=False)
+                ),
+                interval_minutes=max(10, int(
+                    _get(raw, "automation", "announcements", "interval_minutes",
                          default=60)
                 )),
             ),

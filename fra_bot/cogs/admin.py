@@ -7,6 +7,7 @@ import datetime as dt
 import io
 import json
 import logging
+import re
 
 import discord
 from discord.ext import commands
@@ -59,6 +60,43 @@ def is_fra_admin():
         return is_fra_admin_ctx(ctx)
 
     return commands.check(predicate)
+
+
+def _strip_code(text: str) -> str:
+    """Accept a text pasted inside `code` or a ```block```."""
+    text = (text or "").strip()
+    fence = re.match(r"^```(?:[a-z]*\n)?(.*?)```$", text, re.DOTALL)
+    if fence:
+        return fence.group(1).strip()
+    if len(text) >= 2 and text[0] == text[-1] == "`":
+        return text[1:-1].strip()
+    return text
+
+
+def _announce_block(text: str) -> str:
+    return "```\n" + (text or "").replace("```", "ʼʼʼ") + "\n```"
+
+
+def _announce_result(rendered: str, result) -> str:
+    """One Discord message for a save attempt of the announcements line."""
+    from ..services.announcements import MAX_CHARS
+
+    size = f"({len(rendered)}/{MAX_CHARS})"
+    if result.ok and result.saved:
+        head = f"✅ Saved in the game and confirmed {size}:"
+    elif result.ok and "dry run" in result.detail:
+        head = f"🧪 Dry run — would have saved {size}:"
+    elif result.ok:
+        head = f"✅ The game already shows this {size}:"
+    else:
+        head = f"❌ Not saved — {result.detail}\nText {size}:"
+    message = head + "\n" + _announce_block(rendered)
+    if result.collateral:
+        message += (
+            "\n🚨 The save also changed: " + ", ".join(result.collateral)
+            + " — check the alliance texts in the game!"
+        )
+    return message[:1990]
 
 
 class AdminCog(commands.Cog):
@@ -2374,6 +2412,226 @@ class AdminCog(commands.Cog):
                 lines.append(f"academy {first.building_id}: fetch FAILED — {exc}")
 
         return lines
+
+    # -- the in-game "Important Alliance Announcements" line ---------------
+
+    @fra.group(
+        name="announce",
+        aliases=["announcement", "announcements", "aankondiging"],
+        invoke_without_command=True,
+    )
+    async def announce(self, ctx: commands.Context) -> None:
+        """The in-game "Important Alliance Announcements" line (max 200).
+
+        `!fra announce` — what the game shows now, the saved text, settings
+        `!fra announce set <text>` — save a text and put it in the game now
+        `!fra announce preview [text]` — render without saving
+        `!fra announce refresh` — re-render the saved text and save it now
+        `!fra announce auto on|off [minutes]` — automatic refresh
+        `!fra announce tips` / `tips add <tip>` / `tips remove <n>`
+        """
+        from ..services.announcements import MAX_CHARS, PLACEHOLDERS
+
+        svc = self.bot.announcements
+        async with ctx.typing():
+            try:
+                live = await svc.live_text()
+                live_line = (
+                    f"**In the game now** ({len(live or '')}/{MAX_CHARS}):\n"
+                    + _announce_block(live or "(empty)")
+                )
+            except Exception as exc:  # noqa: BLE001 — show, don't crash
+                live_line = f"**In the game now:** ⚠️ couldn't read it ({exc})"
+            template = await svc.template()
+            tips = await svc.tips()
+            preview = await svc.preview(template) if template else ""
+            next_at = await svc.next_refresh_at()
+
+        lines = ["📢 **Important Alliance Announcements**", live_line]
+        if template:
+            lines.append("**Saved text** (template):\n" + _announce_block(template))
+            if preview != template:
+                lines.append(
+                    f"**Renders right now as** ({len(preview)}/{MAX_CHARS}):\n"
+                    + _announce_block(preview)
+                )
+        else:
+            lines.append("**Saved text:** none yet — `!fra announce set <text>`.")
+        settings = self.bot.cfg.automation.announcements
+        if settings.enabled:
+            when = f", next ≈ <t:{int(next_at.timestamp())}:R>" if next_at else ""
+            lines.append(
+                f"**Auto-refresh:** on, every {settings.interval_minutes} min{when}."
+            )
+        else:
+            lines.append("**Auto-refresh:** off — `!fra announce auto on`.")
+        lines.append(f"**Tips:** {len(tips)} — `!fra announce tips`.")
+        lines.append(
+            "**Placeholders:** "
+            + " ".join(f"`{{{name}}}`" for name in PLACEHOLDERS)
+        )
+        await ctx.send(
+            "\n".join(lines)[:1990],
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @announce.command(name="set")
+    async def announce_set(self, ctx: commands.Context, *, text: str = "") -> None:
+        """Save the announcements text and put it in the game now.
+
+        Placeholders are filled in, e.g.
+        `!fra announce set 📚 Free classes: {free_classes} • {tip}`
+        """
+        from ..services.announcements import TemplateError
+
+        text = _strip_code(text)
+        if not text:
+            await ctx.send(
+                "Usage: `!fra announce set <text>` — max 200 characters after "
+                "the placeholders are filled in. `!fra announce` lists them."
+            )
+            return
+        async with ctx.typing():
+            try:
+                rendered, result = await self.bot.announcements.set_template(text)
+            except TemplateError as exc:
+                await ctx.send(f"⚠️ Not saved — {exc}")
+                return
+        await ctx.send(
+            _announce_result(rendered, result),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @announce.command(name="preview")
+    async def announce_preview(self, ctx: commands.Context, *, text: str = "") -> None:
+        """Render a text (or the saved one) without saving anything."""
+        from ..services.announcements import MAX_CHARS, TemplateError
+
+        svc = self.bot.announcements
+        text = _strip_code(text) or await svc.template()
+        if not text:
+            await ctx.send("Nothing to preview — give a text or save one first.")
+            return
+        rendered = await svc.preview(text)
+        note = ""
+        try:
+            await svc.check_template(text)
+        except TemplateError as exc:
+            note = f"\n⚠️ {exc}"
+        await ctx.send(
+            f"👀 Preview ({len(rendered)}/{MAX_CHARS}):\n"
+            + _announce_block(rendered) + note,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @announce.command(name="refresh", aliases=["now", "push"])
+    async def announce_refresh(self, ctx: commands.Context) -> None:
+        """Re-render the saved text and save it in the game now."""
+        from ..services.announcements import TemplateError
+
+        async with ctx.typing():
+            try:
+                rendered, result = await self.bot.announcements.refresh_now()
+            except TemplateError as exc:
+                await ctx.send(f"⚠️ {exc}")
+                return
+        await ctx.send(
+            _announce_result(rendered, result),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @announce.command(name="auto")
+    async def announce_auto(
+        self, ctx: commands.Context, switch: str = "", minutes: str = ""
+    ) -> None:
+        """Automatic refresh: `!fra announce auto on 30`, `… auto off`."""
+        from ..core import settings as rt
+
+        cfg = self.bot.cfg.automation.announcements
+        if not switch:
+            await ctx.send(
+                f"Auto-refresh is **{'on' if cfg.enabled else 'off'}**, every "
+                f"{cfg.interval_minutes} min. Usage: `!fra announce auto on|off "
+                "[minutes]`."
+            )
+            return
+        changes = [("automation.announcements.enabled", switch)]
+        if minutes:
+            changes.append(("automation.announcements.interval_minutes", minutes))
+        try:
+            parsed = [
+                (rt.resolve(key), rt.parse_value(rt.resolve(key), raw, self.bot.cfg))
+                for key, raw in changes
+            ]
+        except rt.SettingError as exc:
+            await ctx.send(f"⚠️ {exc}")
+            return
+        for setting, value in parsed:
+            rt.apply(self.bot.cfg, setting, value)
+            await rt.store_override(self._state, setting, value)
+
+        if not cfg.enabled:
+            await ctx.send("⏸️ Announcements auto-refresh is **off**.")
+            return
+        warning = ""
+        if not await self.bot.announcements.template():
+            warning = "\n⚠️ No text saved yet — `!fra announce set <text>` first."
+        await ctx.send(
+            f"▶️ Announcements auto-refresh is **on**, every "
+            f"{cfg.interval_minutes} min (only saves when the text changed)."
+            + warning
+        )
+
+    @announce.group(name="tips", aliases=["tip"], invoke_without_command=True)
+    async def announce_tips(self, ctx: commands.Context) -> None:
+        """List the tips `{tip}` rotates through."""
+        svc = self.bot.announcements
+        tips = await svc.tips()
+        if not tips:
+            await ctx.send(
+                "No tips yet. `!fra announce tips add <tip>` — `{tip}` in the "
+                "text shows the next one at every auto-refresh."
+            )
+            return
+        current = await svc.current_tip()
+        lines = [f"💡 **Tips** ({len(tips)}) — `{{tip}}` rotates through them:"]
+        for number, tip in enumerate(tips, start=1):
+            marker = " ⬅️ now" if tip == current else ""
+            lines.append(f"`{number}.` {discord.utils.escape_markdown(tip)}{marker}")
+        lines.append("Remove one with `!fra announce tips remove <number>`.")
+        await ctx.send(
+            "\n".join(lines)[:1990],
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @announce_tips.command(name="add")
+    async def announce_tips_add(self, ctx: commands.Context, *, tip: str = "") -> None:
+        from ..services.announcements import TemplateError
+
+        tip = _strip_code(tip)
+        if not tip:
+            await ctx.send("Usage: `!fra announce tips add <tip>`")
+            return
+        try:
+            count = await self.bot.announcements.add_tip(tip)
+        except TemplateError as exc:
+            await ctx.send(f"⚠️ Not added — {exc}")
+            return
+        await ctx.send(f"💡 Tip #{count} added.")
+
+    @announce_tips.command(name="remove", aliases=["rm", "delete", "del"])
+    async def announce_tips_remove(self, ctx: commands.Context, number: int = 0) -> None:
+        from ..services.announcements import TemplateError
+
+        try:
+            removed = await self.bot.announcements.remove_tip(number)
+        except TemplateError as exc:
+            await ctx.send(f"⚠️ {exc}")
+            return
+        await ctx.send(
+            f"🗑️ Removed tip #{number}: {discord.utils.escape_markdown(removed)}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @fra.command(name="dump")
     async def dump(

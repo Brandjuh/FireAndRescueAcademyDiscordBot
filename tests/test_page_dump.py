@@ -54,3 +54,15 @@ def test_redact_leaves_other_fields_intact():
     out = redact_html(html)
     assert 'name="mission_position[latitude]" value="40.7"' in out
     assert "SECRET" not in out
+
+
+def test_redact_discord_webhook_token():
+    # The alliance text page (/veband/text/edit) carries the alliance's
+    # Discord webhook; its token must never reach a Discord upload.
+    html = (
+        '<input type="text" name="discord_webhook" value="https://ptb.discordapp.com'
+        '/api/webhooks/743939319122886657/AbC-123_xyz.Q" />'
+    )
+    out = redact_html(html)
+    assert "AbC-123_xyz" not in out
+    assert "/api/webhooks/743939319122886657/REDACTED" in out

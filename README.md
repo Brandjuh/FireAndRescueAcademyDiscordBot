@@ -566,6 +566,38 @@ feedback) and in the member's history.
 On by default; `!fra set leave_feedback.enabled off` stops it (live).
 The text lives in `fra_bot/services/leave_feedback.py`.
 
+### Important Alliance Announcements (in-game line above the chat)
+
+The one-line "Important Alliance Announcements" text (alliance text page,
+`/veband/text/edit`, **max 200 characters**) is managed from Discord:
+
+* `!fra announce` — what the game shows now, the saved text, auto-refresh
+  status and the placeholder list;
+* `!fra announce set <text>` — save a text and put it in the game at once,
+  e.g. `!fra announce set 📚 Free classes: {free_classes} • {tip}`;
+* `!fra announce preview [text]` — render without saving;
+  `!fra announce refresh` — re-render the saved text and save it now;
+* `!fra announce auto on|off [minutes]` — automatic refresh
+  (`automation.announcements.enabled` / `.interval_minutes`, default off /
+  60, both live): the text is re-rendered — with the next tip — and saved
+  only when it changed. While it is on the bot owns the line; an edit made
+  in the game is overwritten at the next refresh;
+* `!fra announce tips`, `tips add <tip>`, `tips remove <n>` — the tips
+  `{tip}` rotates through.
+
+Placeholders: `{free_classes}` (e.g. `Fire 4 · EMS 32`, only types with a
+free class), `{free_total}`, `{free_fire}`, `{free_police}`, `{free_ems}`,
+`{free_water}` (from the hourly class-availability walk), `{members}`,
+`{tip}`, `{updated}` (e.g. `20:15 UTC`). A text is checked against the 200
+characters with today's numbers and the longest tip before it is accepted.
+
+The page saves ALL alliance texts at once (description, rules, welcome PM,
+Discord webhook), so every save resends the others exactly as the game
+shows them and re-reads the page afterwards: a save only counts when the
+game shows the new line, and any other text that changed is reported
+(🚨). Honours `dry_run`. The save code (`fra_bot/mc/alliance_text.py`)
+already knows the other fields, for later features.
+
 ### Built-in eventpinger
 
 Because the bot starts every alliance mission/event itself, it doesn't need
