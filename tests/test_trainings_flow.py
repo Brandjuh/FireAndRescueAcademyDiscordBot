@@ -2088,3 +2088,77 @@ async def test_busy_retry_is_planned_at_the_predicted_end(db, monkeypatch):
     assert row["status"] == "waiting"
     retry = dt.datetime.fromisoformat(row["next_attempt_at"])
     assert abs((retry - soon).total_seconds() - tr.MODEL_RETRY_SLACK_SECONDS) < 5
+
+
+async def test_all_full_predicts_end_even_when_model_thought_a_room_free(db, monkeypatch):
+    # 701 has no logged class, so the model calls it free — but its page is
+    # full (an unlogged class). The search reads everything full; the retry
+    # must still be planned on 700's logged class end, not fall back blind.
+    import fra_bot.services.trainings as tr
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+
+    await _log_class(db, 700, 24 * 60 - 5, course="Short Course")
+    svc, _ = _full_coastal_service(db, {700: _FULL, 701: _FULL})
+
+    async def catalog(_state):
+        return {"coastal": {"Short Course": 1, "Ocean Navigation": 5}}
+
+    monkeypatch.setattr(tr, "merged_course_catalog", catalog)
+    outcome = await svc._open_training(TrainingMatch(
+        discipline="coastal", name="Ocean Navigation", duration_days=5, count=1))
+    assert outcome["status"] == "busy"
+    left = (outcome["free_at"] - dt.datetime.now(dt.timezone.utc)).total_seconds()
+    assert 4 * 60 < left <= 5 * 60
+
+
+async def _waiting_request(svc, monkeypatch, *, free_at, created_at=None):
+    async def busy(match, *, duration=3600):
+        return {"status": "busy", "reason": "full", "free_at": free_at}
+
+    monkeypatch.setattr(svc, "_open_training", busy)
+    monkeypatch.setattr(svc._auto, "min_contribution_rate", 0)
+    request_id = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=9002, requester_name="Bob",
+        requester_mc_id=None,
+        payload=json.dumps({"trainings": [{"discipline": "police",
+                                           "name": "Detective Training",
+                                           "duration": 5, "count": 1}],
+                            "ambiguous": []}),
+    )
+    if created_at is not None:
+        await svc.requests._db.execute(
+            "UPDATE automation_requests SET created_at = ? WHERE id = ?",
+            (created_at.isoformat(), request_id),
+        )
+    await svc.requests.claim(request_id)
+    await svc.execute_request(await svc.requests.get(request_id), announce=False)
+    return await svc.requests.get(request_id)
+
+
+async def test_classroom_wait_does_not_spend_attempts(db, monkeypatch):
+    svc, _ = _service(db, dry_run=True)
+    later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)
+    row = await _waiting_request(svc, monkeypatch, free_at=later)
+    assert row["status"] == "waiting"
+    assert (row["attempts"] or 0) == 0
+    assert "expected to free up" in row["status_detail"]
+    assert json.loads(row["payload"])["waited"] is True
+
+
+async def test_unpredicted_busy_still_spends_attempts(db, monkeypatch):
+    svc, _ = _service(db, dry_run=True)
+    row = await _waiting_request(svc, monkeypatch, free_at=None)
+    assert row["status"] == "waiting"
+    assert row["attempts"] == 1
+
+
+async def test_classroom_wait_is_bounded(db, monkeypatch):
+    import fra_bot.services.trainings as tr
+
+    svc, _ = _service(db, dry_run=True)
+    now = dt.datetime.now(dt.timezone.utc)
+    row = await _waiting_request(
+        svc, monkeypatch, free_at=now + dt.timedelta(hours=1),
+        created_at=now - tr.MAX_CLASSROOM_WAIT - dt.timedelta(hours=1),
+    )
+    assert row["attempts"] == 1

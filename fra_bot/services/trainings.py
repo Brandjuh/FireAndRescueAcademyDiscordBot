@@ -76,6 +76,13 @@ FULL_MEMO_SECONDS = (RETRY_MINUTES - 1) * 60
 MIN_MODEL_RETRY_SECONDS = 2 * 60
 #: Slack after the predicted class end before retrying.
 MODEL_RETRY_SLACK_SECONDS = 60
+#: A request that is only waiting for a classroom the model expects to free
+#: up does NOT spend its attempt budget (that is a condition-wait, like an
+#: academy waiting for funds), so it stays queued until the room frees
+#: instead of giving up after ~3 hours. This bounds that wait: after this
+#: long the normal attempt budget applies again. The longest course runs 7
+#: days, so every room the model knows about frees up within it.
+MAX_CLASSROOM_WAIT = dt.timedelta(days=7)
 CLASS_CAPACITY = 10             # people per class (game constant, informational)
 MAX_CLASSES_PER_REQUEST = 4     # copies of one course per request/run
 
@@ -298,6 +305,17 @@ COURSE_JOIN_INSTRUCTIONS = (
 )
 
 
+def _age(request, now: dt.datetime) -> dt.timedelta:
+    """How long ago *request* was created (zero when unknown)."""
+    try:
+        created = dt.datetime.fromisoformat(request["created_at"])
+    except (TypeError, ValueError, KeyError, IndexError):
+        return dt.timedelta(0)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=dt.timezone.utc)
+    return now - created
+
+
 def _friendly_failure(discipline: str, reason: str) -> str:
     """The reference bot's member-facing rewrite of internal failure text."""
     lowered = (reason or "").lower()
@@ -470,9 +488,14 @@ class TrainingsService(BoardRequestService):
             log.exception("training: classroom model failed; searching unsorted")
             return set(), None
         free = {bid for bid, m in models.items() if m.free_at(now) > 0}
-        if free:
-            return free, None
-        ends = [t for m in models.values() if (t := m.next_free_at(now)) is not None]
+        # The earliest moment a logged class ends, in ANY academy. Only used
+        # when the search then reads every academy full — including the ones
+        # the model thought had a room (a class it never saw in the log), so
+        # their own running classes count too.
+        ends = [
+            c.end for m in models.values() for c in m.classes
+            if c.start <= now < c.end
+        ]
         return free, (min(ends) if ends else None)
 
     def _forget_full(self, discipline: str) -> None:
@@ -1109,6 +1132,7 @@ class TrainingsService(BoardRequestService):
         could_not: list[str] = []     # "- {name}: {friendly reason}" lines
         pending: list[dict] = []      # transient failures worth retrying
         predicted_free_at: list[dt.datetime] = []  # model: when a room frees up
+        unpredicted = False  # a busy course the model has no end time for
         opened_any = False
 
         ambiguous_reasons = [self._ambiguity_help(a) for a in ambiguous]
@@ -1118,7 +1142,7 @@ class TrainingsService(BoardRequestService):
         # already retried at least once) is opened for 12h so the members who
         # waited still have time to join; a first-try class opens for the
         # normal 1h.
-        deferred = (request["attempts"] or 0) > 0
+        deferred = (request["attempts"] or 0) > 0 or bool(payload.get("waited"))
         signup = (
             ALLIANCE_SIGNUP_SECONDS_DEFERRED if deferred else ALLIANCE_SIGNUP_SECONDS
         )
@@ -1179,6 +1203,8 @@ class TrainingsService(BoardRequestService):
                     })
                     if outcome.get("free_at") is not None:
                         predicted_free_at.append(outcome["free_at"])
+                    else:
+                        unpredicted = True
                 else:  # failed — permanent for this course, drop every copy
                     could_not.append(
                         f"- {match.name}: "
@@ -1197,9 +1223,16 @@ class TrainingsService(BoardRequestService):
             # Busy retries must be BOUNDED: bump attempts so MAX_ATTEMPTS can
             # end a hopeless request (e.g. no academy of that discipline
             # exists), and back off so each retry doesn't re-walk the whole
-            # academy list every poll.
-            bump = True
+            # academy list every poll. EXCEPT when every busy course is only
+            # waiting for a room the classroom model expects to free up:
+            # that wait is bounded by MAX_CLASSROOM_WAIT instead, so a member
+            # isn't turned away after ~3 hours when the room frees tomorrow.
             now = dt.datetime.now(dt.timezone.utc)
+            waiting_for_room = (
+                bool(predicted_free_at) and not unpredicted
+                and _age(request, now) < MAX_CLASSROOM_WAIT
+            )
+            bump = not waiting_for_room
             retry = now + dt.timedelta(minutes=RETRY_MINUTES)
             if predicted_free_at:
                 # The classroom model expects a class to end sooner: retry
@@ -1210,6 +1243,10 @@ class TrainingsService(BoardRequestService):
                 retry = min(retry, max(
                     soonest, now + dt.timedelta(seconds=MIN_MODEL_RETRY_SECONDS)
                 ))
+                detail += (
+                    "; a classroom is expected to free up "
+                    f"{min(predicted_free_at).strftime('%a %H:%M UTC')}"
+                )
             next_attempt_at = retry.isoformat()
         elif opened_any:
             status = "done"
@@ -1230,6 +1267,9 @@ class TrainingsService(BoardRequestService):
         merged["results"] = results
         if pending:
             merged["pending_trainings"] = pending
+            # Marks a class that had to wait, for the 12h sign-up window —
+            # the attempt count no longer shows it on a classroom wait.
+            merged["waited"] = True
         else:
             merged.pop("pending_trainings", None)
         await self.requests.set_status(
