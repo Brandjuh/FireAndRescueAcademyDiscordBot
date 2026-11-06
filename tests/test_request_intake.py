@@ -882,3 +882,44 @@ async def test_course_select_stays_flat_under_25(db):
         assert [o.value for o in view.t_select.options] == ["HazMat"]
     finally:
         cog.cog_unload()
+
+
+async def test_deny_answers_discord_before_the_slow_board_reply(db):
+    # The board reply goes through the MissionChief pacer and can take far
+    # longer than Discord's 3-second window: the interaction must already
+    # be answered by then, or the admin sees "interaction failed".
+    from fra_bot.cogs.automation import AutomationCog
+
+    order = []
+
+    class Response:
+        async def send_message(self, text, **kwargs):
+            order.append("response")
+
+    async def reply(text):
+        order.append("board")
+
+    bot = FakeBot(
+        db=db, cfg=_cfg(),
+        trainings=SimpleNamespace(reply=reply),
+        add_dynamic_items=lambda *items: None,
+        get_user=lambda uid: None,
+        get_channel=lambda cid: None,
+    )
+    cog = AutomationCog(bot)
+    try:
+        repo = AutomationRepo(db)
+        rid = await repo.create(
+            kind="training", thread_id=5935, post_id=1,
+            requester_name="Alice", requester_mc_id=42,
+            payload=json.dumps({"trainings": []}),
+        )
+        await repo.set_status(rid, "failed", "busy")
+        interaction = SimpleNamespace(
+            response=Response(), message=None, user="Admin",
+        )
+        await cog.handle_deny(interaction, rid, "no room")
+        assert order == ["response", "board"]
+        assert (await repo.get(rid))["status_detail"] == "denied by admin: no room"
+    finally:
+        cog.cog_unload()
