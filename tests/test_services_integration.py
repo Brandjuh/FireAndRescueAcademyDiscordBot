@@ -108,20 +108,36 @@ async def test_logs_backfill_walks_history_and_suppresses_feed(db):
     assert await logs.pending_posts() == []
 
 
+class SequenceClient(FakeClient):
+    """FakeClient whose pages may change between reads: a list value is
+    served one entry per read (the last one repeats)."""
+
+    async def fetch_page(self, path, *, referer=None):
+        self.fetched.append(path)
+        value = self.pages.get(path, self.pages.get("*", "<html><body></body></html>"))
+        if isinstance(value, list):
+            served = sum(1 for p in self.fetched if p == path)
+            return value[min(served, len(value)) - 1]
+        return value
+
+
 async def test_incremental_logs_dedupe_page_shift_overlap(db):
     # A log line landing mid-walk shifts rows down: page 2 re-shows the tail
     # of page 1. The re-shown row must NOT become a second occurrence (a
-    # duplicate feed post) — it is the same event.
+    # duplicate feed post) — it is the same event. The re-read of page 1
+    # shows the new line on top, which measures the shift.
     from fra_bot.db.repos import LogsRepo, StateRepo
     from fra_bot.services.logs_sync import STATE_INITIALIZED, LogsSyncService
 
     cfg = SimpleNamespace(sync=SimpleNamespace(logs_backfill_pages_per_chunk=10))
-    client = FakeClient(
+    client = SequenceClient(
         {
-            "/alliance_logfiles?page=1": _logs_html(
-                [("06 Jul 14:23", "Alpha added to the alliance"),
-                 ("06 Jul 13:00", "Beta added to the alliance")]
-            ),
+            "/alliance_logfiles?page=1": [
+                _logs_html([("06 Jul 14:23", "Alpha added to the alliance"),
+                            ("06 Jul 13:00", "Beta added to the alliance")]),
+                _logs_html([("06 Jul 14:30", "Delta added to the alliance"),
+                            ("06 Jul 14:23", "Alpha added to the alliance")]),
+            ],
             "/alliance_logfiles?page=2": _logs_html(
                 [("06 Jul 13:00", "Beta added to the alliance"),  # re-shown
                  ("05 Jul 10:00", "Gamma added to the alliance")]
@@ -132,8 +148,81 @@ async def test_incremental_logs_dedupe_page_shift_overlap(db):
     await StateRepo(db).set(STATE_INITIALIZED, "1")  # not the first run
     svc = LogsSyncService(cfg, client, db)
     inserted = await svc.run()
-    assert inserted == 3  # Alpha, Beta (once), Gamma
+    assert inserted == 4  # Delta (new on top), Alpha, Beta (once), Gamma
+    assert await LogsRepo(db).count() == 4
+
+
+async def test_identical_rows_across_a_page_boundary_are_kept(db):
+    # Four classes opened in the same minute are four identical log lines.
+    # When they straddle a page boundary and nothing new arrived, every one
+    # is a real event — dropping the "repeat" lost course starts.
+    from fra_bot.db.repos import LogsRepo, StateRepo
+    from fra_bot.services.logs_sync import STATE_INITIALIZED, LogsSyncService
+
+    cfg = SimpleNamespace(sync=SimpleNamespace(logs_backfill_pages_per_chunk=10))
+    same = ("03 Nov 14:12", "Created a course (Traffic Control Training)")
+    client = SequenceClient(
+        {
+            "/alliance_logfiles?page=1": _logs_html(
+                [("03 Nov 14:20", "Alpha added to the alliance"), same, same, same]
+            ),
+            "/alliance_logfiles?page=2": _logs_html(
+                [same, ("03 Nov 14:00", "Gamma added to the alliance")]
+            ),
+            "*": "<html><body></body></html>",
+        }
+    )
+    await StateRepo(db).set(STATE_INITIALIZED, "1")
+    svc = LogsSyncService(cfg, client, db)
+    assert await svc.run() == 6
+    assert await LogsRepo(db).count() == 6
+    # Page 1 was read twice (the shift check), page 2 once.
+    assert client.fetched.count("/alliance_logfiles?page=1") == 2
+
+
+async def test_failed_reread_falls_back_to_trimming_overlap(db):
+    from fra_bot.db.repos import LogsRepo, StateRepo
+    from fra_bot.mc.errors import MissionChiefError
+    from fra_bot.services.logs_sync import STATE_INITIALIZED, LogsSyncService
+
+    class FlakyClient(FakeClient):
+        async def fetch_page(self, path, *, referer=None):
+            if path.endswith("page=1") and path in self.fetched:
+                raise MissionChiefError("boom")
+            return await super().fetch_page(path, referer=referer)
+
+    cfg = SimpleNamespace(sync=SimpleNamespace(logs_backfill_pages_per_chunk=10))
+    client = FlakyClient(
+        {
+            "/alliance_logfiles?page=1": _logs_html(
+                [("06 Jul 14:23", "Alpha added to the alliance"),
+                 ("06 Jul 13:00", "Beta added to the alliance")]
+            ),
+            "/alliance_logfiles?page=2": _logs_html(
+                [("06 Jul 13:00", "Beta added to the alliance"),
+                 ("05 Jul 10:00", "Gamma added to the alliance")]
+            ),
+            "*": "<html><body></body></html>",
+        }
+    )
+    await StateRepo(db).set(STATE_INITIALIZED, "1")
+    svc = LogsSyncService(cfg, client, db)
+    assert await svc.run() == 3
     assert await LogsRepo(db).count() == 3
+
+
+def test_rows_added_on_top_and_boundary_overlap():
+    from fra_bot.services.logs_sync import _boundary_overlap, _rows_added_on_top
+
+    def rows(*sigs):
+        return [{"signature": s} for s in sigs]
+
+    assert _rows_added_on_top(rows("a", "b", "c"), rows("a", "b", "c")) == 0
+    assert _rows_added_on_top(rows("a", "b", "c"), rows("x", "y", "a")) == 2
+    assert _rows_added_on_top(rows("a", "b"), rows("x", "y", "z")) == 3
+    assert _boundary_overlap(rows("a", "s", "s"), rows("s", "s", "g"), 5) == 2
+    assert _boundary_overlap(rows("a", "s", "s"), rows("s", "s", "g"), 1) == 1
+    assert _boundary_overlap(rows("a", "b"), rows("c"), 5) == 0
 
 
 async def test_logs_backfill_resumes_from_cursor(db):

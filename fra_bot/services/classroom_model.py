@@ -4,7 +4,9 @@ Instead of loading every academy page, predict the free classrooms per
 academy from what the alliance log already tells us:
 
 * **rooms** = 1 + every finished "Additional classroom" / "More classrooms"
-  expansion on that building (a new academy starts with one classroom);
+  expansion on that building (a new academy starts with one classroom),
+  at most :data:`MAX_ROOMS` (an old academy logs a fourth expansion, but
+  its page shows four rooms);
 * **busy**  = every "Created a course" on that building that has not ended
   yet. A class ends at its start + the course duration in days (measured
   against 178 logged completions: the log stamps the start when signup
@@ -40,6 +42,8 @@ CHECK_STATE_KEY = "classroom_model_check"
 #: purpose: an unknown class then holds its room (the model errs towards
 #: "full", never towards a free room that isn't there).
 UNKNOWN_COURSE_DAYS = 7
+#: An academy has at most four classrooms (base + three expansions).
+MAX_ROOMS = 4
 _PAREN_RE = re.compile(r"\(([^)]+)\)\s*$")
 _CLASSROOM_RE = re.compile(r"classroom", re.IGNORECASE)
 _MAX_MISMATCH_SAMPLES = 15
@@ -125,7 +129,8 @@ async def build_models(
     ) as cur:
         for row in await cur.fetchall():
             if _CLASSROOM_RE.search(row["description"] or ""):
-                models[int(row["affected_mc_id"])].rooms += 1
+                model = models[int(row["affected_mc_id"])]
+                model.rooms = min(MAX_ROOMS, model.rooms + 1)
 
     since_iso = since.astimezone(dt.timezone.utc).isoformat(timespec="seconds")
     async with db.conn.execute(
