@@ -54,7 +54,8 @@ PLACEHOLDERS: dict[str, str] = {
     "free_ems": "free EMS / rescue classes",
     "free_water": "free water rescue classes",
     "members": "number of alliance members",
-    "tip": "the current tip — the next one at every auto-refresh",
+    "tip": "the current tip — the next one at every auto-refresh "
+           "(tips may use the other placeholders)",
     "updated": "time of the refresh, e.g. 20:15 UTC",
 }
 
@@ -106,6 +107,12 @@ def free_class_values(availability: dict | None) -> dict[str, str]:
         "free_ems": str(int(counts.get("ems", 0))),
         "free_water": str(int(counts.get("coastal", 0))),
     }
+
+
+def fill_tip(tip: str, values: dict[str, str]) -> str:
+    """A tip may use the other placeholders (``{free_classes}`` …), never
+    ``{tip}`` itself."""
+    return render(tip, {**values, "tip": ""}) if tip else ""
 
 
 class TemplateError(ValueError):
@@ -182,8 +189,9 @@ class AnnouncementsService:
         except Exception:  # noqa: BLE001
             log.exception("announcements: member count unavailable")
             values["members"] = "?"
-        values["tip"] = await self.current_tip() if tip is None else tip
         values["updated"] = now.strftime("%H:%M UTC")
+        raw_tip = await self.current_tip() if tip is None else tip
+        values["tip"] = fill_tip(raw_tip, values)
         return values
 
     async def preview(self, template: str | None = None) -> str:
@@ -213,11 +221,14 @@ class AnnouncementsService:
             tips = await self.tips()
         candidates = [values["tip"]]
         if "tip" in placeholders_in(template):
-            candidates += tips
-        longest = max(
-            (render(template, {**values, "tip": tip}) for tip in candidates),
-            key=len,
-        )
+            candidates += [fill_tip(tip, values) for tip in tips]
+        renders = [render(template, {**values, "tip": tip}) for tip in candidates]
+        if not any(renders):
+            raise TemplateError(
+                "the text comes out empty — add tips first "
+                "(`!fra announce tips add …`)"
+            )
+        longest = max(renders, key=len)
         if len(longest) > MAX_CHARS:
             which = " (with the longest tip)" if len(candidates) > 1 else ""
             raise TemplateError(
@@ -235,6 +246,11 @@ class AnnouncementsService:
         ).get("announcements")
 
     async def push(self, text: str, *, restart_clock: bool = True) -> SaveResult:
+        if not clean_value("announcements", text):
+            # Never blank the line in the game (e.g. {tip} with no tips left).
+            return SaveResult(
+                False, False, "the text comes out empty, so it was not saved"
+            )
         if restart_clock:
             # A manual write restarts the auto-refresh clock, so the next
             # automatic one is a full interval away.
@@ -263,8 +279,20 @@ class AnnouncementsService:
         tip = clean_value("announcements", tip)
         if not tip:
             raise TemplateError("the tip is empty")
-        if "{" in tip or "}" in tip:
-            raise TemplateError("a tip can't contain { } placeholders")
+        used = placeholders_in(tip)
+        if "tip" in used:
+            raise TemplateError("a tip can't contain {tip} itself")
+        unknown = unknown_placeholders(tip)
+        if unknown:
+            raise TemplateError(
+                "unknown placeholder(s): "
+                + ", ".join("{" + p + "}" for p in unknown)
+            )
+        filled = fill_tip(tip, await self.values(tip=""))
+        if len(filled) > MAX_CHARS:
+            raise TemplateError(
+                f"the tip alone is too long: {len(filled)}/{MAX_CHARS} characters"
+            )
         tips = await self.tips()
         template = await self.template()
         if template and "tip" in placeholders_in(template):
