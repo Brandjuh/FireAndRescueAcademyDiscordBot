@@ -307,6 +307,16 @@ Everything under `!fra` is admin-only, **except** the commands in
 | Command | Description |
 |---|---|
 | `!fra profile [member]` (alias `!fra profiel`) | Post a profile card **publicly** in the channel — your own, or someone else's (the same card `/profile` shows privately). 20 s cooldown per user, no pings, not in DMs |
+| `!fra alliance` (aliases `!fra overview`, `!fra alliantie`) | **Every player's data added up**: roster totals (members, joins/leaves in 30 days, credits total + median, average contribution) plus the profile-sync totals (buildings, vehicles, top types) with the snapshot card. Says how many members the game data covers. 60 s cooldown per user |
+
+The alliance cards are public too (aggregates only, no single member's
+numbers; 60 s cooldown per user, one render at a time):
+
+| Command | Description |
+|---|---|
+| `!infographic [cell-km]` | The alliance snapshot card |
+| `!fleet` | The alliance fleet card |
+| `!hotspots [cell-km]` | Where the alliance's buildings cluster, with a map |
 
 ## Admin commands
 

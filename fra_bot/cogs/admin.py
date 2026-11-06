@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import io
 import json
 import logging
 
@@ -50,7 +51,7 @@ def is_fra_admin_ctx(ctx: commands.Context) -> bool:
 #: ``!fra`` subcommands every member may run (by qualified name, so aliases
 #: are covered). Everything else under ``!fra`` stays admin-only through
 #: ``AdminCog.cog_check``.
-PUBLIC_FRA_COMMANDS = frozenset({"fra profile"})
+PUBLIC_FRA_COMMANDS = frozenset({"fra profile", "fra alliance"})
 
 
 def is_fra_admin():
@@ -112,6 +113,37 @@ class AdminCog(commands.Cog):
             return
         embed = await cog.profile_embed(member or ctx.author)
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    @fra.command(name="alliance", aliases=["overview", "alliantie"])
+    @commands.guild_only()
+    @commands.cooldown(1, 60, commands.BucketType.user)
+    @commands.max_concurrency(1, commands.BucketType.guild, wait=True)
+    async def fra_alliance(self, ctx: commands.Context) -> None:
+        """Every player's data added up — open to EVERY member.
+
+        Roster totals (members, credits, contribution, joins/leaves) plus
+        the profile-sync totals (buildings, vehicles, top types) with the
+        snapshot card. Aggregates only: no single member's numbers.
+        """
+        game = self.bot.get_cog("GameSyncCog")
+        if game is None:
+            await ctx.send("The game-sync module isn't loaded right now.")
+            return
+        async with ctx.typing():
+            embed = await game.alliance_overview()
+            try:
+                card, _ = await game.infographic_card()
+            except Exception:  # noqa: BLE001 — the card is decoration
+                log.warning("fra alliance: snapshot card failed", exc_info=True)
+                card = None
+        if card is not None:
+            embed.set_image(url="attachment://alliance-snapshot.png")
+            await ctx.send(
+                embed=embed,
+                file=discord.File(io.BytesIO(card), "alliance-snapshot.png"),
+            )
+        else:
+            await ctx.send(embed=embed)
 
     @fra.command(name="status")
     async def status(self, ctx: commands.Context) -> None:

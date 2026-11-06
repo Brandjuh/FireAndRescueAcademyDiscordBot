@@ -31,7 +31,6 @@ from ..services.game_sync import (
     render_hotspots,
     summarize_buildings,
 )
-from .admin import is_fra_admin
 
 log = logging.getLogger(__name__)
 
@@ -404,6 +403,19 @@ class GameSyncCog(commands.Cog):
         return (member_coords, building_dicts, vehicle_dicts,
                 building_total, vehicle_total)
 
+    async def _building_names(self) -> dict[int, str]:
+        """Building id → name from the LSSM map the vehicles forum keeps
+        cached in state (all ~30 game types). No fetch of our own: an empty
+        or broken cache just falls back to the built-in table."""
+        from ..db.repos import StateRepo
+        from ..services.vehicles_forum import STATE_BUILDING_NAMES
+
+        try:
+            raw = await StateRepo(self.bot.db).get(STATE_BUILDING_NAMES)
+            return {int(k): str(v) for k, v in json.loads(raw or "{}").items()}
+        except Exception:  # noqa: BLE001 — names are decoration
+            return {}
+
     async def _vehicle_names(self) -> dict[int, str]:
         """The LSSM vehicle id → name map, state-cached for a week. Any
         fetch problem falls back to the cache (however old), then to {} —
@@ -457,8 +469,15 @@ class GameSyncCog(commands.Cog):
         }))
         return names
 
+    # -- public alliance cards ---------------------------------------------
+    # Open to every member since 2026-11-06 (aggregates only — no single
+    # member's numbers). Cold caches make a render take ~30 s (Nominatim at
+    # 1 req/s), hence the per-user cooldown and one render at a time.
+
     @commands.command(name="hotspots")
-    @is_fra_admin()
+    @commands.guild_only()
+    @commands.cooldown(1, 60, commands.BucketType.user)
+    @commands.max_concurrency(1, commands.BucketType.guild, wait=True)
     async def hotspots(self, ctx: commands.Context, grid_km: int = 11) -> None:
         """Where the alliance's buildings cluster: `!hotspots [cell-km]`."""
         grid = max(1, min(int(grid_km), 200)) / 111.0  # ~degrees per km
@@ -484,9 +503,26 @@ class GameSyncCog(commands.Cog):
             await ctx.send(text)
 
     @commands.command(name="infographic")
-    @is_fra_admin()
+    @commands.guild_only()
+    @commands.cooldown(1, 60, commands.BucketType.user)
+    @commands.max_concurrency(1, commands.BucketType.guild, wait=True)
     async def infographic(self, ctx: commands.Context, grid_km: int = 11) -> None:
         """The alliance snapshot card: `!infographic [cell-km]`."""
+        stats = await self._sync_stats()
+        if not stats[0]:
+            await ctx.send(render_hotspots([], member_total=0, building_total=0))
+            return
+        async with ctx.typing():
+            card, fallback = await self.infographic_card(stats, grid_km)
+        if card is not None:
+            await ctx.send(file=discord.File(io.BytesIO(card), "alliance-snapshot.png"))
+        else:  # Pillow missing — at least give the text list
+            await ctx.send(fallback)
+
+    async def infographic_card(self, stats=None, grid_km: int = 11):
+        """(PNG bytes or None, text fallback) of the alliance snapshot card.
+        Shared by `!infographic` and `!fra alliance`. None when nobody has
+        synced or Pillow is missing."""
         import datetime as dt
 
         from ..services.game_sync import top_building_types, top_vehicle_types
@@ -494,38 +530,67 @@ class GameSyncCog(commands.Cog):
 
         grid = max(1, min(int(grid_km), 200)) / 111.0
         (member_coords, building_dicts, vehicle_dicts,
-         building_total, vehicle_total) = await self._sync_stats()
+         building_total, vehicle_total) = stats or await self._sync_stats()
         if not member_coords:
-            await ctx.send(render_hotspots([], member_total=0, building_total=0))
-            return
-        async with ctx.typing():
-            spots = merge_by_place(await self._named(
-                cluster_hotspots(member_coords, grid=grid, top=24)
-            ))
-            snapshot = AllianceSnapshot(
-                title="Fire & Rescue Academy",
-                date_label=dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y"),
-                members_synced=len(member_coords),
-                building_total=building_total,
-                vehicle_total=vehicle_total,
-                top_types=top_building_types(building_dicts),
-                top_vehicle_types=top_vehicle_types(
-                    vehicle_dicts, await self._vehicle_names()
-                ),
-                spots=spots,
-                map_png=await self._map_image(spots),
-            )
-            card = render_infographic(snapshot)
-        if card is not None:
-            await ctx.send(file=discord.File(io.BytesIO(card), "alliance-snapshot.png"))
-        else:  # Pillow missing — at least give the text list
-            await ctx.send(render_hotspots(
-                spots, member_total=len(member_coords),
-                building_total=building_total,
-            ))
+            return None, render_hotspots([], member_total=0, building_total=0)
+        spots = merge_by_place(await self._named(
+            cluster_hotspots(member_coords, grid=grid, top=24)
+        ))
+        snapshot = AllianceSnapshot(
+            title="Fire & Rescue Academy",
+            date_label=dt.datetime.now(dt.timezone.utc).strftime("%d %b %Y"),
+            members_synced=len(member_coords),
+            building_total=building_total,
+            vehicle_total=vehicle_total,
+            top_types=top_building_types(
+                building_dicts, names=await self._building_names()
+            ),
+            top_vehicle_types=top_vehicle_types(
+                vehicle_dicts, await self._vehicle_names()
+            ),
+            spots=spots,
+            map_png=await self._map_image(spots),
+        )
+        fallback = render_hotspots(
+            spots, member_total=len(member_coords), building_total=building_total,
+        )
+        return render_infographic(snapshot), fallback
+
+    async def alliance_overview(self) -> discord.Embed:
+        """The `!fra alliance` embed: roster totals + synced game totals."""
+        import datetime as dt
+
+        from ..db.repos import MembersRepo
+        from ..services.alliance_overview import overview_embed, summarize_roster
+        from ..services.game_sync import top_building_types, top_vehicle_types
+
+        now = dt.datetime.now(dt.timezone.utc)
+        members = MembersRepo(self.bot.db)
+        roster = summarize_roster(
+            (await members.active_members()).values(),
+            (await members.former_members()).values(),
+            now=now,
+        )
+        (member_coords, building_dicts, vehicle_dicts,
+         building_total, vehicle_total) = await self._sync_stats()
+        return overview_embed(
+            roster,
+            synced_members=len(member_coords),
+            building_total=building_total,
+            vehicle_total=vehicle_total,
+            top_buildings=top_building_types(
+                building_dicts, top=5, names=await self._building_names()
+            ),
+            top_vehicles=top_vehicle_types(
+                vehicle_dicts, await self._vehicle_names(), top=5
+            ) if vehicle_dicts else [],
+            date_label=now.strftime("%d %b %Y"),
+        )
 
     @commands.command(name="fleet")
-    @is_fra_admin()
+    @commands.guild_only()
+    @commands.cooldown(1, 60, commands.BucketType.user)
+    @commands.max_concurrency(1, commands.BucketType.guild, wait=True)
     async def fleet(self, ctx: commands.Context) -> None:
         """The alliance fleet card: `!fleet`."""
         import datetime as dt

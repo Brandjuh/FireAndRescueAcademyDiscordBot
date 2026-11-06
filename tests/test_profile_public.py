@@ -70,8 +70,14 @@ async def test_not_in_dms(bot):
         await bot.get_command("fra profile").can_run(_ctx(bot, guild=False))
 
 
-def test_only_the_profile_command_is_public():
-    assert PUBLIC_FRA_COMMANDS == frozenset({"fra profile"})
+def test_only_the_member_commands_are_public():
+    assert PUBLIC_FRA_COMMANDS == frozenset({"fra profile", "fra alliance"})
+
+
+async def test_a_plain_member_may_open_the_alliance_overview(bot):
+    command = bot.get_command("fra alliance")
+    assert command is bot.get_command("fra overview")
+    assert await command.can_run(_ctx(bot)) is True
 
 
 async def test_it_posts_the_profile_card_publicly(bot):
