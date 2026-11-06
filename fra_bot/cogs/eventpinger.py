@@ -241,7 +241,7 @@ class EventPingerCog(commands.Cog):
         embed = build_notification_embed(
             kind, name, address, region,
             await self._next_details(
-                {"kind": kind,
+                {"kind": kind, "address": address,
                  "created_at": dt.datetime.now(dt.timezone.utc).isoformat()}
             ),
         )

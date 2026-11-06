@@ -425,6 +425,39 @@ async def test_next_details_skips_the_just_started_location(db):
     assert "Chicago" in details["location"]
 
 
+async def test_announcement_ping_shows_next_location(db):
+    # Regression: the announcement path built its row WITHOUT "address", so
+    # _next_details raised KeyError and every announcement ping silently
+    # lost its "next mission" line (logged daily as "could not determine
+    # next large for the ping").
+    from fra_bot.services.missions import MissionScheduler
+    from tests.test_missions import FakeClient as MissionsFakeClient, FakeGeo, _cfg
+
+    sched = MissionScheduler(_cfg(dry_run=True), MissionsFakeClient(), db, FakeGeo())
+    await sched.rotation.add(
+        location_text="San Francisco", created_by="admin", kind="large",
+        address="1 Market St, 94105 San Francisco",
+    )
+    await sched.rotation.add(
+        location_text="Chicago", created_by="admin", kind="large",
+    )
+    guild = FakeGuild([FakeRole(NOTIFY_ROLE_ID, "Notify-Event")])
+    channel = FakeChannel(guild)
+    channel.id = WATCH_CHANNEL
+    cog = _watch_cog(db, guild=guild, geocoder=FakeSearchGeocoder(None))
+    cog.bot.missions_service = sched
+    await cog.on_message(_announcement_message(
+        guild, channel,
+        title="Start Alliance Mission! Warehouse Fire",
+        body="1 Market St, 94105 San Francisco",
+    ))
+    assert channel.sent, "expected an announcement ping"
+    embed = channel.sent[0][1]["embed"]
+    values = " ".join(str(f.value) for f in embed.fields)
+    assert "Chicago" in values
+    assert "Warehouse Fire" in values
+
+
 async def test_next_details_single_entry_rotation_stays_honest(db):
     from fra_bot.services.missions import MissionScheduler
     from tests.test_missions import FakeClient as MissionsFakeClient, FakeGeo, _cfg
