@@ -583,7 +583,10 @@ The one-line "Important Alliance Announcements" text (alliance text page,
   only when it changed. While it is on the bot owns the line; an edit made
   in the game is overwritten at the next refresh;
 * `!fra announce tips`, `tips add <tip>`, `tips remove <n>` — the tips
-  `{tip}` rotates through.
+  `{tip}` rotates through. A tip may use the other placeholders, so a
+  template of just `{tip}` alternates whole lines (e.g. a fixed info line
+  and `📚 Free training classes right now: {free_classes}`). A text that
+  comes out empty is never saved.
 
 Placeholders: `{free_classes}` (e.g. `Fire 4 · EMS 32`, only types with a
 free class), `{free_total}`, `{free_fire}`, `{free_police}`, `{free_ems}`,

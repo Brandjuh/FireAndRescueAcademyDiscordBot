@@ -2610,7 +2610,10 @@ class AdminCog(commands.Cog):
 
         tip = _strip_code(tip)
         if not tip:
-            await ctx.send("Usage: `!fra announce tips add <tip>`")
+            await ctx.send(
+                "Usage: `!fra announce tips add <tip>` — a tip may use the "
+                "placeholders too, e.g. `{free_classes}`."
+            )
             return
         try:
             count = await self.bot.announcements.add_tip(tip)

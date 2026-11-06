@@ -180,3 +180,63 @@ async def test_dry_run_reports_without_saving(db):
     _rendered, result = await svc.set_template("Free {free_total}")
     assert result.ok and not result.saved
     assert server.posts == []
+
+
+INFO_LINE = (
+    "Discord: https://discord.gg/hp3VNZE • Questions? Ask us! Need a training, "
+    "building, or event? Submit your request via the Board or Discord. You'll "
+    "also find hints, tips, guides, and useful information"
+)
+
+
+async def test_template_of_only_tips_alternates_whole_lines(db):
+    # The real setup: a 200-character info line and a free-classes line,
+    # swapped every 30 minutes.
+    assert len(INFO_LINE) == 200
+    server = FakeServer()
+    svc = _service(db, server, interval=30)
+    await svc.add_tip(INFO_LINE)
+    await svc.add_tip("📚 Free training classes right now: {free_classes}")
+    rendered, result = await svc.set_template("{tip}")
+    assert result.ok and rendered == INFO_LINE
+
+    clock = dt.datetime.now(dt.timezone.utc)
+    await svc.run(clock + dt.timedelta(minutes=31))
+    assert _live(server) == (
+        "📚 Free training classes right now: Fire 4 · EMS 32 · Water 1"
+    )
+    await svc.run(clock + dt.timedelta(minutes=62))
+    assert _live(server) == INFO_LINE
+
+
+async def test_a_tip_with_placeholders_is_length_checked_filled_in(db):
+    svc = _service(db, availability={"counts": {"fire": 10**150}})
+    with pytest.raises(an.TemplateError, match="too long"):
+        await svc.add_tip("x" * 60 + " {free_total}")
+
+
+async def test_a_tip_cannot_contain_tip_itself(db):
+    svc = _service(db)
+    with pytest.raises(an.TemplateError, match="itself"):
+        await svc.add_tip("Tip: {tip}")
+
+
+async def test_only_tip_without_tips_is_refused(db):
+    server = FakeServer()
+    svc = _service(db, server)
+    with pytest.raises(an.TemplateError, match="empty"):
+        await svc.set_template("{tip}")
+    assert server.posts == []
+
+
+async def test_an_empty_render_never_blanks_the_game_line(db):
+    server = FakeServer()
+    svc = _service(db, server, interval=10)
+    await svc.add_tip("Only tip")
+    await svc.set_template("{tip}")
+    await svc.remove_tip(1)                     # template now renders empty
+    posts = len(server.posts)
+    lines = await svc.run(dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=11))
+    assert len(server.posts) == posts
+    assert _live(server) == "Only tip"
+    assert "empty" in lines[0]
