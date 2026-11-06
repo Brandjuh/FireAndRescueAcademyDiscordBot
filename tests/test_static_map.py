@@ -62,14 +62,76 @@ async def test_render_map_falls_back_to_the_second_tile_style(monkeypatch):
 
     async def fake_fetch(session, template, zoom, x, y):
         asked.append(template)
-        # Primary (CARTO) unreachable; classic OSM still answers.
-        return tile if "openstreetmap" in template else None
+        # osm.org unreachable; OSM France still answers.
+        return tile if "openstreetmap.fr" in template else None
 
     monkeypatch.setattr(sm, "_fetch_tile", fake_fetch)
     png = await sm.render_map([(40.7, -74.0, 5)])
     assert png is not None
-    assert any("cartocdn" in template for template in asked)      # tried first
-    assert any("openstreetmap" in template for template in asked)  # then fell back
+    assert any("tile.openstreetmap.org" in template for template in asked)  # first
+    assert any("openstreetmap.fr" in template for template in asked)        # fallback
+
+
+def test_no_tile_server_needs_an_api_key():
+    # CARTO started watermarking keyless tiles ("API KEY REQUIRED") in
+    # autumn 2026; the map must only use servers that work without a key.
+    for style in sm.STYLES:
+        assert "cartocdn" not in style.template
+        assert "key" not in style.template.lower()
+
+
+class _FakeResponse:
+    def __init__(self, status=200, etag=None, body=b"png"):
+        self.status = status
+        self.headers = {"ETag": etag} if etag else {}
+        self._body = body
+
+    async def read(self):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeSession:
+    def __init__(self, response):
+        self.response = response
+        self.calls = 0
+
+    def get(self, url):
+        self.calls += 1
+        return self.response
+
+
+async def test_watermark_tiles_are_refused(monkeypatch):
+    sm._TILE_CACHE.clear()
+    session = _FakeSession(_FakeResponse(etag='"wm-da89c20e77c1-dark"'))
+    assert await sm._fetch_tile(session, "https://x.test/{z}/{x}/{y}.png", 3, 1, 1) is None
+    assert sm._TILE_CACHE == {}  # and never cached
+
+
+async def test_real_tiles_are_cached(monkeypatch):
+    sm._TILE_CACHE.clear()
+    session = _FakeSession(_FakeResponse(etag='"abc123"', body=b"tile"))
+    url = "https://x.test/{z}/{x}/{y}.png"
+    assert await sm._fetch_tile(session, url, 3, 1, 1) == b"tile"
+    assert await sm._fetch_tile(session, url, 3, 1, 1) == b"tile"
+    assert session.calls == 1
+    sm._TILE_CACHE.clear()
+
+
+def test_darken_turns_a_light_tile_dark():
+    from PIL import Image, ImageStat
+
+    light = Image.new("RGB", (8, 8), (242, 239, 233))   # OSM land colour
+    light.putpixel((0, 0), (40, 40, 40))                  # a dark label pixel
+    dark = sm._darken(light)
+    assert ImageStat.Stat(dark.convert("L")).mean[0] < 60
+    # the formerly dark label is now the light one
+    assert dark.convert("L").getpixel((0, 0)) > dark.convert("L").getpixel((4, 4))
 
 
 async def test_render_map_without_any_tile_returns_none(monkeypatch):

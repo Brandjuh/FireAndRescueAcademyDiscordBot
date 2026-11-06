@@ -1,11 +1,16 @@
 """Static map rendering: basemap tiles + numbered hotspot markers.
 
-Used by ``!hotspots`` to attach a small overview map. The primary
-basemap is CARTO "Dark Matter" (free basemap tiles, requires the
-OSM + CARTO attribution drawn on the image) — a modern dark style that
-matches Discord. When CARTO is unreachable the classic OSM tile server
-is tried instead, each with an identifying User-Agent per the tile
-usage policies.
+Used by ``!hotspots`` / ``!infographic`` / ``!fra alliance`` to attach a
+small overview map. Basemap: the keyless OpenStreetMap tile servers
+(osm.org, then OSM France as a fallback), darkened locally into a
+"dark matter" look that matches Discord. Identifying User-Agent and an
+in-memory tile cache, per the OSM tile usage policy.
+
+CARTO's "Dark Matter" used to be the primary, but since autumn 2026 CARTO
+answers keyless requests with HTTP 200 tiles that carry an "API KEY
+REQUIRED" watermark — a valid image, so no fallback ever kicked in and
+every map showed the watermark. Watermarked tiles (ETag ``"wm-…"``) are
+now refused outright, whichever server sends them.
 
 Everything degrades gracefully: any failure (tile servers down, Pillow
 missing) makes ``render_map`` return None and the caller falls back to
@@ -18,6 +23,8 @@ import asyncio
 import io
 import logging
 import math
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import aiohttp
@@ -68,24 +75,55 @@ class _Style:
     attribution: str
     attribution_fg: tuple[int, int, int, int]
     attribution_bg: tuple[int, int, int, int]
+    darken: bool = False                 # recolour light tiles to dark
 
 
-STYLES: tuple[_Style, ...] = (
-    _Style(
-        template="https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-        background=(32, 32, 38),
-        attribution="© OpenStreetMap © CARTO",
-        attribution_fg=(190, 190, 198, 255),
-        attribution_bg=(18, 18, 24, 190),
-    ),
-    _Style(
-        template="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-        background=(222, 222, 222),
-        attribution="© OpenStreetMap",
-        attribution_fg=(60, 60, 60, 255),
-        attribution_bg=(255, 255, 255, 190),
-    ),
+_DARK = dict(
+    background=(9, 11, 17),          # = the water colour below
+    attribution="© OpenStreetMap contributors",
+    attribution_fg=(190, 190, 198, 255),
+    attribution_bg=(18, 18, 24, 190),
+    darken=True,
 )
+
+#: Keyless tile servers only — a key would have to live outside git (public
+#: repo) and the map is decoration. Tried in order.
+STYLES: tuple[_Style, ...] = (
+    _Style(template="https://tile.openstreetmap.org/{z}/{x}/{y}.png", **_DARK),
+    _Style(template="https://a.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png", **_DARK),
+)
+
+
+#: The dark palette: land a slate near-black, water darker still (like
+#: CARTO Dark Matter), roads/borders/labels as light lines.
+_DARK_WATER = (9, 11, 17)
+_DARK_LAND = (26, 29, 38)
+_DARK_MID = (58, 63, 78)
+_DARK_LINES = (165, 172, 190)
+
+
+def _darken(tile):
+    """Light OSM tile -> dark basemap. Luminance is inverted onto a fixed
+    slate ramp (no per-tile autocontrast: an all-sea tile would come out a
+    different shade than its neighbours), and OSM's blue water is painted
+    darker than land so coastlines read."""
+    from PIL import Image, ImageChops, ImageOps
+
+    red, _, blue = tile.split()
+    water = ImageChops.subtract(blue, red).point(lambda v: 255 if v > 25 else 0)
+    dark = ImageOps.colorize(
+        ImageOps.invert(ImageOps.grayscale(tile)),
+        black=_DARK_LAND, mid=_DARK_MID, white=_DARK_LINES,
+    )
+    dark.paste(Image.new("RGB", tile.size, _DARK_WATER), mask=water)
+    return dark
+
+
+#: Tiny in-memory tile cache (url -> (fetched_at, bytes)). The OSM policy
+#: asks clients to cache; renders repeat the same few dozen tiles.
+_TILE_CACHE: "OrderedDict[str, tuple[float, bytes]]" = OrderedDict()
+_TILE_CACHE_MAX = 256           # ~5 MB of PNGs — the Pi is short on RAM
+_TILE_CACHE_TTL = 24 * 3600.0
 
 
 def _global_px(latitude: float, longitude: float, zoom: int) -> tuple[float, float]:
@@ -109,17 +147,37 @@ def pick_zoom(
     return 2
 
 
+def _is_watermark(response) -> bool:
+    """A placeholder tile ("API KEY REQUIRED" and the like) served with
+    HTTP 200. CARTO marks those with an ETag starting with ``wm-``."""
+    etag = (response.headers.get("ETag") or "").strip('W/"')
+    return etag.startswith("wm-")
+
+
 async def _fetch_tile(
     session: aiohttp.ClientSession, template: str, zoom: int, x: int, y: int
 ) -> bytes | None:
     url = template.format(z=zoom, x=x, y=y)
+    hit = _TILE_CACHE.get(url)
+    if hit is not None and time.monotonic() - hit[0] < _TILE_CACHE_TTL:
+        _TILE_CACHE.move_to_end(url)
+        return hit[1]
     try:
         async with session.get(url) as response:
             if response.status != 200:
                 return None
-            return await response.read()
+            if _is_watermark(response):
+                log.warning("static map: %s served a watermark tile "
+                            "(API key required?) — skipping", url.split("/")[2])
+                return None
+            body = await response.read()
     except (aiohttp.ClientError, asyncio.TimeoutError):
         return None
+    _TILE_CACHE[url] = (time.monotonic(), body)
+    _TILE_CACHE.move_to_end(url)
+    while len(_TILE_CACHE) > _TILE_CACHE_MAX:
+        _TILE_CACHE.popitem(last=False)
+    return body
 
 
 async def _paste_tiles(
@@ -153,6 +211,8 @@ async def _paste_tiles(
                     tile = Image.open(io.BytesIO(raw)).convert("RGB")
                 except Exception:  # noqa: BLE001 — corrupt tile, skip it
                     continue
+                if style.darken:
+                    tile = _darken(tile)
                 image.paste(
                     tile,
                     (int(tile_x * TILE_SIZE - left), int(tile_y * TILE_SIZE - top)),
@@ -228,7 +288,7 @@ async def render_map(
     overlay = overlay.resize((width, height), Image.LANCZOS)
     image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
-    # Attribution is required by the OSM/CARTO tile policies.
+    # Attribution is required by the OSM tile policy.
     draw = ImageDraw.Draw(image, "RGBA")
     box_width = 16 + 6 * len(style.attribution)
     draw.rounded_rectangle(
