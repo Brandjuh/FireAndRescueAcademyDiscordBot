@@ -93,8 +93,28 @@ async def test_a_member_who_left_is_asked_once(db, sent):
     # recorded in the member's history
     actions = await MemberActionsRepo(db).for_member(mc_user_id=1303447)
     assert [a["action"] for a in actions] == ["leave_feedback_asked"]
-    # leaving again later: one PM per player, ever
+    # a second "left" row from before we asked (left, rejoined and left
+    # again inside the delay window): still the same PM, no second one
     await _log(db, "left_alliance", "Jcowley", 1303447, minutes_ago=70)
+    assert await service.run() == []
+    assert len(sent) == 1
+
+
+async def test_left_came_back_and_left_again_is_asked_again(db, sent):
+    await _log(db, "left_alliance", "Yoyo", 12, minutes_ago=600)
+    service = await _service(db)
+    service.settings.delay_minutes = 60
+    # first leave: asked (pretend that happened 8 hours ago)
+    await StateRepo(db).set(
+        lf._asked_key(12),
+        (NOW - dt.timedelta(hours=8)).isoformat(timespec="seconds"),
+    )
+    assert await service.run() == []          # the old leave: already asked
+    # came back, left again 90 minutes ago — after we asked: ask again
+    await _log(db, "left_alliance", "Yoyo", 12, minutes_ago=90)
+    assert await service.run() == ["📨 asked Yoyo why they left"]
+    assert [r for r, _, _ in sent] == ["Yoyo"]
+    # and not a third time for that same leave
     assert await service.run() == []
     assert len(sent) == 1
 

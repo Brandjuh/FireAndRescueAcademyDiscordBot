@@ -8,7 +8,11 @@ Per leave, once the delay has passed (default an hour):
 
 * skipped when the player is back in the roster (left and rejoined);
 * skipped when the player turned bot PMs off (``/ingame-pms off``);
-* skipped when the player was already asked once — one PM per player, ever;
+* one PM per LEAVE: a player who comes back and leaves again is asked
+  again, but never twice about the same leave — a new leave only counts
+  when it is logged AFTER the moment we last asked (a later "left" row
+  can only exist if they rejoined in between). Two leaves inside one
+  delay window therefore get a single PM;
 * otherwise one in-game PM (English) with a short multiple-choice question.
 
 Replies arrive as ordinary in-game PMs, so the DM mirror puts them in the
@@ -156,9 +160,11 @@ class LeaveFeedbackService:
             if now - left_at > dt.timedelta(hours=MAX_AGE_HOURS):
                 await self._done(log_id, "too old")
                 continue
-            if mc_id is not None and await self.state.get(_asked_key(int(mc_id))):
-                await self._done(log_id, "already asked before")
-                continue
+            if mc_id is not None:
+                asked_at = _parse(await self.state.get(_asked_key(int(mc_id))))
+                if asked_at is not None and left_at <= asked_at:
+                    await self._done(log_id, "already asked about this leave")
+                    continue
             if active is None:
                 active = await self.members.active_members()
             if mc_id is not None and int(mc_id) in active:

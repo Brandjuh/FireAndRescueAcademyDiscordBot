@@ -555,7 +555,9 @@ feedback) and in the member's history.
 
 * sent `automation.leave_feedback.delay_minutes` (default 60) after the
   leave — and **not** when the player has rejoined by then;
-* **one PM per player, ever**; skipped when the player turned bot PMs off
+* **one PM per leave**: someone who comes back and leaves again is asked
+  again, never twice about the same leave (two leaves within one delay
+  window get a single PM); skipped when the player turned bot PMs off
   (`/ingame-pms off`);
 * never retroactive: only leaves after the feature was first enabled, and
   never for a leave older than 48 h (outage / late log sync);

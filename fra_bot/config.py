@@ -407,7 +407,8 @@ class AutomationConfig:
 class LeaveFeedbackConfig:
     """Ask members who LEFT the alliance (alliance log ``left_alliance`` —
     never a kick) why, with one English in-game PM, ``delay_minutes`` after
-    the leave and only if they haven't rejoined. One PM per player, ever.
+    the leave and only if they haven't rejoined. One PM per leave: someone
+    who comes back and leaves again is asked again.
     Honours ``dry_run``; ``enabled`` is read live."""
     enabled: bool = True
     delay_minutes: int = 60
