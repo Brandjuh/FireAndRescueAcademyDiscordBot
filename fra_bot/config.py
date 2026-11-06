@@ -62,6 +62,8 @@ class DiscordChannels:
     reports: int
     # Approve/deny embeds for requests that need a staff decision.
     admin_approvals: int = 0
+    # The daily/monthly ADMIN overview report; 0 = the admin log.
+    admin_reports: int = 0
     # The member-management panel (dossier button).
     member_panel: int = 0
     # The training/building request panel.
@@ -612,6 +614,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 alliance_logs=int(channels.get("alliance_logs", 0)),
                 reports=int(channels.get("reports", 0)),
                 admin_approvals=int(channels.get("admin_approvals", 0)),
+                admin_reports=int(channels.get("admin_reports", 0)),
                 member_panel=int(channels.get("member_panel", 0)),
                 request_panel=int(channels.get("request_panel", 0)),
                 event_pings=int(

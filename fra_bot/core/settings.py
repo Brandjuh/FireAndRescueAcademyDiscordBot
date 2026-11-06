@@ -86,6 +86,8 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("discord.channels.member_events", "int", True, "Member-events channel"),
     Setting("discord.channels.alliance_logs", "int", True, "Alliance-logs channel"),
     Setting("discord.channels.reports", "int", True, "Reports channel"),
+    Setting("discord.channels.admin_reports", "int", True,
+            "Admin overview report channel (0 = admin log)"),
     Setting("discord.channels.admin_approvals", "int", True,
             "Approve/deny embeds for requests needing a staff decision"),
     Setting("discord.verified_role_id", "int", True,

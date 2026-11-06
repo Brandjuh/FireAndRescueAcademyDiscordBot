@@ -173,7 +173,8 @@ class ReportingCog(commands.Cog):
 
     async def _post_overviews(self, fired_at: dt.datetime) -> None:
         """The built-in overview posts: member digest to the reports
-        channel, admin digest to the admin log — every morning for the
+        channel, admin digest to the admin-reports channel (the admin log
+        when none is set) — every morning for the
         finished game day, plus the finished month on the 1st. Needs
         no per-entry config (the channels are already part of the bot's
         setup); ``reports.overviews`` turns the pair off."""
@@ -188,7 +189,10 @@ class ReportingCog(commands.Cog):
             except Exception:
                 log.exception("Member overview card (%s) failed", period)
             await asyncio.sleep(1.0)
-            channel = self.bot.channel_for("admin_log")
+            channel = (
+                self.bot.channel_for("admin_reports")
+                or self.bot.channel_for("admin_log")
+            )
             if channel is None:
                 continue
             try:
