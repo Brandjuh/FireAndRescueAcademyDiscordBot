@@ -186,6 +186,15 @@ async def test_member_outlook_projects_the_roster(db):
     assert grow and "grow" in grow[0]
 
 
+def _inside_today_utc() -> dt.datetime:
+    """A moment earlier today (UTC). "An hour ago" fell on YESTERDAY when
+    the suite ran in the first hour after 00:00 UTC, so the log row missed
+    the "today" period and the test failed only at that time of day."""
+    now = dt.datetime.now(UTC)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return now - min(dt.timedelta(hours=1), (now - midnight) / 2)
+
+
 async def test_admin_extras_and_action_items(db, monkeypatch):
     # Outside the post-reset grace window, whatever the wall clock says:
     # in the first hours after 00:00 UTC "today" deliberately shows the
@@ -206,8 +215,7 @@ async def test_admin_extras_and_action_items(db, monkeypatch):
         "INSERT INTO alliance_logs (signature, raw_timestamp, event_at, "
         "action_key, executed_name, description, scraped_at, posted_at) "
         "VALUES ('adm-1', 'x', ?, 'added_to_alliance', 'AdminAnna', 'd', ?, ?)",
-        ((dt.datetime.now(UTC) - dt.timedelta(hours=1))
-         .isoformat(timespec="seconds"),
+        (_inside_today_utc().isoformat(timespec="seconds"),
          utcnow_iso(), utcnow_iso()),
     )
     # The period resolves AFTER seeding: created_at stamps land strictly
