@@ -398,6 +398,19 @@ class AutomationConfig:
     sanctions: SanctionsConfig
     welcome: WelcomeConfig
     mc_status: MissionChiefStatusConfig
+    leave_feedback: "LeaveFeedbackConfig" = field(
+        default_factory=lambda: LeaveFeedbackConfig()
+    )
+
+
+@dataclass(frozen=True)
+class LeaveFeedbackConfig:
+    """Ask members who LEFT the alliance (alliance log ``left_alliance`` —
+    never a kick) why, with one English in-game PM, ``delay_minutes`` after
+    the leave and only if they haven't rejoined. One PM per player, ever.
+    Honours ``dry_run``; ``enabled`` is read live."""
+    enabled: bool = True
+    delay_minutes: int = 60
 
 
 DEFAULT_WELCOME_MESSAGE = (
@@ -863,6 +876,15 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                     _get(raw, "automation", "welcome", "message",
                          default=DEFAULT_WELCOME_MESSAGE)
                 ) or DEFAULT_WELCOME_MESSAGE,
+            ),
+            leave_feedback=LeaveFeedbackConfig(
+                enabled=bool(
+                    _get(raw, "automation", "leave_feedback", "enabled", default=True)
+                ),
+                delay_minutes=max(0, int(
+                    _get(raw, "automation", "leave_feedback", "delay_minutes",
+                         default=60)
+                )),
             ),
             mc_status=MissionChiefStatusConfig(
                 enabled=bool(

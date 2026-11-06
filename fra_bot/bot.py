@@ -178,6 +178,11 @@ class FRABot(commands.Bot):
         # reference bot): outgoing-only conversations live in the game's
         # SENT box and may never show on the inbox page the scan reads.
         self.tax_warnings.mirror = self.dm_mirror.mirror_now
+        # "Why did you leave?" PMs to members who left on their own.
+        from .services.leave_feedback import LeaveFeedbackService
+
+        self.leave_feedback = LeaveFeedbackService(cfg, self.mc, self.db)
+        self.leave_feedback.mirror = self.dm_mirror.mirror_now
         # Board building overrides are admin-only; the service is
         # Discord-free, so the guild lookup is injected here.
         self.buildings.is_admin_mc_id = self._mc_id_is_admin
@@ -431,6 +436,14 @@ class FRABot(commands.Bot):
             minutes=5,
             name="welcome",
             initial_delay_seconds=180.0,
+        )
+        # Ask members who left (not kicked) why. ALWAYS registered; the
+        # automation.leave_feedback.enabled switch is read live.
+        sched.add_interval_job(
+            self._guarded(self._leave_feedback_pass, "leave-feedback"),
+            minutes=10,
+            name="leave-feedback",
+            initial_delay_seconds=420.0,
         )
         sched.add_interval_job(
             self._guarded(self.logs_sync.run, "logs"),
@@ -936,6 +949,13 @@ class FRABot(commands.Bot):
         ):
             await self.notify_admin(
                 "📬 **DM mirror**\n" + "\n".join(summary["lines"])[:1800]
+            )
+
+    async def _leave_feedback_pass(self) -> None:
+        lines = await self.leave_feedback.run()
+        if lines:
+            await self.notify_admin(
+                "👋 **Leave feedback**\n" + "\n".join(lines)[:1800]
             )
 
     async def _tax_warning_pass(self) -> None:

@@ -165,6 +165,16 @@ automation:
     # who join afterwards.
     enabled: true
     message: "@{name} Welcome! Please check your DM for more information."
+  leave_feedback:
+    # Ask members who LEFT the alliance on their own (alliance log "Left the
+    # alliance" — never a kick, also not the tax auto-kick) why they left:
+    # one English in-game PM with a short multiple-choice question, sent
+    # delay_minutes after the leave and only if they haven't rejoined. One
+    # PM per player, ever; skipped when the player turned bot PMs off
+    # (/ingame-pms off). Replies show up in the DM-mirror forum. Never
+    # retroactive (only leaves after enabling). Honours dry_run.
+    enabled: true
+    delay_minutes: 60
   mc_status:
     # Tell members in discord.channels.mc_status when MissionChief itself
     # is unreachable, and again when it is back (with how long it lasted).

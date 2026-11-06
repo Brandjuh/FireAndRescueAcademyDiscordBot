@@ -542,6 +542,28 @@ count; `!fra taxwarnings scan` runs a pass on demand. All knobs are
 live-settable via `!fra set` (`tax_warnings.min_rate`, `min_days_between`,
 `grace_hours`, `max_per_run`, `auto_kick`, `interval_hours`).
 
+### Leave feedback ("why did you leave?")
+
+Members who **leave the alliance on their own** (alliance log "Left the
+alliance" — never a kick, including the tax auto-kick) get one English
+in-game PM asking why, with a short multiple-choice list (other alliance,
+not enough missions/events, the 5% contribution/rules, training/buildings,
+stopped playing, something else). Their replies arrive as normal in-game
+PMs, so they show up in the **DM-mirror forum** where staff can read and
+answer them; every PM sent is listed in the admin channel (👋 Leave
+feedback) and in the member's history.
+
+* sent `automation.leave_feedback.delay_minutes` (default 60) after the
+  leave — and **not** when the player has rejoined by then;
+* **one PM per player, ever**; skipped when the player turned bot PMs off
+  (`/ingame-pms off`);
+* never retroactive: only leaves after the feature was first enabled, and
+  never for a leave older than 48 h (outage / late log sync);
+* at most 3 PMs per pass (every 10 min); honours `dry_run`.
+
+On by default; `!fra set leave_feedback.enabled off` stops it (live).
+The text lives in `fra_bot/services/leave_feedback.py`.
+
 ### Built-in eventpinger
 
 Because the bot starts every alliance mission/event itself, it doesn't need
