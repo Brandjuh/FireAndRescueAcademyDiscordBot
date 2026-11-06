@@ -36,6 +36,50 @@ STATE_BACKFILL_PAGE_FAIL = "logs_backfill_page_fail"  # "page:count"
 BACKFILL_SKIP_AFTER = 5
 
 
+def _rows_added_on_top(first_page: list[dict], fresh_page: list[dict]) -> int:
+    """How many rows arrived on top of page 1 between the first read
+    (*first_page*) and a re-read (*fresh_page*): the offset at which the old
+    top rows reappear. A whole page of new rows (old top not found) counts
+    as the full fresh page."""
+    old = [r["signature"] for r in first_page]
+    new = [r["signature"] for r in fresh_page]
+    if not old:
+        return 0
+    for offset in range(len(new)):
+        window = min(len(old), len(new) - offset, 5)
+        if window >= 1 and new[offset:offset + window] == old[:window]:
+            return offset
+    return len(new)
+
+
+def _boundary_overlap(previous: list[dict], following: list[dict], limit: int) -> int:
+    """Rows at the start of *following* that repeat the end of *previous*
+    (a shift artifact), at most *limit*."""
+    prev = [r["signature"] for r in previous]
+    nxt = [r["signature"] for r in following]
+    for size in range(min(limit, len(prev), len(nxt)), 0, -1):
+        if prev[-size:] == nxt[:size]:
+            return size
+    return 0
+
+
+def _join_pages(pages: list[list[dict]], *, budget: int | None) -> list[dict]:
+    """Concatenate pages (newest first), dropping re-shown rows at page
+    boundaries — never more than *budget* in total (the measured shift;
+    None = not measured, trim every overlap)."""
+    out: list[dict] = []
+    left = budget
+    for index, rows in enumerate(pages):
+        if index and (left is None or left > 0):
+            limit = len(rows) if left is None else left
+            drop = _boundary_overlap(pages[index - 1], rows, limit)
+            rows = rows[drop:]
+            if left is not None:
+                left -= drop
+        out.extend(rows)
+    return out
+
+
 class LogsSyncService:
     def __init__(self, cfg: Config, client: MissionChiefClient, db: Database) -> None:
         self._cfg = cfg
@@ -50,8 +94,7 @@ class LogsSyncService:
         first_run = await self._state.get(STATE_INITIALIZED) is None
         max_pages = FIRST_RUN_PAGES if first_run else MAX_INCREMENTAL_PAGES
 
-        collected: list[dict] = []  # newest first, across pages
-        seen_signatures: set[str] = set()
+        pages: list[list[dict]] = []  # each page's rows, newest first
         pages_fetched = 0
         try:
             for page_number in range(1, max_pages + 1):
@@ -64,18 +107,7 @@ class LogsSyncService:
                     )
                 if not page.rows:
                     break
-                # A log line landing MID-WALK shifts every row down one, so
-                # page N+1 re-shows the tail of page N. Everything goes into
-                # ONE insert batch here (unlike the backfill's page-per-batch,
-                # which dedupes this via the DB occurrence count), so drop
-                # rows already collected from an EARLIER page — without this
-                # the re-shown row counts as a second occurrence and the feed
-                # posts it twice. Repeats within one page stay: those are
-                # genuinely repeated events, not shift artifacts.
-                collected.extend(
-                    r for r in page.rows if r["signature"] not in seen_signatures
-                )
-                seen_signatures.update(r["signature"] for r in page.rows)
+                pages.append(page.rows)
 
                 if not first_run:
                     signatures = [row["signature"] for row in page.rows]
@@ -87,6 +119,31 @@ class LogsSyncService:
                 run_id, status="failed", pages=pages_fetched, message=str(exc)
             )
             raise
+
+        # A log line landing MID-WALK shifts every row down one, so page N+1
+        # re-shows the tail of page N. Everything goes into ONE insert batch
+        # (the DB occurrence count can't tell a re-shown row from a real
+        # repeat), so the overlap has to go here. But identical rows are
+        # often REAL: four classes opened in the same minute are four equal
+        # lines, and dropping every repeat across a page boundary lost
+        # course starts. So measure the shift: re-read page 1 and count the
+        # rows that arrived on top during the walk. Only that many rows can
+        # be re-shown, and with no new rows nothing is dropped.
+        new_on_top: list[dict] = []
+        shift: int | None = 0
+        if len(pages) > 1:
+            try:
+                html = await self._client.fetch_page(f"{LOGS_PATH}?page=1")
+                pages_fetched += 1
+                fresh = parse_logs_page(html).rows
+                shift = _rows_added_on_top(pages[0], fresh)
+                new_on_top = fresh[:shift] if shift else []
+            except MissionChiefError as exc:
+                # Can't measure: fall back to trimming every boundary overlap.
+                log.info("Logs sync: page-1 re-read failed (%s); trimming "
+                         "every page-boundary overlap", exc)
+                shift = None
+        collected = new_on_top + _join_pages(pages, budget=shift)
 
         # Chronological order (oldest first) before inserting.
         collected.reverse()

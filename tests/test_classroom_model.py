@@ -91,3 +91,13 @@ async def test_compare_never_raises(db, monkeypatch):
 
     monkeypatch.setattr(cm, "_compare", boom)
     assert await cm.compare_with_walk(db, StateRepo(db), CATALOG, [(1, "fire", 0, 0.0)]) is None
+
+
+async def test_rooms_are_capped_at_four(db):
+    # [AA] Rescue Academy #0006 logs four classroom expansions; its page
+    # shows four rooms, not five.
+    for i in range(4):
+        await _log(db, "expansion_finished", 1,
+                   "Expansion finished (Additional classroom)", T0, f"e{i}")
+    models = await cm.build_models(db, {1: "fire"}, CATALOG, since=T0 - dt.timedelta(days=8))
+    assert models[1].rooms == cm.MAX_ROOMS == 4
