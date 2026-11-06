@@ -468,6 +468,12 @@ class AutomationCog(commands.Cog):
             interaction, discord.Colour.red(),
             f"Denied by {interaction.user} — {reason}",
         )
+        # Answer the interaction NOW: Discord allows 3 seconds, and the board
+        # reply below goes through the MissionChief pacer (seconds to minutes
+        # when it is busy), which made every deny show a timeout.
+        await interaction.response.send_message(
+            f"❌ Request {request_id} denied.", ephemeral=True
+        )
         # Board reply + Discord DM, the reference bot's denial texts.
         service = {
             "training": getattr(self.bot, "trainings", None),
@@ -501,9 +507,6 @@ class AutomationCog(commands.Cog):
                     )
                 except (discord.Forbidden, discord.HTTPException):
                     pass
-        await interaction.response.send_message(
-            f"❌ Request {request_id} denied.", ephemeral=True
-        )
 
     @staticmethod
     async def _decide_message(
