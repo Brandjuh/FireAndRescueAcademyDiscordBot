@@ -176,6 +176,16 @@ automation:
     # retroactive (only leaves after enabling). Honours dry_run.
     enabled: true
     delay_minutes: 60
+  announcements:
+    # Auto-refresh the in-game "Important Alliance Announcements" line (max
+    # 200 characters) from the text saved with `!fra announce set …`, e.g.
+    # "📚 Free classes: {free_classes} • {tip}". Every interval_minutes the
+    # text is re-rendered (next tip, fresh numbers) and saved only when it
+    # changed. Manual `!fra announce` commands work with this off. Every
+    # save resends the other alliance texts untouched and is verified.
+    # Honours dry_run. Both values are live (`!fra announce auto on 30`).
+    enabled: false
+    interval_minutes: 60
   mc_status:
     # Tell members in discord.channels.mc_status when MissionChief itself
     # is unreachable, and again when it is back (with how long it lasted).

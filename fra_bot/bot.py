@@ -183,6 +183,14 @@ class FRABot(commands.Bot):
 
         self.leave_feedback = LeaveFeedbackService(cfg, self.mc, self.db)
         self.leave_feedback.mirror = self.dm_mirror.mirror_now
+        # The in-game "Important Alliance Announcements" line, managed
+        # from Discord (`!fra announce`), optionally auto-refreshed.
+        from .services.announcements import AnnouncementsService
+
+        self.announcements = AnnouncementsService(
+            cfg, self.mc, self.db,
+            availability=self.trainings.cached_availability,
+        )
         # Board building overrides are admin-only; the service is
         # Discord-free, so the guild lookup is injected here.
         self.buildings.is_admin_mc_id = self._mc_id_is_admin
@@ -444,6 +452,15 @@ class FRABot(commands.Bot):
             minutes=10,
             name="leave-feedback",
             initial_delay_seconds=420.0,
+        )
+        # Re-render + save the announcements line. ALWAYS registered; the
+        # automation.announcements.{enabled,interval_minutes} settings are
+        # read live — the 5-minute tick only acts once the interval passed.
+        sched.add_interval_job(
+            self._guarded(self._announcements_pass, "announcements"),
+            minutes=5,
+            name="announcements",
+            initial_delay_seconds=480.0,
         )
         sched.add_interval_job(
             self._guarded(self.logs_sync.run, "logs"),
@@ -956,6 +973,13 @@ class FRABot(commands.Bot):
         if lines:
             await self.notify_admin(
                 "👋 **Leave feedback**\n" + "\n".join(lines)[:1800]
+            )
+
+    async def _announcements_pass(self) -> None:
+        lines = await self.announcements.run()
+        if lines:
+            await self.notify_admin(
+                "📢 **Alliance announcements**\n" + "\n".join(lines)[:1800]
             )
 
     async def _tax_warning_pass(self) -> None:
