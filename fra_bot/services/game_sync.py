@@ -273,7 +273,7 @@ def render_hotspots(
     if not spots:
         return (
             "No game data synced yet — members install the userscript "
-            "(tools/fra-profile-sync.user.js) and click 'Sync to FRA'."
+            "(tools/fra-profile-sync.user.js) and choose FRA → 'Sync to FRA'."
         )
     lines = [
         f"🔥 **Alliance hotspots** — {building_total} buildings from "

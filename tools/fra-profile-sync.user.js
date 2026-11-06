@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         FRA Profile Sync
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      2.0.0
+// @version      2.1.0
 // @description  Send your own MissionChief buildings and vehicles to the FRA Discord bot (profile + hotspots). NEVER sends passwords, cookies or sessions — only counts, types and building coordinates.
 // @match        https://www.missionchief.com/*
+// @match        https://missionchief.com/*
 // @grant        none
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyDiscordBot/main/tools/fra-profile-sync.user.js
@@ -16,8 +17,8 @@
  * 2. Open the install link from the FRA Discord panel (the 📥 button) —
  *    Tampermonkey picks the script up automatically. Updates install
  *    themselves from the same link.
- * 3. Open the missionchief.com MAIN page (the dashboard with the map)
- *    — a "🔄 Sync to FRA" button appears in the navbar. Click it.
+ * 3. Open missionchief.com — an "FRA" menu appears in the navbar.
+ *    Choose "🔄 Sync to FRA".
  * 4. The script asks ONCE for your sync link: get it with the
  *    "🔑 Get sync link" button on the FRA Discord panel and paste it.
  *    Check the summary, confirm. Done.
@@ -38,12 +39,21 @@
 (function () {
   "use strict";
 
+  // Never inside the game's lightbox frames (mission/building windows):
+  // one menu and one auto-sync per tab.
+  if (window.top !== window.self) return;
+
   // Manual override for the sync link — normally leave this alone: the
   // script asks for the link once and remembers it. (Editing this line
   // does NOT survive script auto-updates; the remembered link does.)
   const WEBHOOK_URL = "PASTE-THE-WEBHOOK-URL-HERE";
 
-  const BASE = "https://www.missionchief.com";
+  // The game answers on both www.missionchief.com and missionchief.com; a
+  // fetch across the two is cross-origin and carries no session, so always
+  // stay on the host the player is actually on.
+  const BASE = /missionchief\.com$/i.test(window.location.hostname)
+    ? window.location.origin
+    : "https://www.missionchief.com";
   const STORAGE_KEY = "fra_sync_webhook_url";
   const LAST_SYNC_KEY = "fra_sync_last_auto";
   const AUTO_SYNC_HOURS = 24;
@@ -254,33 +264,150 @@
     }
   }
 
-  function addButton() {
-    if (document.getElementById("fra-sync-button")) return;
-    const nav = document.querySelector(".navbar .nav, .navbar-right, #navbar-main-collapse");
-    const button = document.createElement("a");
-    button.id = "fra-sync-button";
-    button.textContent = "🔄 Sync to FRA";
-    button.href = "#";
-    button.style.cssText =
-      "display:inline-block;padding:6px 10px;margin:6px;background:#c0392b;" +
-      "color:#fff;border-radius:4px;font-weight:bold;text-decoration:none;";
-    button.addEventListener("click", function (event) {
-      event.preventDefault();
-      run();
-    });
-    if (nav) {
-      nav.appendChild(button);
-    } else {
-      button.style.cssText += "position:fixed;top:8px;right:8px;z-index:9999;";
-      document.body.appendChild(button);
+  // ------------------------------------------------ FRA menu (shared block)
+  // Every FRA userscript puts its entries under ONE "FRA" dropdown in the
+  // game's navbar instead of each adding its own buttons. A userscript
+  // cannot import another, so this block is copied VERBATIM into each
+  // script; tests/test_userscript_menu.py fails when the copies drift.
+  // Whichever script runs first builds the menu; the others find it by id
+  // and slot their items in by `order` (public scripts < 50 <= private).
+  function fraMenuList() {
+    let list = document.getElementById("fra-menu-list");
+    if (list) return list;
+    if (!document.getElementById("fra-menu-style")) {
+      const style = document.createElement("style");
+      style.id = "fra-menu-style";
+      style.textContent =
+        "#fra-menu > a { font-weight: 700; }" +
+        "#fra-menu-list { display: none; min-width: 220px; }" +
+        "#fra-menu.open > #fra-menu-list { display: block; }" +
+        "#fra-menu-list .fra-menu-head { padding: 3px 20px; font-size: 11px;" +
+        " color: #999; text-transform: uppercase; }" +
+        "#fra-menu-float { position: fixed; top: 8px; right: 8px; z-index: 2147483601;" +
+        " list-style: none; margin: 0; padding: 0; }" +
+        "#fra-menu-float #fra-menu > a { display: inline-block; padding: 6px 12px;" +
+        " background: #c0392b; color: #fff; border-radius: 4px; text-decoration: none; }" +
+        "#fra-menu-float #fra-menu-list { position: absolute; right: 0; left: auto;" +
+        " background: #fff; list-style: none; padding: 5px 0; margin: 2px 0 0;" +
+        " border: 1px solid rgba(0,0,0,.15); border-radius: 4px; }" +
+        "#fra-menu-float #fra-menu-list a { display: block; padding: 3px 20px;" +
+        " color: #333; white-space: nowrap; text-decoration: none; }";
+      document.head.appendChild(style);
     }
+    const root = document.createElement("li");
+    root.id = "fra-menu";
+    root.className = "dropdown";
+    const toggle = document.createElement("a");
+    toggle.href = "#";
+    toggle.className = "dropdown-toggle";
+    toggle.title = "Fire & Rescue Academy tools";
+    toggle.append("FRA ");
+    const caret = document.createElement("b");
+    caret.className = "caret";
+    toggle.appendChild(caret);
+    list = document.createElement("ul");
+    list.id = "fra-menu-list";
+    list.className = "dropdown-menu";
+    root.append(toggle, list);
+    // Our own toggle, not Bootstrap's data-toggle: the game's Bootstrap
+    // would otherwise toggle it a second time and cancel ours out.
+    toggle.addEventListener("click", (event) => {
+      event.preventDefault();
+      root.classList.toggle("open");
+    });
+    document.addEventListener("click", (event) => {
+      if (!root.contains(event.target)) root.classList.remove("open");
+    });
+    // In order of preference — one selector LIST would return whichever
+    // match comes first in the page, i.e. the left-hand nav.
+    let nav = null;
+    for (const selector of [
+      "#navbar-main-collapse ul.navbar-right",
+      "#navbar-main-collapse ul.nav",
+      ".navbar ul.nav",
+    ]) {
+      nav = document.querySelector(selector);
+      if (nav) break;
+    }
+    if (nav) {
+      nav.insertBefore(root, nav.firstChild);
+    } else {
+      const float = document.createElement("ul");
+      float.id = "fra-menu-float";
+      float.appendChild(root);
+      document.body.appendChild(float);
+    }
+    return list;
   }
 
-  // The manual button only on the game's main page (a sync button on
-  // every subpage is noise); the silent daily refresh runs from any
-  // page — the APIs are reachable everywhere.
-  if (window.location.pathname === "/") {
-    addButton();
+  function fraMenuClose() {
+    const root = document.getElementById("fra-menu");
+    if (root) root.classList.remove("open");
   }
+
+  // item: { id, label, order, title?, onClick, header? } — `header` adds a
+  // small section caption above the first item of that section.
+  function fraMenuAdd(item) {
+    const existing = document.getElementById(item.id);
+    if (existing) return existing;
+    const list = fraMenuList();
+    const order = Number(item.order || 50);
+    const li = document.createElement("li");
+    li.id = item.id;
+    li.dataset.fraOrder = String(order);
+    const link = document.createElement("a");
+    link.href = "#";
+    link.textContent = item.label;
+    if (item.title) link.title = item.title;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      fraMenuClose();
+      item.onClick();
+    });
+    li.appendChild(link);
+    const nodes = [li];
+    if (item.header && !document.getElementById(item.id + "-head")) {
+      const head = document.createElement("li");
+      head.id = item.id + "-head";
+      head.className = "fra-menu-head";
+      head.dataset.fraOrder = String(order - 0.5);
+      head.textContent = item.header;
+      nodes.unshift(head);
+    }
+    for (const node of nodes) {
+      const mine = Number(node.dataset.fraOrder);
+      const after = Array.from(list.children)
+        .find((other) => Number(other.dataset.fraOrder) > mine);
+      list.insertBefore(node, after || null);
+    }
+    return li;
+  }
+  // ----------------------------------------------- /FRA menu (shared block)
+
+  function addMenuItems() {
+    fraMenuAdd({
+      id: "fra-sync-button",
+      label: "🔄 Sync to FRA",
+      order: 10,
+      header: "Profile",
+      title: "Send your building/vehicle counts to the FRA Discord bot",
+      onClick: run,
+    });
+    fraMenuAdd({
+      id: "fra-sync-relink",
+      label: "🔑 Change sync link",
+      order: 11,
+      title: "Forget the stored sync link and paste a new one",
+      onClick: () => {
+        storageDel(STORAGE_KEY);
+        run();
+      },
+    });
+  }
+
+  // In the FRA menu on every page (a dropdown entry is no noise, unlike the
+  // old navbar button that only lived on the main page); the silent daily
+  // refresh runs from any page too.
+  addMenuItems();
   autoSync();
 })();
