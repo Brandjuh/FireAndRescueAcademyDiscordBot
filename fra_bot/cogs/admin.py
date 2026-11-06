@@ -47,6 +47,12 @@ def is_fra_admin_ctx(ctx: commands.Context) -> bool:
     return any(role.id in allowed for role in ctx.author.roles)
 
 
+#: ``!fra`` subcommands every member may run (by qualified name, so aliases
+#: are covered). Everything else under ``!fra`` stays admin-only through
+#: ``AdminCog.cog_check``.
+PUBLIC_FRA_COMMANDS = frozenset({"fra profile"})
+
+
 def is_fra_admin():
     async def predicate(ctx: commands.Context) -> bool:
         return is_fra_admin_ctx(ctx)
@@ -75,13 +81,37 @@ class AdminCog(commands.Cog):
         skips the group's prepare/checks and dispatches straight to the
         subcommand), so authorization must live at the cog level where
         it always runs. Without this, any member could run !fra update.
+        The few member commands are listed in PUBLIC_FRA_COMMANDS.
         """
+        command = getattr(ctx, "command", None)
+        if command is not None and command.qualified_name in PUBLIC_FRA_COMMANDS:
+            return True
         return is_fra_admin_ctx(ctx)
 
     @commands.group(name="fra", invoke_without_command=True)
     @is_fra_admin()
     async def fra(self, ctx: commands.Context) -> None:
         await ctx.send_help(ctx.command)
+
+    @fra.command(name="profile", aliases=["profiel"])
+    @commands.guild_only()
+    @commands.cooldown(1, 20, commands.BucketType.user)
+    async def fra_profile(
+        self, ctx: commands.Context, *, member: discord.Member | None = None
+    ) -> None:
+        """Post a profile publicly in this channel — open to EVERY member.
+
+        `!fra profile` posts your own, `!fra profile @someone` theirs: the
+        same card `/profile` shows privately (which anyone can already view
+        for anyone), so this exposes nothing new — it only makes it visible
+        to the channel.
+        """
+        cog = self.bot.get_cog("ProfileCog")
+        if cog is None:
+            await ctx.send("The profile module isn't loaded right now.")
+            return
+        embed = await cog.profile_embed(member or ctx.author)
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @fra.command(name="status")
     async def status(self, ctx: commands.Context) -> None:

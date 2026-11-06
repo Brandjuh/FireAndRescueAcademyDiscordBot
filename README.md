@@ -299,6 +299,15 @@ missionchief.com in your own browser.
   from CI. `tests/test_autobuild_userscript.py` guards only what is
   checkable statically (coins, defaults, the world pool, no secrets).
 
+## Member commands under `!fra`
+
+Everything under `!fra` is admin-only, **except** the commands in
+`PUBLIC_FRA_COMMANDS` (`fra_bot/cogs/admin.py`):
+
+| Command | Description |
+|---|---|
+| `!fra profile [member]` (alias `!fra profiel`) | Post a profile card **publicly** in the channel — your own, or someone else's (the same card `/profile` shows privately). 20 s cooldown per user, no pings, not in DMs |
+
 ## Admin commands
 
 Requires Discord administrator permission or a role listed in

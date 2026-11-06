@@ -1,5 +1,7 @@
-"""Member profiles: ``/profile`` to view (everyone), ``/profile-edit``
-to manage your own sections via modals (admins may edit anyone's).
+"""Member profiles: ``/profile`` to view (everyone, privately),
+``!fra profile`` to post one publicly in the channel (AdminCog, open to all
+members), ``/profile-edit`` to manage your own sections via modals (admins
+may edit anyone's).
 
 ``/ingame-pms`` turns the bot's in-game PM notifications on or off.
 
@@ -269,7 +271,13 @@ class ProfileCog(commands.Cog):
     ) -> None:
         target = member or interaction.user
         embed = await self.profile_embed(target)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        hint = "`!fra profile`" if target.id == interaction.user.id else (
+            f"`!fra profile {target.display_name}`"
+        )
+        await interaction.response.send_message(
+            content=f"-# Only you can see this — {hint} posts it in the channel.",
+            embed=embed, ephemeral=True,
+        )
 
     @app_commands.command(
         name="profile-edit", description="Edit your profile (per section)"
