@@ -70,6 +70,12 @@ RETRY_MINUTES = 15              # backoff between busy retries (bounded by MAX_A
 #: the MissionChief request budget. Just under RETRY_MINUTES, so the first
 #: request whose retry comes due searches again and refreshes the memo.
 FULL_MEMO_SECONDS = (RETRY_MINUTES - 1) * 60
+#: A retry planned on the classroom model's "a class ends then" moment is
+#: never sooner than this (the poll runs every few minutes anyway, and the
+#: game needs a moment to free the room).
+MIN_MODEL_RETRY_SECONDS = 2 * 60
+#: Slack after the predicted class end before retrying.
+MODEL_RETRY_SLACK_SECONDS = 60
 CLASS_CAPACITY = 10             # people per class (game constant, informational)
 MAX_CLASSES_PER_REQUEST = 4     # copies of one course per request/run
 
@@ -410,29 +416,64 @@ class TrainingsService(BoardRequestService):
 
     # -- "all classrooms full" memo ----------------------------------------
 
-    def _full_memos(self) -> dict[str, tuple[float, str]]:
-        """discipline -> (monotonic expiry, human reason). In memory only: a
-        restart simply searches again."""
-        return self.__dict__.setdefault("_full_memo", {})
+    def _full_memos(self) -> dict[str, tuple[float, str, dt.datetime | None]]:
+        """discipline -> (monotonic expiry, human reason, predicted moment a
+        room frees up). In memory only: a restart simply searches again."""
+        return self.__dict__.setdefault("_full_memo_map", {})
 
-    def _full_memo_reason(self, discipline: str) -> str | None:
+    def _full_memo(self, discipline: str) -> tuple[str, dt.datetime | None] | None:
         memo = self._full_memos().get(discipline)
         if memo is None:
             return None
         if time.monotonic() >= memo[0]:
             self._full_memos().pop(discipline, None)
             return None
-        return memo[1]
+        return memo[1], memo[2]
 
-    def _remember_full(self, discipline: str, academies: int) -> None:
-        checked = dt.datetime.now(dt.timezone.utc).strftime("%H:%M UTC")
+    def _full_memo_reason(self, discipline: str) -> str | None:
+        memo = self._full_memo(discipline)
+        return memo[0] if memo else None
+
+    def _remember_full(
+        self, discipline: str, academies: int, free_at: dt.datetime | None = None
+    ) -> None:
+        now = dt.datetime.now(dt.timezone.utc)
         reason = (
             f"all {academies} {discipline} academies had no free classroom "
-            f"(checked {checked})"
+            f"(checked {now.strftime('%H:%M UTC')})"
         )
-        self._full_memos()[discipline] = (time.monotonic() + FULL_MEMO_SECONDS, reason)
+        seconds = float(FULL_MEMO_SECONDS)
+        if free_at is not None:
+            # The model expects a class to end sooner: search again then.
+            until = (free_at - now).total_seconds() + MODEL_RETRY_SLACK_SECONDS
+            seconds = max(MIN_MODEL_RETRY_SECONDS, min(seconds, until))
+            reason += f"; next class predicted to end {free_at.strftime('%H:%M UTC')}"
+        self._full_memos()[discipline] = (time.monotonic() + seconds, reason, free_at)
         log.info("training: %s — skipping %s searches for %d min",
-                 reason, discipline, FULL_MEMO_SECONDS // 60)
+                 reason, discipline, round(seconds / 60))
+
+    async def _classroom_forecast(
+        self, discipline: str, academies: list
+    ) -> tuple[set[int], dt.datetime | None]:
+        """The log-based model's view of *academies* right now: the ids it
+        expects to have a free classroom, and the earliest moment a room
+        frees up when it expects none. Best effort: a model failure returns
+        "no opinion" and the search runs in its normal order."""
+        try:
+            now = dt.datetime.now(dt.timezone.utc)
+            ids = {int(a.building_id): discipline for a in academies}
+            models = await classroom_model.build_models(
+                self.state._db, ids, await merged_course_catalog(self.state),
+                since=now - dt.timedelta(days=classroom_model.UNKNOWN_COURSE_DAYS + 1),
+            )
+        except Exception:  # noqa: BLE001 — the model only steers, never blocks
+            log.exception("training: classroom model failed; searching unsorted")
+            return set(), None
+        free = {bid for bid, m in models.items() if m.free_at(now) > 0}
+        if free:
+            return free, None
+        ends = [t for m in models.values() if (t := m.next_free_at(now)) is not None]
+        return free, (min(ends) if ends else None)
 
     def _forget_full(self, discipline: str) -> None:
         if self._full_memos().pop(discipline, None) is not None:
@@ -1067,6 +1108,7 @@ class TrainingsService(BoardRequestService):
         opened: list[dict] = []       # {name, building_id, dry_run}
         could_not: list[str] = []     # "- {name}: {friendly reason}" lines
         pending: list[dict] = []      # transient failures worth retrying
+        predicted_free_at: list[dt.datetime] = []  # model: when a room frees up
         opened_any = False
 
         ambiguous_reasons = [self._ambiguity_help(a) for a in ambiguous]
@@ -1135,6 +1177,8 @@ class TrainingsService(BoardRequestService):
                         "discipline": match.discipline, "name": match.name,
                         "count": remaining,
                     })
+                    if outcome.get("free_at") is not None:
+                        predicted_free_at.append(outcome["free_at"])
                 else:  # failed — permanent for this course, drop every copy
                     could_not.append(
                         f"- {match.name}: "
@@ -1155,9 +1199,18 @@ class TrainingsService(BoardRequestService):
             # exists), and back off so each retry doesn't re-walk the whole
             # academy list every poll.
             bump = True
-            next_attempt_at = (
-                dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=RETRY_MINUTES)
-            ).isoformat()
+            now = dt.datetime.now(dt.timezone.utc)
+            retry = now + dt.timedelta(minutes=RETRY_MINUTES)
+            if predicted_free_at:
+                # The classroom model expects a class to end sooner: retry
+                # right after that instead of waiting out the full backoff.
+                soonest = min(predicted_free_at) + dt.timedelta(
+                    seconds=MODEL_RETRY_SLACK_SECONDS
+                )
+                retry = min(retry, max(
+                    soonest, now + dt.timedelta(seconds=MIN_MODEL_RETRY_SECONDS)
+                ))
+            next_attempt_at = retry.isoformat()
         elif opened_any:
             status = "done"
             detail = "; ".join(f"{r['training']}: {r['outcome']}" for r in results)
@@ -1341,12 +1394,12 @@ class TrainingsService(BoardRequestService):
           * ``busy``      — transient (no free classroom / list failed); retry
           * ``failed``    — permanent (course not offered here)
         """
-        memo = self._full_memo_reason(match.discipline)
+        memo = self._full_memo(match.discipline)
         if memo is not None:
             # Another request just read every academy of this discipline and
             # found them all full: don't spend 30-40 page loads to learn the
             # same thing again.
-            return {"status": "busy", "reason": memo}
+            return {"status": "busy", "reason": memo[0], "free_at": memo[1]}
         try:
             academies = await self._find_academies(match.discipline)
         except MissionChiefError as exc:
@@ -1376,11 +1429,27 @@ class TrainingsService(BoardRequestService):
             log.warning("training: %s", reason)
             return {"status": "busy", "reason": reason}
 
+        # Let the log-based classroom model steer the ORDER: academies it
+        # expects to have a free room are tried first (in their usual order,
+        # preferred academy first), the rest after. Every academy is still
+        # read before giving up, so a room the model missed (a class bought
+        # off with coins that never reached the log) is still found.
+        predicted_free, free_at = await self._classroom_forecast(
+            match.discipline, academies
+        )
+        if predicted_free:
+            academies = (
+                [a for a in academies if a.building_id in predicted_free]
+                + [a for a in academies if a.building_id not in predicted_free]
+            )
+
         last_reason = "no suitable academy"
         busy = False
         full = 0  # academies read fine and without any free classroom
+        pages = 0
         for academy in academies:
             path = f"/buildings/{academy.building_id}"
+            pages += 1
             try:
                 page = parse_academy_page(await self.client.fetch_page(path))
             except MissionChiefError as exc:
@@ -1476,15 +1545,25 @@ class TrainingsService(BoardRequestService):
                     "building_id": academy.building_id,
                     "reason": "could not verify",
                 }
+            log.info(
+                "training: opened %s in academy %s after %d page(s) (model %s)",
+                match.name, academy.building_id, pages,
+                "predicted it free" if academy.building_id in predicted_free
+                else "did not predict it",
+            )
             return {"status": "opened", "building_id": academy.building_id}
 
         if busy and full == len(academies):
             # EVERY academy was read and none has a free classroom — true for
             # any course of this discipline, so other requests can skip the
-            # search until the memo expires.
-            self._remember_full(match.discipline, full)
+            # search until the memo expires (or the model's predicted end).
+            self._remember_full(match.discipline, full, free_at)
             last_reason = self._full_memo_reason(match.discipline) or last_reason
-        return {"status": "busy" if busy else "failed", "reason": last_reason}
+        return {
+            "status": "busy" if busy else "failed",
+            "reason": last_reason,
+            "free_at": free_at,
+        }
 
     async def _find_academies(self, discipline: str) -> list[AcademyListing]:
         """Alliance academies for a discipline, preferred building first.
