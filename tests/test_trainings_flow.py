@@ -1,6 +1,7 @@
 """Training detect→execute flow (M6) through the new state machine,
 driven by a fake client so no network is touched."""
 
+import datetime as dt
 import json
 from types import SimpleNamespace
 
@@ -1983,3 +1984,107 @@ async def test_finished_walk_runs_the_classroom_model_check(db):
     history = json.loads(await svc.state.get(cm.CHECK_STATE_KEY))
     assert history[-1]["academies"] == 3
     assert history[-1]["by_discipline"]["coastal"]["walk"] == 6
+
+
+# -- the classroom model steers the search ------------------------------------
+
+_FREE = (
+    "<form action='/buildings/{id}/education' method='post'>"
+    "<input type='hidden' name='authenticity_token' value='tok'/>"
+    "<select name='education_select'><option value='7'>Ocean Navigation</option></select>"
+    "<select name='alliance[cost]'><option value='0'>Free</option></select>"
+    "</form>"
+)
+
+
+async def _log_class(db, building_id, minutes_ago, course="Ocean Navigation"):
+    from fra_bot.db.repos import LogsRepo
+
+    when = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes_ago)
+    await LogsRepo(db).insert_batch([{
+        "raw_timestamp": when.isoformat(), "event_at": when.isoformat(timespec="seconds"),
+        "action_key": "created_course", "description": f"Created a course ({course})",
+        "executed_name": "Admin", "affected_name": f"[AA] Coastal #{building_id}",
+        "affected_type": "building", "affected_mc_id": building_id,
+        "signature": f"cls-{building_id}-{minutes_ago}",
+    }], mark_posted=True)
+
+
+async def test_model_predicted_free_academy_is_tried_first(db):
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+
+    # 700 comes first in the normal order but the log shows a running class
+    # in its only room; 701 has nothing running.
+    await _log_class(db, 700, 30)
+    svc, fetched = _full_coastal_service(
+        db, {700: _FULL, 701: _FREE.format(id=701)}
+    )
+    outcome = await svc._open_training(TrainingMatch(
+        discipline="coastal", name="Ocean Navigation", duration_days=5, count=1))
+    assert outcome["status"] == "opened" and outcome["building_id"] == 701
+    assert [p for p in fetched if p.startswith("/buildings/")] == ["/buildings/701"]
+
+
+async def test_model_wrongly_full_still_finds_the_room(db):
+    # A class bought off with coins without a log line: the model thinks the
+    # room is taken, the page says free. The search must still find it.
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+
+    await _log_class(db, 700, 30)
+    svc, _ = _full_coastal_service(db, {700: _FREE.format(id=700)})
+    outcome = await svc._open_training(TrainingMatch(
+        discipline="coastal", name="Ocean Navigation", duration_days=5, count=1))
+    assert outcome["status"] == "opened" and outcome["building_id"] == 700
+
+
+async def test_all_full_reports_the_predicted_free_moment(db, monkeypatch):
+    import fra_bot.services.trainings as tr
+    from fra_bot.mc.trainings_catalog import TrainingMatch
+
+    # A 1-day class that started 23h55m ago ends in 5 minutes.
+    await _log_class(db, 700, 24 * 60 - 5, course="Short Course")
+    svc, _ = _full_coastal_service(db, {700: _FULL})
+
+    async def catalog(_state):
+        return {"coastal": {"Short Course": 1, "Ocean Navigation": 5}}
+
+    monkeypatch.setattr(tr, "merged_course_catalog", catalog)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(tr.time, "monotonic", lambda: clock["t"])
+    match = TrainingMatch(discipline="coastal", name="Ocean Navigation",
+                          duration_days=5, count=1)
+    outcome = await svc._open_training(match)
+    assert outcome["status"] == "busy"
+    left = (outcome["free_at"] - dt.datetime.now(dt.timezone.utc)).total_seconds()
+    assert 4 * 60 < left <= 5 * 60
+    assert "next class predicted to end" in outcome["reason"]
+    # The memo ends at the predicted moment (+slack), not after 14 minutes.
+    clock["t"] += 7 * 60
+    assert svc._full_memo_reason("coastal") is None
+
+
+async def test_busy_retry_is_planned_at_the_predicted_end(db, monkeypatch):
+    import fra_bot.services.trainings as tr
+
+    svc, _ = _service(db, dry_run=True)
+    soon = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)
+
+    async def busy(match, *, duration=3600):
+        return {"status": "busy", "reason": "full", "free_at": soon}
+
+    monkeypatch.setattr(svc, "_open_training", busy)
+    monkeypatch.setattr(svc._auto, "min_contribution_rate", 0)
+    request_id = await svc.requests.create(
+        kind="training", thread_id=5935, post_id=9001, requester_name="Alice",
+        requester_mc_id=None,
+        payload=json.dumps({"trainings": [{"discipline": "coastal",
+                                           "name": "Ocean Navigation",
+                                           "duration": 5, "count": 1}],
+                            "ambiguous": []}),
+    )
+    await svc.requests.claim(request_id)
+    await svc.execute_request(await svc.requests.get(request_id), announce=False)
+    row = await svc.requests.get(request_id)
+    assert row["status"] == "waiting"
+    retry = dt.datetime.fromisoformat(row["next_attempt_at"])
+    assert abs((retry - soon).total_seconds() - tr.MODEL_RETRY_SLACK_SECONDS) < 5
