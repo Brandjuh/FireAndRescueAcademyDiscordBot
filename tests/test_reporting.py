@@ -412,3 +412,58 @@ def test_game_period_keys_roll_over_at_midnight_utc():
     month_start = dt.datetime(2026, 11, 1, 0, 1, tzinfo=UTC)
     assert game_period_keys(month_end)[1] == "2026-10"
     assert game_period_keys(month_start)[1] == "2026-11"
+
+
+class _Chan:
+    def __init__(self, name):
+        self.name = name
+        self.sent = []
+
+    async def send(self, *args, embed=None, **kwargs):
+        self.sent.append(embed)
+
+
+def _overview_cog(channels, monkeypatch):
+    import datetime as _dt
+    from types import SimpleNamespace
+
+    import discord
+
+    from fra_bot.cogs import reporting as rep
+
+    cog = rep.ReportingCog.__new__(rep.ReportingCog)
+    cog.bot = SimpleNamespace(
+        cfg=SimpleNamespace(reports=SimpleNamespace(overviews=True)),
+        channel_for=lambda key: channels.get(key),
+    )
+
+    async def no_card(period):
+        return None
+
+    async def build(name, period):
+        return discord.Embed(title=name)
+
+    async def no_sleep(_):
+        return None
+
+    cog._post_member_card = no_card
+    cog.build = build
+    monkeypatch.setattr(rep.asyncio, "sleep", no_sleep)
+    return cog, _dt.datetime(2026, 11, 6, 0, 5, tzinfo=_dt.timezone.utc)
+
+
+async def test_admin_overview_goes_to_admin_reports_channel(monkeypatch):
+    admin_log, admin_reports = _Chan("log"), _Chan("reports")
+    cog, fired = _overview_cog(
+        {"admin_log": admin_log, "admin_reports": admin_reports}, monkeypatch
+    )
+    await cog._post_overviews(fired)
+    assert [e.title for e in admin_reports.sent] == ["overview-admin"]
+    assert admin_log.sent == []
+
+
+async def test_admin_overview_falls_back_to_admin_log(monkeypatch):
+    admin_log = _Chan("log")
+    cog, fired = _overview_cog({"admin_log": admin_log}, monkeypatch)
+    await cog._post_overviews(fired)
+    assert [e.title for e in admin_log.sent] == ["overview-admin"]
