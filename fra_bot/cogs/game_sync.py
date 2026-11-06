@@ -284,8 +284,8 @@ class GameSyncCog(commands.Cog):
             "**Setup:**\n"
             "1. Install the userscript with the 📥 button on the panel "
             "(Tampermonkey/Greasemonkey needed).\n"
-            "2. Open the missionchief.com **main page** and click "
-            "**🔄 Sync to FRA** in the navbar.\n"
+            "2. Open missionchief.com, click the **FRA** menu in the "
+            "navbar and choose **🔄 Sync to FRA**.\n"
             "3. Paste the link above when the script asks, check the "
             "summary, confirm.\n"
             "4. After that first sync the script refreshes automatically "
@@ -364,7 +364,7 @@ class GameSyncCog(commands.Cog):
                 "Tampermonkey stops future syncs.\n\n"
                 "**Get started**\n"
                 "📥 install the script → 🔑 get your sync link → open "
-                "missionchief.com and click **🔄 Sync to FRA**."
+                "missionchief.com → **FRA** menu → **🔄 Sync to FRA**."
             ),
         )
 

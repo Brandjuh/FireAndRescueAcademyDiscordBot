@@ -228,6 +228,22 @@ which feeds `/profile`, `!hotspots`, `!infographic` and `!fleet`.
   syncwebhook clear` falls back to auto-discovery: the 🔑 button reuses
   or creates a webhook named "FRA Profile Sync" on the intake channel
   (needs Manage Webhooks).
+* **In the game** the script adds its entries (🔄 Sync to FRA, 🔑 Change
+  sync link) to the shared **FRA** menu in the navbar — see below. It runs
+  on both `www.missionchief.com` and `missionchief.com`; the stored sync
+  link is per host (browser storage), so a member who switches host is
+  asked for it once more.
+
+## The shared FRA menu
+
+Every FRA userscript puts its entries under one **FRA** dropdown in the
+game's navbar instead of adding its own buttons: public entries first
+(Profile), private ones below (Admin). A userscript cannot import
+another, so the menu code is one block copied verbatim into each script
+(between the `FRA menu (shared block)` markers);
+`tests/test_userscript_menu.py` fails when the copies drift. A new FRA
+userscript copies that block and calls `fraMenuAdd({...})` — public
+scripts use `order` < 50, private ones ≥ 50.
 
 ## Auto-build (the private userscript)
 
@@ -236,7 +252,9 @@ bulk-building your OWN buildings with your OWN credits. It is not linked
 from any member panel and sends nothing anywhere — it only drives
 missionchief.com in your own browser.
 
-* **Toggle + settings panel** (bottom right on any missionchief.com page):
+* **Toggle + settings panel** (bottom right; open/close it via **FRA →
+  🏗️ Auto-Build** in the navbar — the entry shows ● dry run / ● LIVE while
+  the builder runs, so a hidden panel never hides a running builder):
   which building types (a tick list of the game's own types — tick one,
   several or **All**, and they are built in turn), location mode (random
   worldwide / around a place / both), radius, interval, a per-run cap and a

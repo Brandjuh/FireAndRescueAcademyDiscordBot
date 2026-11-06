@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FRA Auto-Build (private)
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.5.0
+// @version      1.6.0
 // @description  Private admin tool: bulk-build YOUR OWN MissionChief buildings. Pick a type, pick a place (fixed area and/or random worldwide), flip the toggle. Every new building is linked to the nearest dispatch center, fully expanded (all extensions/storage bought with credits) and fire stations start with a Quint.
 // @match        https://www.missionchief.com/*
 // @match        https://missionchief.com/*
@@ -69,8 +69,8 @@
  *
  * FIRST RUN
  * ---------
- * Install in Tampermonkey, open missionchief.com, open the panel (bottom
- * right), press "Self-test". That reads the real build form and reports
+ * Install in Tampermonkey, open missionchief.com, open the panel via the
+ * "FRA" menu in the navbar (🏗️ Auto-Build), press "Self-test". That reads the real build form and reports
  * what it found: the building types the game offers, whether the map pin
  * and address hooks are reachable, and your dispatch centers. Then pick a
  * type, set a location, leave DRY RUN on, and press Start once.
@@ -81,7 +81,7 @@
 
   if (window.top !== window.self) return;   // never inside our own frames
 
-  const VERSION = "1.5.0";
+  const VERSION = "1.6.0";
   // Both www.missionchief.com and missionchief.com serve the game, and a
   // frame or fetch across those two is CROSS-ORIGIN: everything here would
   // silently stop working. So the script always stays on the host the
@@ -96,6 +96,7 @@
   const SESSION_KEY = "fra_autobuild_session";
   const NEEDS_KEY = "fra_autobuild_needs_dispatch";
   const OWNER_KEY = "fra_autobuild_owner";
+  const PANEL_OPEN_KEY = "fra_autobuild_panel_open";
   const FRAME_ID = "fra-autobuild-frame";
   const HOST_ID = "fra-autobuild-host";
 
@@ -2010,6 +2011,7 @@
   }
 
   let panel = null;
+  let menuItem = null;
   let needsBox = null;
   let startButtonPainter = null;
   let typeBox = null;
@@ -2100,6 +2102,7 @@
 
   function renderStatus() {
     if (startButtonPainter) startButtonPainter();
+    paintMenuItem();
     if (!statusBox) return;
     const parts = [
       state.running ? "<b>RUNNING</b>" : "idle",
@@ -2313,15 +2316,167 @@
       body.style.display = body.style.display === "none" ? "block" : "none";
       collapse.textContent = body.style.display === "none" ? "+" : "–";
     });
+    const close = el("button", { text: "×", title: "hide (reopen via the FRA menu)" });
+    close.addEventListener("click", () => setPanelOpen(false));
     panel = el("div", { id: "fra-ab" }, [
-      el("header", {}, [el("span", { text: `FRA Auto-Build ${VERSION}` }), collapse]),
+      el("header", {}, [
+        el("span", { text: `FRA Auto-Build ${VERSION}` }),
+        el("span", {}, [collapse, close]),
+      ]),
       body,
     ]);
     document.body.appendChild(panel);
+    setPanelOpen(readJson(PANEL_OPEN_KEY, false) === true);
     renderTypes();
     renderNeeds();
     renderStatus();
     renderLog();
+  }
+
+  // ------------------------------------------------ FRA menu (shared block)
+  // Every FRA userscript puts its entries under ONE "FRA" dropdown in the
+  // game's navbar instead of each adding its own buttons. A userscript
+  // cannot import another, so this block is copied VERBATIM into each
+  // script; tests/test_userscript_menu.py fails when the copies drift.
+  // Whichever script runs first builds the menu; the others find it by id
+  // and slot their items in by `order` (public scripts < 50 <= private).
+  function fraMenuList() {
+    let list = document.getElementById("fra-menu-list");
+    if (list) return list;
+    if (!document.getElementById("fra-menu-style")) {
+      const style = document.createElement("style");
+      style.id = "fra-menu-style";
+      style.textContent =
+        "#fra-menu > a { font-weight: 700; }" +
+        "#fra-menu-list { display: none; min-width: 220px; }" +
+        "#fra-menu.open > #fra-menu-list { display: block; }" +
+        "#fra-menu-list .fra-menu-head { padding: 3px 20px; font-size: 11px;" +
+        " color: #999; text-transform: uppercase; }" +
+        "#fra-menu-float { position: fixed; top: 8px; right: 8px; z-index: 2147483601;" +
+        " list-style: none; margin: 0; padding: 0; }" +
+        "#fra-menu-float #fra-menu > a { display: inline-block; padding: 6px 12px;" +
+        " background: #c0392b; color: #fff; border-radius: 4px; text-decoration: none; }" +
+        "#fra-menu-float #fra-menu-list { position: absolute; right: 0; left: auto;" +
+        " background: #fff; list-style: none; padding: 5px 0; margin: 2px 0 0;" +
+        " border: 1px solid rgba(0,0,0,.15); border-radius: 4px; }" +
+        "#fra-menu-float #fra-menu-list a { display: block; padding: 3px 20px;" +
+        " color: #333; white-space: nowrap; text-decoration: none; }";
+      document.head.appendChild(style);
+    }
+    const root = document.createElement("li");
+    root.id = "fra-menu";
+    root.className = "dropdown";
+    const toggle = document.createElement("a");
+    toggle.href = "#";
+    toggle.className = "dropdown-toggle";
+    toggle.title = "Fire & Rescue Academy tools";
+    toggle.append("FRA ");
+    const caret = document.createElement("b");
+    caret.className = "caret";
+    toggle.appendChild(caret);
+    list = document.createElement("ul");
+    list.id = "fra-menu-list";
+    list.className = "dropdown-menu";
+    root.append(toggle, list);
+    // Our own toggle, not Bootstrap's data-toggle: the game's Bootstrap
+    // would otherwise toggle it a second time and cancel ours out.
+    toggle.addEventListener("click", (event) => {
+      event.preventDefault();
+      root.classList.toggle("open");
+    });
+    document.addEventListener("click", (event) => {
+      if (!root.contains(event.target)) root.classList.remove("open");
+    });
+    // In order of preference — one selector LIST would return whichever
+    // match comes first in the page, i.e. the left-hand nav.
+    let nav = null;
+    for (const selector of [
+      "#navbar-main-collapse ul.navbar-right",
+      "#navbar-main-collapse ul.nav",
+      ".navbar ul.nav",
+    ]) {
+      nav = document.querySelector(selector);
+      if (nav) break;
+    }
+    if (nav) {
+      nav.insertBefore(root, nav.firstChild);
+    } else {
+      const float = document.createElement("ul");
+      float.id = "fra-menu-float";
+      float.appendChild(root);
+      document.body.appendChild(float);
+    }
+    return list;
+  }
+
+  function fraMenuClose() {
+    const root = document.getElementById("fra-menu");
+    if (root) root.classList.remove("open");
+  }
+
+  // item: { id, label, order, title?, onClick, header? } — `header` adds a
+  // small section caption above the first item of that section.
+  function fraMenuAdd(item) {
+    const existing = document.getElementById(item.id);
+    if (existing) return existing;
+    const list = fraMenuList();
+    const order = Number(item.order || 50);
+    const li = document.createElement("li");
+    li.id = item.id;
+    li.dataset.fraOrder = String(order);
+    const link = document.createElement("a");
+    link.href = "#";
+    link.textContent = item.label;
+    if (item.title) link.title = item.title;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      fraMenuClose();
+      item.onClick();
+    });
+    li.appendChild(link);
+    const nodes = [li];
+    if (item.header && !document.getElementById(item.id + "-head")) {
+      const head = document.createElement("li");
+      head.id = item.id + "-head";
+      head.className = "fra-menu-head";
+      head.dataset.fraOrder = String(order - 0.5);
+      head.textContent = item.header;
+      nodes.unshift(head);
+    }
+    for (const node of nodes) {
+      const mine = Number(node.dataset.fraOrder);
+      const after = Array.from(list.children)
+        .find((other) => Number(other.dataset.fraOrder) > mine);
+      list.insertBefore(node, after || null);
+    }
+    return li;
+  }
+  // ----------------------------------------------- /FRA menu (shared block)
+
+  // The panel lives behind the shared FRA menu: hidden until opened there,
+  // and the menu entry shows when the builder is running so a hidden panel
+  // never hides a running builder.
+  function setPanelOpen(open) {
+    if (panel) panel.style.display = open ? "" : "none";
+    writeJson(PANEL_OPEN_KEY, open);
+  }
+
+  function paintMenuItem() {
+    if (!menuItem) return;
+    menuItem.firstChild.textContent =
+      "🏗️ Auto-Build" + (state.running ? (settings.dryRun ? " ● dry run" : " ● LIVE") : "");
+  }
+
+  function addMenuItem() {
+    menuItem = fraMenuAdd({
+      id: "fra-autobuild-menu",
+      label: "🏗️ Auto-Build",
+      order: 50,
+      header: "Admin (private)",
+      title: "Show/hide the FRA Auto-Build panel",
+      onClick: () => setPanelOpen(!panel || panel.style.display === "none"),
+    });
+    paintMenuItem();
   }
 
   // ---------------------------------------------------------------- boot
@@ -2350,6 +2505,7 @@
   function boot() {
     if (document.getElementById("fra-ab")) return;
     buildPanel();
+    addMenuItem();
     log(`ready — ${cachedTypes.length} building types cached, ` +
         `${Object.keys(queue).length} on the finish list`);
     if (!cachedTypes.length) loadTypes(true);
