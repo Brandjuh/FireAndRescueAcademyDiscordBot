@@ -23,7 +23,7 @@ MAX_TYPES = 200
 BUILDING_TYPE_NAMES = {
     0: "fire station", 1: "dispatch center", 2: "hospital",
     3: "rescue station", 4: "fire academy", 5: "police station",
-    6: "police academy", 7: "police academy", 9: "staging area",
+    6: "medical helicopter station", 7: "police academy", 9: "staging area",
     10: "prison", 19: "rescue academy", 24: "coastal rescue school",
 }
 
@@ -163,10 +163,13 @@ def _top_types(
 
 
 def top_building_types(
-    by_type_dicts: list[dict], top: int = 6
+    by_type_dicts: list[dict], top: int = 6,
+    names: dict[int, str] | None = None,
 ) -> list[tuple[str, int]]:
-    """Alliance-wide building counts per type name, biggest first."""
-    return _top_types(by_type_dicts, BUILDING_TYPE_NAMES, top)
+    """Alliance-wide building counts per type name, biggest first. ``names``
+    (the cached LSSM map, see ``GameSyncCog._building_names``) wins over the
+    short built-in table, which only knows a dozen ids."""
+    return _top_types(by_type_dicts, {**BUILDING_TYPE_NAMES, **(names or {})}, top)
 
 
 def top_vehicle_types(
