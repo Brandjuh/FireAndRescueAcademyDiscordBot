@@ -6,7 +6,10 @@ are not and never get this PM. The roster diff can't tell the two apart.
 
 Per leave, once the delay has passed (default an hour):
 
-* skipped when the player is back in the roster (left and rejoined);
+* skipped when the player is back in the roster (left and rejoined) — but
+  only by a roster sweep that STARTED after the leave. The sweep runs every
+  couple of hours, so right after a leave the stored roster still lists the
+  player; until a newer sweep has run the leave just waits;
 * skipped when the player turned bot PMs off (``/ingame-pms off``);
 * one PM per LEAVE: a player who comes back and leaves again is asked
   again, but never twice about the same leave — a new leave only counts
@@ -35,7 +38,9 @@ import logging
 
 from ..config import Config
 from ..db.database import Database
-from ..db.repos import MemberActionsRepo, MemberPrefsRepo, MembersRepo, StateRepo
+from ..db.repos import (
+    MemberActionsRepo, MemberPrefsRepo, MembersRepo, RunsRepo, StateRepo,
+)
 from ..mc.client import MissionChiefClient
 from ..mc.messages import UNCONFIRMED_PREFIX
 
@@ -107,6 +112,7 @@ class LeaveFeedbackService:
         self.prefs = MemberPrefsRepo(db)
         self.state = StateRepo(db)
         self.actions = MemberActionsRepo(db)
+        self.runs = RunsRepo(db)
 
     @property
     def settings(self):
@@ -140,6 +146,7 @@ class LeaveFeedbackService:
             return []
         delay = dt.timedelta(minutes=max(0, int(self.settings.delay_minutes)))
         active = None
+        roster_at: dt.datetime | None = None
         lines: list[str] = []
         sent = 0
         oldest_open: int | None = None
@@ -167,7 +174,14 @@ class LeaveFeedbackService:
                     continue
             if active is None:
                 active = await self.members.active_members()
+                last = await self.runs.last_success("members")
+                roster_at = _parse(last["started_at"]) if last else None
             if mc_id is not None and int(mc_id) in active:
+                if roster_at is None or roster_at <= left_at:
+                    # The roster predates the leave: "active" there only
+                    # means "not swept since" — wait for a newer sweep.
+                    oldest_open = log_id if oldest_open is None else oldest_open
+                    continue
                 await self._done(log_id, "rejoined")
                 lines.append(f"↩️ {name} left and is back already — not asked")
                 continue

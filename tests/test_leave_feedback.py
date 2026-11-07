@@ -137,12 +137,38 @@ async def test_waits_for_the_delay(db, sent):
     assert await service.run() == ["📨 asked Fresh why they left"]
 
 
+async def _members_sweep(db, *, minutes_ago):
+    at = (NOW - dt.timedelta(minutes=minutes_ago)).isoformat(timespec="seconds")
+    await db.execute(
+        "INSERT INTO scrape_runs (scraper, started_at, finished_at, status) "
+        "VALUES ('members', ?, ?, 'success')", (at, at),
+    )
+
+
 async def test_rejoined_members_are_not_asked(db, sent):
     await _log(db, "left_alliance", "Boomerang", 4, minutes_ago=90)
     await _member(db, 4, "Boomerang")
+    await _members_sweep(db, minutes_ago=30)        # swept after the leave
     service = await _service(db)
     assert await service.run() == ["↩️ Boomerang left and is back already — not asked"]
     assert sent == []
+
+
+async def test_a_roster_older_than_the_leave_is_no_proof_of_a_rejoin(db, sent):
+    # The roster sweep runs every two hours: right after a leave the stored
+    # roster still lists the player as active. That is not a rejoin.
+    await _log(db, "left_alliance", "KingHarry", 10, minutes_ago=20)
+    await _member(db, 10, "KingHarry")
+    await _members_sweep(db, minutes_ago=110)       # before the leave
+    service = await _service(db, delay=15)
+    assert await service.run() == []                # waits for a new sweep
+    assert sent == []
+    assert await StateRepo(db).get(lf.WATERMARK_KEY) == "0"
+    # the next sweep sees they are gone → asked
+    await db.execute("UPDATE members SET is_active = 0 WHERE mc_user_id = 10")
+    await _members_sweep(db, minutes_ago=5)
+    assert await service.run() == ["📨 asked KingHarry why they left"]
+    assert [r for r, _, _ in sent] == ["KingHarry"]
 
 
 async def test_players_who_turned_bot_pms_off_are_skipped(db, sent):
