@@ -268,33 +268,45 @@ missionchief.com in your own browser.
   the actual spot, never the city the script aimed at (which can be tens of
   kilometres away). Nothing is invented.
 * **Per building**: pick a spot with a real street address (the game's own
-  pin lookup, OpenStreetMap as second opinion) → build it as a **personal**
-  building with your own credits → open `/buildings/<id>/edit` once and
-  save both the **staff amount** (the second text box; 400 by default) and
-  the dispatch center that covers that **region** → raise the **level** to
-  the maximum and buy every **storage slot** → keep it
-  on a finish list, because purchases unlock as construction finishes. Fire
-  stations pick the **Quint** as the free starting vehicle and refuse to
-  build without it. Extensions are **off by default**.
+  `/reverse_address` lookup, OpenStreetMap as second opinion) → post the
+  game's own build form as a **personal** building with your own credits,
+  with the region's dispatch center filled in → save the **staff amount**
+  (`building[personal_count_target]`, 400 by default) on
+  `/buildings/<id>/edit` → raise the **level** to the maximum the credit
+  floor allows (`/buildings/<id>/expand`) and buy every **storage slot** →
+  keep it on a finish list, because the next storage room only unlocks
+  when the previous one finishes building (days). Fire stations pick the
+  **Quint** as the free starting vehicle and refuse to build without it.
+  Extensions are **off by default**.
+* **No frame, no clicking**: `/buildings/new` is a bare HTML fragment that
+  only works inside the game's map page (no jQuery or map of its own), so
+  every step is a plain same-origin request with your session and the
+  page's CSRF token. The build form is sent the way the game sends it —
+  `$(form).serialize()`, so no button value goes along.
 * **Dispatch centers are per region, not "the nearest one"**: a center is
   matched by name against the country/region/city of the spot, with your
   own rules on top (`Netherlands = Rotterdam Dispatch`, one per line). A
   country where you have no center is never built in — it lands on a
   "needs a dispatch center" list in the panel instead.
-* **Never coins**: `build_with_coins` is pinned to 0 and any button
-  mentioning coins is refused — the same two brakes as the bot's builder
-  (`fra_bot/mc/browser_builder.py`, which this script is a port of).
-* **Dry run is the default**: it does everything except the last click and
-  reports what it would have clicked.
-* **Storage** is `/buildings/<id>/storage_upgrade/credits/<slug>` under the
-  building's `#storage` tab (`fire_equipment_initial`, then
-  `fire_equipment_additional` and `_2`…`_7` on a fire station). Every slug
-  is a one-time purchase and they differ per building type, so the script
-  reads them off the page — and clicks the tabs open first, in case a pane
-  loads lazily.
+* **Never coins**: the game decides credits vs coins only by the hidden
+  `build_with_coins` field; the script leaves it empty, as the game does for
+  a credits build, and only uses the personal `build_credits_<type>` button.
+  Purchase links that mention coins or ask for a confirmation are skipped.
+  The credit floor is read from `/api/credits` and checked before every
+  build and every level/storage purchase.
+* **Dry run is the default**: it does everything except the posts that
+  spend credits, and reports what it would have bought.
+* **Purchases** (read live, Nov 2026): storage is
+  `POST /buildings/<id>/storage_upgrade/credits/<slug>`, extensions
+  `POST /buildings/<id>/extension/credits/<n>`, levels
+  `GET /buildings/<id>/expand_do/credits?level=<n>` (one link per target
+  level with the summed price, so the highest one is max level). A purchase
+  shown greyed out (`disabled`, still under construction) is left for the
+  finish list.
 * **Self-test** reads the live build form and prints what it found — the
-  building types the game offers, whether the map/address hooks are
-  reachable, the button labels, your dispatch centers. That is the way to
+  building types with their personal credits button, the starting
+  vehicle, the address lookup, your dispatch centers, and the
+  level/storage/staff controls on one of your fire stations. That is the way to
   check the script against a game update, since none of it can be verified
   from CI. `tests/test_autobuild_userscript.py` guards only what is
   checkable statically (coins, defaults, the world pool, no secrets).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FRA Auto-Build (private)
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.6.0
+// @version      1.7.0
 // @description  Private admin tool: bulk-build YOUR OWN MissionChief buildings. Pick a type, pick a place (fixed area and/or random worldwide), flip the toggle. Every new building is linked to the nearest dispatch center, fully expanded (all extensions/storage bought with credits) and fire stations start with a Quint.
 // @match        https://www.missionchief.com/*
 // @match        https://missionchief.com/*
@@ -32,24 +32,29 @@
  *    When OSM knows a real station/hospital/prison of that kind nearby,
  *    the spot MOVES onto it and the building takes ITS OSM name — no
  *    invented names, and never a city name from tens of kilometres away;
- * 3. opens /buildings/new in a hidden frame (clipped to 0x0 — you never
- *    see it), selects the type, drops the
- *    pin, and — for fire stations — picks the Quint as the free starting
- *    vehicle;
- * 4. submits with credits. NEVER with coins: build_with_coins stays 0 and
- *    any button whose label mentions coins is refused, twice over;
- * 5. opens /buildings/<id>/edit once and saves BOTH the staff amount (the
- *    second text box on that form) and the dispatch center that covers that
- *    REGION — the center matched by name against country/region/city,
- *    with your own rule list on top ("Netherlands = Rotterdam Dispatch").
+ * 3. reads the game's build form (/buildings/new — since late 2026 a bare
+ *    HTML fragment that only works inside the game's own map page, so it
+ *    is NOT opened in a frame any more), fills in type, name, pin, address
+ *    (the game's own /reverse_address lookup), the dispatch center and —
+ *    for fire stations — the Quint as the free starting vehicle;
+ * 4. posts it exactly the way the game's own form does, with credits.
+ *    NEVER with coins: build_with_coins is 0, and the personal
+ *    build_credits_<type> button must exist, be enabled and say Credits;
+ * 5. saves the staff amount (building[personal_count_target]) and, if the
+ *    build did not take it, the dispatch center that covers that REGION —
+ *    the center matched by name against country/region/city, with your
+ *    own rule list on top ("Netherlands = Rotterdam Dispatch").
  *    A country where you have no center is never built in: the script
  *    skips it and puts the country on a list in the panel to ask you about;
- * 6. raises the LEVEL as far as it goes and buys every STORAGE slot.
- *    Extensions are OFF by default — switch them on yourself if you want
- *    them;
- * 7. keeps the building on a "finish" list, because extensions only unlock
- *    when the previous one finishes CONSTRUCTION — the list is revisited
- *    every few minutes until the building stops offering anything new.
+ * 6. raises the LEVEL as far as it goes (/buildings/<id>/expand) and buys
+ *    every STORAGE slot. Extensions are OFF by default — switch them on
+ *    yourself if you want them;
+ * 7. keeps the building on a "finish" list, because storage rooms and
+ *    extensions only unlock when the previous one finishes CONSTRUCTION
+ *    (days) — the list is revisited until nothing is left to buy.
+ *
+ * Every step is a plain same-origin request with your session and the
+ * page's CSRF token — no hidden frame, no clicking.
  *
  * SAFETY RAILS
  * ------------
@@ -70,10 +75,12 @@
  * FIRST RUN
  * ---------
  * Install in Tampermonkey, open missionchief.com, open the panel via the
- * "FRA" menu in the navbar (🏗️ Auto-Build), press "Self-test". That reads the real build form and reports
- * what it found: the building types the game offers, whether the map pin
- * and address hooks are reachable, and your dispatch centers. Then pick a
- * type, set a location, leave DRY RUN on, and press Start once.
+ * "FRA" menu in the navbar (🏗️ Auto-Build), press "Self-test". That reads
+ * the real build form and reports what it found: every building type with
+ * its personal credits button, the starting vehicle, the game's address
+ * lookup, your dispatch centers, and the level/storage/staff controls on
+ * one of your fire stations. Then pick a type, set a location, leave DRY
+ * RUN on, and press Start once.
  */
 
 (function () {
@@ -81,7 +88,7 @@
 
   if (window.top !== window.self) return;   // never inside our own frames
 
-  const VERSION = "1.6.0";
+  const VERSION = "1.7.0";
   // Both www.missionchief.com and missionchief.com serve the game, and a
   // frame or fetch across those two is CROSS-ORIGIN: everything here would
   // silently stop working. So the script always stays on the host the
@@ -97,8 +104,6 @@
   const NEEDS_KEY = "fra_autobuild_needs_dispatch";
   const OWNER_KEY = "fra_autobuild_owner";
   const PANEL_OPEN_KEY = "fra_autobuild_panel_open";
-  const FRAME_ID = "fra-autobuild-frame";
-  const HOST_ID = "fra-autobuild-host";
 
   // One tab drives; the others idle. Same idea as the bot's job lock: a
   // heartbeat that goes stale when a tab is closed mid-run.
@@ -106,13 +111,15 @@
   const OWNER_HEARTBEAT_MS = 5000;
   const OWNER_STALE_MS = 20000;
 
-  const FRAME_TIMEOUT_MS = 45000;
-  const ADDRESS_WAIT_MS = 12000;
   const MAX_LOCATION_TRIES = 12;     // per build: re-jitter, then re-pick
-  const MAX_FINISH_PASSES = 12;      // purchase passes per building visit
   const FINISH_IDLE_LIMIT = 3;       // quiet visits before a building retires
   const EDIT_MAX_TRIES = 5;          // then stop retrying dispatch/staff
   const FINISH_INTERVAL_MS = 5 * 60 * 1000;
+  // Storage rooms and extensions take DAYS to build, and the next one stays
+  // greyed out until then. A building with such a purchase still waiting is
+  // checked this often, for at most this long.
+  const FINISH_WAIT_INTERVAL_MS = 60 * 60 * 1000;
+  const FINISH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
   const DUPLICATE_RADIUS_M = 250;    // same figure the bot uses
   const NOMINATIM_REVERSE =
     "https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18";
@@ -121,7 +128,7 @@
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
   ];
-  const OVERPASS_TIMEOUT_MS = 15000;
+  const OVERPASS_TIMEOUT_MS = 12000;
 
   const DEFAULTS = {
     enabled: false,          // the toggle survives a page load
@@ -149,7 +156,6 @@
     buyExtensions: false,            // OFF on purpose — see the header
     startingVehicle: "Quint",
     strictVehicle: true,
-    showFrame: false,
   };
 
   // Approximate city centres (to ~0.1°, good enough — every point is
@@ -369,99 +375,14 @@
     if (owner && owner.tab === TAB_ID) writeJson(OWNER_KEY, { tab: TAB_ID, at: 0 });
   }
 
-  // ------------------------------------------------------------- the frame
-
-  function force(element, rules) {
-    // !important on every rule: the game's own stylesheet has opinions
-    // about iframes, and a white 1280x900 page landing on top of the game
-    // is exactly what this must never do.
-    for (const [property, value] of Object.entries(rules)) {
-      element.style.setProperty(property, value, "important");
-    }
-  }
-
-  function ensureFrame() {
-    // The frame may NOT be display:none — a frame that lays nothing out
-    // has no boxes, and the build form's buttons are picked by "is it
-    // visible and does it have a size". So the frame keeps its full size
-    // and a 0x0 clipping host hides it instead: laid out, never painted.
-    let host = document.getElementById(HOST_ID);
-    if (!host) {
-      host = document.createElement("div");
-      host.id = HOST_ID;
-      document.body.appendChild(host);
-    }
-    let frame = document.getElementById(FRAME_ID);
-    if (!frame) {
-      frame = document.createElement("iframe");
-      frame.id = FRAME_ID;
-      frame.setAttribute("tabindex", "-1");
-      frame.setAttribute("aria-hidden", "true");
-      frame.setAttribute("title", "FRA Auto-Build worker");
-      host.appendChild(frame);
-    }
-    if (frame.parentElement !== host) host.appendChild(frame);
-    if (settings.showFrame) {
-      force(host, {
-        position: "fixed", right: "8px", bottom: "360px", left: "auto", top: "auto",
-        width: "900px", height: "620px", overflow: "hidden", opacity: "1",
-        "z-index": "2147483000", border: "2px solid #c0392b", background: "#fff",
-        "pointer-events": "auto", clip: "auto",
-      });
-      force(frame, { width: "900px", height: "620px", border: "0", opacity: "1" });
-    } else {
-      force(host, {
-        position: "fixed", left: "0", top: "0", right: "auto", bottom: "auto",
-        width: "0", height: "0", overflow: "hidden", opacity: "0",
-        "z-index": "-2147483647", border: "0", background: "transparent",
-        "pointer-events": "none", visibility: "visible",
-      });
-      force(frame, { width: "1280px", height: "900px", border: "0", opacity: "0" });
-    }
-    return frame;
-  }
-
-  function frameGoto(path) {
-    // Resolves with the frame's document once the navigation settles.
-    const frame = ensureFrame();
-    const url = path.startsWith("http") ? path : BASE + path;
-    return new Promise((resolve, reject) => {
-      let done = false;
-      const timer = setTimeout(() => {
-        if (done) return;
-        done = true;
-        frame.onload = null;
-        reject(new Error("page did not load in time: " + path));
-      }, FRAME_TIMEOUT_MS);
-      frame.onload = () => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        frame.onload = null;
-        // Give the page's own scripts a moment to wire the form up.
-        setTimeout(() => {
-          try {
-            const doc = frame.contentDocument;
-            if (!doc) {
-              reject(new Error(
-                "the frame is not readable — MissionChief may be blocking " +
-                "frames (X-Frame-Options). Tell the bot author: this needs tab mode."
-              ));
-              return;
-            }
-            resolve({ frame, doc, win: frame.contentWindow });
-          } catch (error) {
-            reject(new Error("frame blocked: " + error.message));
-          }
-        }, 900);
-      };
-      try {
-        frame.contentWindow.location.replace(url);
-      } catch (error) {
-        frame.src = url;
-      }
-    });
-  }
+  // -------------------------------------------------------- game adapters
+  //
+  // Everything goes through plain same-origin requests with your own
+  // session and the page's CSRF token. Up to 1.6.0 the script drove the
+  // pages in a hidden frame — but /buildings/new turned into a bare HTML
+  // fragment (no layout, no jQuery, no map) that only works when the
+  // game's own map page loads it. In a frame nothing on it runs, so not a
+  // single build could go out. Requests don't care about any of that.
 
   function isLoginPage(doc) {
     return !!doc.querySelector('input[type="password"]');
@@ -470,56 +391,96 @@
   function flashText(doc) {
     const el = doc.querySelector(
       ".alert-danger, .alert.alert-error, #flash_error, .flash_error, " +
-      "#error_explanation, .danger.alert"
+      "#error_explanation, .danger.alert, .has-error .help-block"
     );
     if (!el) return "";
     return (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 300);
   }
 
-  // -------------------------------------------------------- game adapters
+  async function fetchPage(path, options) {
+    const url = path.startsWith("http") ? path : BASE + path;
+    const response = await fetch(url, Object.assign(
+      { credentials: "same-origin", cache: "no-store" }, options || {}));
+    const html = await response.text();
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return { response, html, doc, url: response.url || url };
+  }
 
   async function fetchDoc(path) {
-    const response = await fetch(BASE + path, { credentials: "same-origin" });
-    if (!response.ok) throw new Error(path + " -> HTTP " + response.status);
-    const html = await response.text();
-    return new DOMParser().parseFromString(html, "text/html");
+    const page = await fetchPage(path);
+    if (/\/users\/sign_(in|up)/.test(page.url) || isLoginPage(page.doc)) {
+      throw new Error("you are logged out of MissionChief");
+    }
+    if (!page.response.ok) {
+      throw new Error(path + " -> HTTP " + page.response.status);
+    }
+    return page.doc;
   }
 
   async function fetchJson(path) {
-    const response = await fetch(BASE + path, { credentials: "same-origin" });
+    const response = await fetch(BASE + path, {
+      credentials: "same-origin", cache: "no-store",
+    });
     if (!response.ok) throw new Error(path + " -> HTTP " + response.status);
     return response.json();
   }
 
   function csrfToken(doc) {
     const meta = (doc || document).querySelector('meta[name="csrf-token"]');
-    return meta ? meta.getAttribute("content") : null;
+    if (meta && meta.getAttribute("content")) return meta.getAttribute("content");
+    const field = (doc || document).querySelector('input[name="authenticity_token"]');
+    if (field && field.value) return field.value;
+    return doc && doc !== document ? csrfToken(document) : null;
   }
 
-  async function postPath(path, token) {
-    // The purchase endpoints are Rails POSTs behind the CSRF token — the
-    // same calls the bot makes server-side (extension/credits/<id>).
-    const headers = { "X-Requested-With": "XMLHttpRequest" };
+  async function send(path, params, token) {
+    // A Rails form post, or a data-method="post" link, sent the way the
+    // game's own jQuery sends it: url-encoded, XHR, CSRF token in both the
+    // header and the body.
+    const body = params instanceof URLSearchParams
+      ? params : new URLSearchParams(params || {});
+    if (token && !body.has("authenticity_token")) body.set("authenticity_token", token);
+    const headers = {
+      "X-Requested-With": "XMLHttpRequest",
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    };
     if (token) headers["X-CSRF-Token"] = token;
-    const response = await fetch(BASE + path, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: headers,
-    });
-    return response;
+    return fetchPage(path, { method: "POST", headers, body: body.toString() });
   }
 
-  function readCredits() {
-    // The navbar credit counter. Selector list is a best guess against the
-    // live markup; when none of them match we simply don't enforce the
-    // floor and say so once.
-    const el = document.querySelector(
-      "#credits_value, .credits-value, #navbar_credits, [id*='credits_value']"
-    );
+  function formParams(form) {
+    // Exactly what jQuery's $(form).serialize() sends — which is how the
+    // game submits its forms: every named, enabled control except buttons,
+    // files and unticked boxes. NO submit-button value ever goes along.
+    const params = new URLSearchParams();
+    for (const field of form.elements) {
+      if (!field.name || field.disabled) continue;
+      const type = String(field.type || "").toLowerCase();
+      if (["submit", "button", "image", "reset", "file"].includes(type)) continue;
+      if ((type === "checkbox" || type === "radio") && !field.checked) continue;
+      if (field.tagName === "SELECT" && field.multiple) {
+        for (const option of field.selectedOptions) params.append(field.name, option.value);
+        continue;
+      }
+      params.append(field.name, field.value === undefined ? "" : String(field.value));
+    }
+    return params;
+  }
+
+  async function readCredits() {
+    // The game's own credit API first (always current); the navbar
+    // counter (#navigation_top, "25,523,443") as a fallback.
+    try {
+      const data = await fetchJson("/api/credits");
+      const value = parseInt(data && data.credits_user_current, 10);
+      if (isFinite(value)) return value;
+    } catch (error) {
+      /* fall back to the navbar */
+    }
+    const el = document.querySelector("#navigation_top");
     if (!el) return null;
     const digits = (el.textContent || "").replace(/[^\d]/g, "");
-    if (!digits) return null;
-    return parseInt(digits, 10);
+    return digits ? parseInt(digits, 10) : null;
   }
 
   let ownBuildingsCache = { at: 0, rows: [] };
@@ -561,6 +522,8 @@
       if (!a.road && !a.city && !a.town && !a.village && !a.suburb) return null;
       return {
         name: (data.name || "").trim(),        // OSM's own name for the spot
+        category: data.category || "",         // e.g. "amenity" / "highway"
+        kind: data.type || "",                 // e.g. "police" / "motorway"
         address: (data.display_name || "").slice(0, 160),
         country: a.country || "",
         state: a.state || a.region || "",
@@ -608,42 +571,72 @@
     return `[out:json][timeout:20];(${parts.join("")});out tags center 40;`;
   }
 
+  function placeIsFacility(typeLabel, place) {
+    // Nominatim's name for a spot is only a building name when the spot IS
+    // such a facility — otherwise it is a road ("Rijksweg A50"), a shop or
+    // a park, and the town + type fallback is the honest name.
+    const tags = facilityTagsFor(typeLabel);
+    if (!tags || !place || !place.category) return false;
+    return tags.some((tag) => {
+      const match = tag.match(/^"([^"]+)"="([^"]+)"$/);
+      return match && match[1] === place.category && match[2] === place.kind;
+    });
+  }
+
+  // When every mirror is down or refusing us, asking again for every spot
+  // only adds a long wait to each attempt. Skip Overpass for a while.
+  let overpassDownUntil = 0;
+  const OVERPASS_PAUSE_MS = 15 * 60 * 1000;
+
   async function overpass(query) {
-    let lastError = "";
-    for (const url of OVERPASS_URLS) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), OVERPASS_TIMEOUT_MS);
-      try {
-        const response = await fetch(url, {
-          method: "POST",
-          body: "data=" + encodeURIComponent(query),
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          lastError = `${url} -> HTTP ${response.status}`;
-          continue;
+    // All mirrors at once; the first good answer wins and the rest are
+    // cancelled. One slow or dead mirror no longer costs its full timeout.
+    const controllers = OVERPASS_URLS.map(() => new AbortController());
+    const timer = setTimeout(
+      () => controllers.forEach((controller) => controller.abort()),
+      OVERPASS_TIMEOUT_MS);
+    const errors = [];
+    try {
+      return await Promise.any(OVERPASS_URLS.map(async (url, index) => {
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            body: "data=" + encodeURIComponent(query),
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            signal: controllers[index].signal,
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          controllers.forEach((controller, other) => {
+            if (other !== index) controller.abort();
+          });
+          return data;
+        } catch (error) {
+          const host = url.replace(/^https?:\/\/([^/]+).*$/, "$1");
+          errors.push(`${host}: ${error.name === "AbortError" ? "no answer" : error.message}`);
+          throw error;
         }
-        return await response.json();
-      } catch (error) {
-        lastError = `${url} -> ${error.message}`;
-      } finally {
-        clearTimeout(timer);
-      }
+      }));
+    } catch (error) {
+      throw new Error(errors.join(", ") || "no Overpass mirror answered");
+    } finally {
+      clearTimeout(timer);
     }
-    throw new Error(lastError || "no Overpass mirror answered");
   }
 
   async function osmFacility(lat, lng, typeLabel) {
     const tags = facilityTagsFor(typeLabel);
     if (!tags) return null;
+    if (Date.now() < overpassDownUntil) return null;
     const radius = Math.max(200, (Number(settings.facilityRadiusKm) || 3) * 1000);
     let data;
     try {
       data = await overpass(facilityQuery(lat, lng, tags, radius));
     } catch (error) {
-      log(`⚠️ OpenStreetMap lookup failed (${error.message}) — naming from ` +
-          "the address instead", "error");
+      overpassDownUntil = Date.now() + OVERPASS_PAUSE_MS;
+      log(`⚠️ OpenStreetMap facility lookup failed (${error.message}) — ` +
+          "naming from the address instead; not asking Overpass again for 15 min",
+          "error");
       return null;
     }
     const found = [];
@@ -675,39 +668,20 @@
 
   // ------------------------------------------------------ the build form
   //
-  // Everything below is a port of the bot's Playwright builder
-  // (fra_bot/mc/browser_builder.py). Same order, same reasons: pick the
-  // type so the page reveals its #detail_<id> block, MOVE THE MAP MARKER
-  // (writing the hidden lat/lng alone leaves the address empty — the known
-  // gotcha), then fill every field with real input/change events and click
-  // a plain submit button rather than trusting a jQuery handler.
+  // /buildings/new, read live (Nov 2026): form#new_building posts to
+  // /buildings. Per type there is a block #detail_<type> holding
+  //   - the personal button  #build_credits_<type>  ("Build 2,071,596 Credits")
+  //   - a coins button       .coins_activate
+  //   - alliance buttons     .alliance_activate (only some types)
+  //   - for fire stations    building[start_vehicle_feuerwache(_kleinwache)]
+  // and one dispatch select building[leitstelle_building_id] for all types
+  // (the form hides it for a dispatch center and a prison).
+  // The game sends the form with $(form).serialize() over XHR, so no button
+  // value goes along: credits vs coins is decided ONLY by the hidden
+  // build_with_coins field, which the coins button sets to 1. Left empty —
+  // exactly as the game leaves it for a credits build — it is credits.
 
-  function fieldByName(doc, win, name) {
-    const escape = (win && win.CSS && win.CSS.escape)
-      ? win.CSS.escape.bind(win.CSS)
-      : (value) => value.replace(/["\\]/g, "\\$&");
-    return doc.querySelector(`[name="${escape(name)}"]`);
-  }
-
-  function fieldValue(doc, win, name) {
-    const field = fieldByName(doc, win, name);
-    return field ? field.value || "" : "";
-  }
-
-  function dispatchEvents(field, win) {
-    if (!field) return;
-    for (const name of ["input", "change"]) {
-      field.dispatchEvent(new win.Event(name, { bubbles: true }));
-    }
-  }
-
-  function setField(doc, win, name, value) {
-    const field = fieldByName(doc, win, name);
-    if (!field) return false;
-    field.value = String(value);
-    dispatchEvents(field, win);
-    return true;
-  }
+  const NO_DISPATCH_STEP_TYPES = ["1", "10"];   // the form hides the step
 
   function visibleText(element) {
     return [
@@ -716,15 +690,6 @@
       element && element.getAttribute && element.getAttribute("title"),
       element && element.getAttribute && element.getAttribute("aria-label"),
     ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
-  }
-
-  function isVisible(element, win) {
-    if (!element) return false;
-    const style = win.getComputedStyle(element);
-    if (style.display === "none" || style.visibility === "hidden") return false;
-    if (Number(style.opacity) === 0) return false;
-    const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
   }
 
   function readTypeOptions(doc) {
@@ -739,231 +704,82 @@
       }));
   }
 
-  function selectType(doc, win, typeValue) {
-    const select = doc.querySelector("#building_building_type")
-      || doc.querySelector('[name="building[building_type]"]');
-    if (!select) return { ok: false, error: "building type select not found" };
-    select.value = String(typeValue);
-    dispatchEvents(select, win);
-    return select.value === String(typeValue)
-      ? { ok: true }
-      : { ok: false, error: `the game does not offer building type ${typeValue}` };
+  function buildForm(doc) {
+    return doc.querySelector("#new_building")
+      || doc.querySelector('form[action$="/buildings"]');
   }
 
-  function setPosition(doc, win, cfg) {
-    const nameEl = fieldByName(doc, win, "building[name]");
-    if (nameEl) { nameEl.value = cfg.name; dispatchEvents(nameEl, win); }
-    const coins = doc.querySelector("#build_with_coins");
-    if (coins) coins.value = "0";
-    const found = { marker: false, updateAddress: false };
-    try {
-      const marker = win.building_new_marker;
-      if (marker) {
-        found.marker = true;
-        if (typeof marker.setLatLng === "function") {            // Leaflet
-          marker.setLatLng([cfg.lat, cfg.lng]);
-        } else if (win.mapkit) {                                  // Apple MapKit
-          marker.coordinate = new win.mapkit.Coordinate(cfg.lat, cfg.lng);
-        }
-      }
-      const latEl = doc.querySelector("#building_latitude");
-      const lngEl = doc.querySelector("#building_longitude");
-      if (latEl) latEl.value = cfg.lat;
-      if (lngEl) lngEl.value = cfg.lng;
-      if (typeof win.updateAddress === "function") {
-        found.updateAddress = true;
-        win.updateAddress();
-      }
-      return latEl && lngEl
-        ? { ok: true, found }
-        : { ok: false, error: "lat/lng fields not found", found };
-    } catch (error) {
-      return { ok: false, error: String(error), found };
+  function typeBlock(doc, typeValue) {
+    return doc.getElementById("detail_" + typeValue);
+  }
+
+  function isDisabled(element) {
+    return !!(element.disabled || element.hasAttribute("disabled")
+      || element.classList.contains("disabled"));
+  }
+
+  function personalButton(doc, typeValue) {
+    const block = typeBlock(doc, typeValue);
+    const seen = block
+      ? [...block.querySelectorAll('input[type="submit"], button')].map((button) =>
+        visibleText(button)
+        + (button.classList.contains("alliance_activate") ? " [alliance]" : "")
+        + (button.classList.contains("coins_activate") ? " [coins]" : "")
+        + (isDisabled(button) ? " [disabled]" : ""))
+      : [];
+    const button = doc.getElementById("build_credits_" + typeValue);
+    if (!button) {
+      return { ok: false, reason: `no personal credits button for type ${typeValue}`, seen };
     }
-  }
-
-  async function waitForAddress(doc) {
-    const deadline = Date.now() + ADDRESS_WAIT_MS;
-    while (Date.now() < deadline) {
-      const el = doc.querySelector("#building_address");
-      const value = el && el.value ? el.value.trim() : "";
-      if (value) return value;
-      await sleep(400);
+    const label = visibleText(button);
+    if (button.classList.contains("coins_activate")
+        || button.classList.contains("alliance_activate")
+        || !/credits/i.test(label) || /coin/i.test(label)) {
+      return { ok: false, reason: `unexpected build button "${label}"`, seen };
     }
-    const el = doc.querySelector("#building_address");
-    return el && el.value ? el.value.trim() : "";
+    if (isDisabled(button) || button.classList.contains("btn-danger")) {
+      return { ok: false, reason: `the game will not build this with credits ("${label}")`, seen };
+    }
+    return { ok: true, label, cost: costOf(label), seen };
   }
 
-  function startingVehicleSelects(doc, win) {
-    // The free first vehicle of a new station. Which field it is (and
-    // whether it exists at all) differs per building type, so this looks
-    // for ANY visible select on the form that offers vehicle-looking
-    // options, rather than hardcoding a field name we cannot verify.
-    return [...doc.querySelectorAll("select")].filter((select) => {
-      if (select.id === "building_building_type") return false;
-      if (!isVisible(select, win)) return false;
-      const name = (select.name || select.id || "").toLowerCase();
-      if (name.includes("leitstelle") || name.includes("dispatch")) return false;
-      return select.options.length > 0;
-    });
+  function costOf(label) {
+    // "Build 2,071,596 Credits" / "Expand (60,000 Credits)" -> number
+    const match = String(label || "").match(/([\d][\d.,\s]*)\s*credits/i);
+    if (!match) return null;
+    const digits = match[1].replace(/[^\d]/g, "");
+    return digits ? parseInt(digits, 10) : null;
   }
 
-  function pickStartingVehicle(doc, win, wanted) {
+  function startingVehicleSelect(doc, typeValue) {
+    const block = typeBlock(doc, typeValue);
+    if (!block) return null;
+    return block.querySelector('select[name^="building[start_vehicle"]')
+      || block.querySelector("select");
+  }
+
+  function pickStartingVehicle(doc, typeValue, wanted) {
     const needle = String(wanted || "").trim().toLowerCase();
     if (!needle) return { applied: false, reason: "no preference set" };
-    const selects = startingVehicleSelects(doc, win);
-    if (!selects.length) {
-      return { applied: false, reason: "no starting-vehicle select on the form" };
+    const select = startingVehicleSelect(doc, typeValue);
+    if (!select) {
+      return { applied: false, reason: "this building type has no starting-vehicle choice" };
     }
-    for (const select of selects) {
-      const match = [...select.options].find((option) =>
-        (option.textContent || "").toLowerCase().includes(needle)
-      );
-      if (match) {
-        select.value = match.value;
-        dispatchEvents(select, win);
-        return {
-          applied: true,
-          field: select.name || select.id || "(unnamed select)",
-          label: (match.textContent || "").replace(/\s+/g, " ").trim(),
-        };
-      }
-    }
-    return {
-      applied: false,
-      reason: `"${wanted}" is not offered`,
-      offered: selects
-        .map((select) => [...select.options]
-          .map((option) => (option.textContent || "").trim())
-          .join(" | "))
-        .join(" // ")
-        .slice(0, 400),
-    };
-  }
-
-  function allianceDepth(button, doc) {
-    // How many levels up the "Build as Alliance Building" heading sits.
-    // The bot only ever had to FIND the alliance button, so a plain
-    // "does any ancestor mention it" was enough. This script also has to
-    // find the PERSONAL button, and on a page where both live in one
-    // container that test says "alliance" for both. Depth separates them:
-    // the alliance button sits closest to its own heading.
-    let depth = 1;
-    for (let node = button && button.parentElement;
-         node && node !== doc.body;
-         node = node.parentElement, depth++) {
-      const text = visibleText(node).toLowerCase();
-      if (text.includes("build as alliance building")) return depth;
-      if (node.matches && node.matches("form")) return Infinity;
-    }
-    return Infinity;
-  }
-
-  function pickBuildButton(doc, win, wantAlliance) {
-    const buttons = [...doc.querySelectorAll(
-      'input[type="submit"], button[type="submit"], button:not([type])'
-    )];
-    const described = buttons.map((button, index) => ({
-      button,
-      index,
-      text: visibleText(button),
-      depth: allianceDepth(button, doc),
-      visible: isVisible(button, win),
-      disabled: !!(button.disabled || button.hasAttribute("disabled")),
-    }));
-    let candidates = described.filter((item) => {
-      const text = item.text.toLowerCase();
-      return item.visible
-        && !item.disabled
-        && text.includes("build")
-        && text.includes("credits")
-        && !text.includes("coins");   // never, under any circumstance
-    });
-    if (wantAlliance) {
-      candidates = candidates.filter((item) => item.depth !== Infinity);
-      candidates.sort((a, b) => a.depth - b.depth);     // closest heading wins
-    } else {
-      candidates.sort((a, b) => b.depth - a.depth);     // furthest from it wins
-      // A button whose own label says "alliance" is never the personal one.
-      candidates = candidates.filter(
-        (item) => !item.text.toLowerCase().includes("alliance"));
-    }
-    if (!candidates.length) {
+    const options = [...select.options].filter((option) => option.value !== "");
+    const text = (option) => (option.textContent || "").replace(/\s+/g, " ").trim();
+    const match = options.find((option) => text(option).toLowerCase().includes(needle));
+    if (!match) {
       return {
-        ok: false,
-        reason: wantAlliance
-          ? "no enabled alliance build button (credits) was found"
-          : "no enabled personal build button (credits) was found",
-        seen: described
-          .filter((item) => item.text)
-          .map((item) =>
-            `${item.text}${item.depth !== Infinity ? " [alliance]" : ""}` +
-            `${item.visible ? "" : " [hidden]"}${item.disabled ? " [disabled]" : ""}`)
-          .slice(0, 12),
+        applied: false,
+        reason: `"${wanted}" is not offered`,
+        offered: options.map(text).join(" | ").slice(0, 400),
       };
     }
-    return { ok: true, index: candidates[0].index, label: candidates[0].text };
+    return { applied: true, field: select.name, value: match.value, label: text(match) };
   }
 
-  function formSnapshot(doc, win) {
-    return {
-      type: fieldValue(doc, win, "building[building_type]"),
-      name: fieldValue(doc, win, "building[name]"),
-      lat: fieldValue(doc, win, "building[latitude]"),
-      lng: fieldValue(doc, win, "building[longitude]"),
-      address: fieldValue(doc, win, "building[address]"),
-      alliance: fieldValue(doc, win, "build_as_alliance"),
-      coins: fieldValue(doc, win, "build_with_coins"),
-    };
-  }
-
-  function prepareForm(doc, win, cfg) {
-    const form = doc.querySelector("#new_building")
-      || doc.querySelector('form[action*="/buildings"]');
-    if (!form) return { ok: false, reason: "the building form was not loaded" };
-    if (!setField(doc, win, "building[name]", cfg.name)) {
-      return { ok: false, reason: "the name field was not found" };
-    }
-    if (!setField(doc, win, "building[latitude]", cfg.lat)) {
-      return { ok: false, reason: "the latitude field was not found" };
-    }
-    if (!setField(doc, win, "building[longitude]", cfg.lng)) {
-      return { ok: false, reason: "the longitude field was not found" };
-    }
-    setField(doc, win, "building[address]", cfg.address || "");
-    setField(doc, win, "build_with_coins", "0");
-    setField(doc, win, "build_as_alliance", cfg.alliance ? "1" : "0");
-    const buildAnother = fieldByName(doc, win, "build_another");
-    if (buildAnother) {
-      buildAnother.checked = false;
-      dispatchEvents(buildAnother, win);
-    }
-    const button = pickBuildButton(doc, win, cfg.alliance);
-    if (!button.ok) {
-      return { ok: false, reason: button.reason, seen: button.seen,
-               snapshot: formSnapshot(doc, win) };
-    }
-    return { ok: true, index: button.index, label: button.label,
-             snapshot: formSnapshot(doc, win) };
-  }
-
-  function waitForFrameLoad(frame) {
-    return new Promise((resolve, reject) => {
-      let done = false;
-      const timer = setTimeout(() => {
-        if (done) return;
-        done = true;
-        frame.onload = null;
-        reject(new Error("the build did not confirm in time"));
-      }, FRAME_TIMEOUT_MS);
-      frame.onload = () => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        frame.onload = null;
-        setTimeout(() => resolve(frame.contentDocument), 800);
-      };
-    });
+  function buildDispatchSelect(doc) {
+    return doc.querySelector('select[name="building[leitstelle_building_id]"]');
   }
 
   // ------------------------------------------------------ dispatch centers
@@ -1130,7 +946,9 @@
         await sleep(1100);   // Nominatim asks for at most one call per second
         continue;
       }
-      if (!osmName && place.name) osmName = place.name;   // OSM's own name
+      if (!osmName && place.name && placeIsFacility(typeLabel, place)) {
+        osmName = place.name;            // the spot itself is such a facility
+      }
       if (!settings.linkDispatch) {
         return { lat, lng, label: anchor.label, address: place.address, place,
                  dispatch: null, osmName };
@@ -1189,33 +1007,55 @@
 
   // ---------------------------------------------------------- build a one
 
+  async function gameAddress(lat, lng) {
+    // The game's own pin lookup — the same call its map makes when you drop
+    // the pin. Plain text ("Bannock Central Plaza,  Denver"); empty at sea.
+    try {
+      const response = await fetch(
+        `${BASE}/reverse_address?latitude=${lat.toFixed(6)}&longitude=${lng.toFixed(6)}`,
+        { credentials: "same-origin", headers: { "X-Requested-With": "XMLHttpRequest" } }
+      );
+      if (!response.ok) return "";
+      const text = (await response.text()).replace(/\s+/g, " ").trim();
+      if (!text || /<[a-z!]/i.test(text)) return "";   // empty, or an HTML page
+      return text.slice(0, 200);
+    } catch (error) {
+      return "";
+    }
+  }
+
   async function buildOne() {
     const type = nextType();
     if (!type) throw new Error("STOP — tick at least one building type first");
     const typeLabel = type.label || "building";
+    const typeValue = String(type.value);
     const spot = await pickLocation(typeLabel);
     log(`📍 ${typeLabel}: ${spot.lat.toFixed(5)}, ${spot.lng.toFixed(5)} ` +
         `near ${spot.label}` +
         (spot.osmName ? ` — OSM: "${spot.osmName}"` : "") +
         (spot.dispatch ? ` → dispatch "${spot.dispatch.name}" (${spot.dispatchWhy})` : ""));
 
-    const { frame, doc, win } = await frameGoto("/buildings/new");
-    if (isLoginPage(doc)) throw new Error("you are logged out of MissionChief");
-
+    const doc = await fetchDoc("/buildings/new");
+    const form = buildForm(doc);
+    if (!form) {
+      throw new Error("STOP — the build form (/buildings/new) has no #new_building any more");
+    }
     const options = readTypeOptions(doc);
     if (options.length) {
       cachedTypes = options;
       writeJson(TYPES_KEY, cachedTypes);
     }
-    const chosen = selectType(doc, win, type.value);
-    if (!chosen.ok) throw new Error(chosen.error);
-    await sleep(500);   // the page reveals the type's own block on 'change'
+    if (!options.some((option) => option.value === typeValue)) {
+      throw new Error(`the game does not offer building type ${typeValue} (${typeLabel})`);
+    }
+    const button = personalButton(doc, typeValue);
+    if (!button.ok) {
+      const seen = button.seen.length ? ` Buttons seen: ${button.seen.join(" / ")}` : "";
+      throw new Error(`${typeLabel}: ${button.reason}.${seen}`);
+    }
 
     const name = buildingName(typeLabel, spot);
-    const placed = setPosition(doc, win, { name, lat: spot.lat, lng: spot.lng });
-    if (!placed.ok) throw new Error(placed.error);
-
-    let address = await waitForAddress(doc);
+    let address = await gameAddress(spot.lat, spot.lng);
     let addressFrom = "MissionChief";
     if (!address) {
       address = spot.address || (await osmAddress(spot.lat, spot.lng)) || "";
@@ -1227,12 +1067,12 @@
       );
     }
 
-    const wantsVehicle = /fire station|feuerwache/i.test(typeLabel)
+    const wantsVehicle = /fire\s*station|feuerwache/i.test(typeLabel)
       ? settings.startingVehicle
       : "";
     let vehicle = { applied: false, reason: "not a fire station" };
     if (wantsVehicle) {
-      vehicle = pickStartingVehicle(doc, win, wantsVehicle);
+      vehicle = pickStartingVehicle(doc, typeValue, wantsVehicle);
       if (!vehicle.applied && settings.strictVehicle) {
         const extra = vehicle.offered ? ` Offered: ${vehicle.offered}` : "";
         throw new Error(
@@ -1240,51 +1080,74 @@
           `(${vehicle.reason}).${extra}`
         );
       }
-      if (vehicle.applied) log(`🚒 starting vehicle: ${vehicle.label}`);
     }
 
-    const prep = prepareForm(doc, win, {
-      name,
-      lat: spot.lat,
-      lng: spot.lng,
-      address,
-      alliance: false,          // always a personal build, your own credits
-    });
-    if (!prep.ok) {
-      const seen = prep.seen ? ` Buttons seen: ${prep.seen.join(" / ")}` : "";
-      throw new Error(`${prep.reason}.${seen}`);
+    // The dispatch center goes along with the build itself; the edit step
+    // afterwards only checks it (and sets it when this did not stick).
+    let dispatch = null;
+    const dispatchField = buildDispatchSelect(doc);
+    if (settings.linkDispatch && spot.dispatch && dispatchField
+        && !NO_DISPATCH_STEP_TYPES.includes(typeValue)) {
+      const option = optionForCenter(dispatchField, spot.dispatch);
+      if (option) dispatch = { value: option.value, label: visibleText(option) };
+      else log(`⚠️ "${spot.dispatch.name}" is not in the build form's dispatch list — ` +
+               "the edit step will try again", "error");
     }
-    if (String(prep.snapshot.coins) !== "0") {
-      throw new Error("refusing to build: build_with_coins is not 0");
+
+    const params = formParams(form);
+    params.set("building[building_type]", typeValue);
+    params.set("building[name]", name);
+    params.set("building[latitude]", spot.lat.toFixed(6));
+    params.set("building[longitude]", spot.lng.toFixed(6));
+    params.set("building[address]", address);
+    params.set("build_with_coins", "");     // credits — as the game sends it
+    params.set("build_as_alliance", "");    // personal — as the game sends it
+    params.delete("build_another");
+    if (vehicle.applied) params.set(vehicle.field, vehicle.value);
+    if (dispatch) params.set(dispatchField.name, dispatch.value);
+    if (params.get("build_with_coins") !== "" || params.get("build_as_alliance") !== "") {
+      throw new Error("refusing to build: the coins/alliance fields are not empty");
+    }
+
+    const summary = `"${name}" (${typeLabel}, ${button.label}` +
+      (vehicle.applied ? `, start vehicle ${vehicle.label}` : "") +
+      (dispatch ? `, dispatch ${dispatch.label}` : "") +
+      `, address via ${addressFrom}: ${address})`;
+
+    const credits = await readCredits();
+    if (credits !== null && button.cost !== null
+        && credits - button.cost < (Number(settings.creditsFloor) || 0)) {
+      throw new Error(`STOP — building ${summary} would take credits below the floor ` +
+        `(${credits.toLocaleString()} - ${button.cost.toLocaleString()} < ` +
+        `${Number(settings.creditsFloor).toLocaleString()})`);
     }
 
     if (settings.dryRun) {
-      log(`🧪 DRY RUN — would click "${prep.label}" for "${name}" ` +
-          `(address via ${addressFrom}: ${address})`, "ok");
+      log(`🧪 DRY RUN — would build ${summary}`, "ok");
       return { dryRun: true };
     }
 
-    const landed = waitForFrameLoad(frame);
-    const buttons = [...doc.querySelectorAll(
-      'input[type="submit"], button[type="submit"], button:not([type])'
-    )];
-    const button = buttons[prep.index];
-    if (!button) throw new Error("the build button vanished before the click");
-    button.click();
-    const after = await landed;
-
-    let buildingId = null;
-    const href = String(frame.contentWindow.location.href || "");
-    const match = href.match(/\/(?:alliance_)?buildings\/(\d+)/);
-    if (match) buildingId = parseInt(match[1], 10);
+    const before = new Set((await ownBuildings(true)).map((row) => String(row.id)));
+    const sent = await send(form.getAttribute("action") || "/buildings", params,
+      csrfToken(doc));
+    if (/\/users\/sign_(in|up)/.test(sent.url) || isLoginPage(sent.doc)) {
+      throw new Error("you are logged out of MissionChief");
+    }
+    if (!sent.response.ok) {
+      const flash = flashText(sent.doc);
+      throw new Error(`the game refused the build — HTTP ${sent.response.status}` +
+        (flash ? `: ${flash}` : ""));
+    }
+    let buildingId = await confirmByApi(spot.lat, spot.lng, before);
     if (!buildingId) {
-      buildingId = await confirmByApi(spot.lat, spot.lng);
+      await sleep(2500);    // the API can lag a moment behind the build
+      buildingId = await confirmByApi(spot.lat, spot.lng, before);
     }
     if (!buildingId) {
-      const flash = after ? flashText(after) : "";
+      const flash = flashText(sent.doc);
       throw new Error(
-        "the build did not confirm — MissionChief did not return a building" +
-        (flash ? `: ${flash}` : " (no error shown)")
+        "the build did not confirm — no new building of yours at that spot" +
+        (flash ? `: ${flash}` : " (the game showed no error)")
       );
     }
 
@@ -1293,19 +1156,21 @@
       type: typeLabel, at: new Date().toISOString(),
     });
     saveHistory();
-    log(`✅ built #${buildingId} "${name}" near ${spot.label}`, "ok");
-    return { buildingId, name, lat: spot.lat, lng: spot.lng, spot };
+    log(`✅ built #${buildingId} ${summary}`, "ok");
+    return { buildingId, name, lat: spot.lat, lng: spot.lng, spot,
+             dispatchSet: !!dispatch };
   }
 
-  async function confirmByApi(lat, lng) {
-    // The alliance/personal build does not always redirect to the new
-    // building, so confirm the way the bot does: ask the API and look for
-    // something of ours within a few dozen metres of the pin.
+  async function confirmByApi(lat, lng, before) {
+    // Ask the API for a building of ours at the pin that was not there
+    // before the build. (The build's own reply is the sidebar HTML, which
+    // names many buildings — it cannot say which one is new.)
     try {
       const rows = await ownBuildings(true);
       let best = null;
-      let bestDistance = 120;
+      let bestDistance = 300;
       for (const row of rows) {
+        if (before && before.has(String(row.id))) continue;
         const coords = buildingCoords(row);
         if (!coords) continue;
         const distance = distanceMeters(lat, lng, coords[0], coords[1]);
@@ -1322,13 +1187,13 @@
 
   // ------------------------------------------------- link a dispatch center
 
-  function dispatchSelect(doc, win) {
+  function dispatchSelect(doc) {
     const direct = doc.querySelector(
+      'select[name="building[leitstelle_building_id]"], ' +
       'select[name*="leitstelle"], select[id*="leitstelle"], ' +
       'select[name*="dispatch"], select[id*="dispatch"]'
     );
     if (direct) return direct;
-    // Fall back to any select whose label text mentions a dispatch center.
     return [...doc.querySelectorAll("select")].find((select) => {
       const label = visibleText(select.closest("div, td, li, form") || select)
         .toLowerCase();
@@ -1352,124 +1217,159 @@
   // Deliberately NOT "buy everything the page offers": extensions are OFF
   // by default. A new building gets its LEVEL raised as far as it goes and
   // every STORAGE slot bought — nothing else, unless you switch extensions
-  // on yourself. (The dispatch center and the staff amount are not bought;
-  // they are settings, and live in editBuilding above.)
-  //
-  // All of it happens in the frame, on the real page, because these
-  // controls are a mix of plain links, Rails POST links and small forms,
-  // and clicking the real thing runs the page's own handlers. After every
-  // click the building page is re-loaded and re-scanned: purchases unlock
-  // one at a time, exactly like the bot's finisher.
+  // on yourself. Read live (Nov 2026):
+  //   level      GET  /buildings/<id>/expand_do/credits?level=<n>  — listed
+  //              on /buildings/<id>/expand, one link per target level, the
+  //              price already summed, so the highest link is "max level"
+  //   storage    POST /buildings/<id>/storage_upgrade/credits/<slug>
+  //   extension  POST /buildings/<id>/extension/credits/<n>
+  // Storage rooms and extensions take days to build; the next one is shown
+  // with class "disabled" until then. Those are left for the finish list.
+  // Coin links (…/coins/…, data-confirm) are never even looked at.
 
-  // Storage, from the live game (a fire station, tab #storage):
-  //   /buildings/<id>/storage_upgrade/credits/fire_equipment_initial
-  //   /buildings/<id>/storage_upgrade/credits/fire_equipment_additional
-  //   /buildings/<id>/storage_upgrade/credits/fire_equipment_additional_2
-  //   ... up to _7          (all with ?redirect_building_id=<id>)
-  // Every slug is its own one-time purchase, so each is bought once and
-  // the slugs differ per building type — which is why they are read from
-  // the page rather than listed here.
-  const STORAGE_RE = /storage_upgrade|storage|lager/i;
-  const LEVEL_RE = /expand_do|expand\/|\/expand/i;
-  const EXTENSION_RE = /\/extension\//i;
+  const LEVEL_HREF_RE = /\/expand_do\/credits\b/i;
+  const STORAGE_HREF_RE = /\/storage_upgrade\/credits\//i;
+  const EXTENSION_HREF_RE = /\/extension\/credits\/\d+/i;
   const STAFF_NAME_RE = /personal|personnel|staff|crew|besetzung/i;
   const MAX_DELIVERY_STEPS = 40;
 
-  function creditLinks(doc, buildingId) {
+  function purchaseLinks(doc, buildingId, hrefRe) {
     const prefix = `/buildings/${buildingId}/`;
     const links = [];
-    for (const anchor of doc.querySelectorAll("a[href], button, input[type='submit']")) {
-      let href = anchor.getAttribute ? (anchor.getAttribute("href") || "") : "";
+    for (const anchor of doc.querySelectorAll("a[href]")) {
+      let href = anchor.getAttribute("href") || "";
       if (href.startsWith(BASE)) href = href.slice(BASE.length);
-      const label = visibleText(anchor).replace(/\s+/g, " ").trim();
-      const haystack = `${href} ${label}`;
-      if (/coin/i.test(haystack)) continue;              // never, ever
-      const isLink = href.startsWith(prefix) && /credits/i.test(href);
-      // The storage control is the one thing here that is NOT verified
-      // against the live page: it may be a button, a link, or its own page.
-      // So the match is deliberately wide, and the self-test prints what it
-      // found on a real building of yours before any of it is clicked.
-      const isStorage = STORAGE_RE.test(label)
-        && (!href || href.startsWith(prefix));
-      if (!isLink && !isStorage) continue;
-      links.push({ element: anchor, href, label });
+      const label = visibleText(anchor);
+      if (!href.startsWith(prefix) || !hrefRe.test(href)) continue;
+      if (/coin/i.test(`${href} ${label}`) || anchor.hasAttribute("data-confirm")) continue;
+      links.push({
+        href,
+        label,
+        cost: costOf(label),
+        disabled: isDisabled(anchor),
+        method: (anchor.getAttribute("data-method") || "get").toLowerCase(),
+      });
     }
     return links;
   }
 
-  function categorize(link) {
-    if (STORAGE_RE.test(link.href) || STORAGE_RE.test(link.label)) return "storage";
-    if (LEVEL_RE.test(link.href)) return "level";
-    if (EXTENSION_RE.test(link.href)) return "extension";
-    return "other";
+  function levelOf(href) {
+    const match = String(href).match(/[?&]level=(\d+)/);
+    return match ? parseInt(match[1], 10) : -1;
   }
 
-  function wantedCategories() {
-    const wanted = new Set();
-    if (settings.maxLevel) wanted.add("level");
-    if (settings.buyStorage) wanted.add("storage");
-    if (settings.buyExtensions) wanted.add("extension");
-    return wanted;
-  }
-
-  function revealTabs(doc) {
-    // The purchases sit under tabs (#storage and friends). A pane that the
-    // page loads lazily is empty until its tab is clicked, so click them
-    // all once — a tab click navigates nothing and buys nothing.
-    const tabs = [...doc.querySelectorAll(
-      'a[data-toggle="tab"], .nav-tabs a[href^="#"], ul.nav a[href^="#"]'
-    )];
-    for (const tab of tabs) {
-      try {
-        tab.click();
-      } catch (error) {
-        /* a tab that refuses to be clicked is not our problem */
-      }
+  async function buy(link, token) {
+    const page = link.method === "get"
+      ? await fetchPage(link.href, { headers: { "X-Requested-With": "XMLHttpRequest" } })
+      : await send(link.href, {}, token);
+    if (/\/users\/sign_(in|up)/.test(page.url) || isLoginPage(page.doc)) {
+      throw new Error("you are logged out of MissionChief");
     }
-    return tabs.length;
-  }
-
-  async function openBuilding(buildingId) {
-    const page = await frameGoto(`/buildings/${buildingId}`);
-    if (revealTabs(page.doc)) await sleep(900);
     return page;
   }
 
-  async function clickAndSettle(page, element, buildingId) {
-    // Some of these controls navigate, some are AJAX. Wait for a load if
-    // one comes, then re-open the building page either way.
-    const landed = waitForFrameLoad(page.frame).catch(() => null);
-    element.click();
-    await Promise.race([landed, sleep(6000)]);
-    await sleep(600);
-    return openBuilding(buildingId);
+  async function deliverBuilding(buildingId, entry) {
+    // entry (optional): the finish-list record, which remembers how many
+    // storage rooms were already bought across visits.
+    const counts = { level: 0, storage: 0, extension: 0 };
+    const labels = [];
+    const problems = [];
+    let waiting = 0;
+    const dry = !!settings.dryRun;
+    const floor = Number(settings.creditsFloor) || 0;
+    let credits = await readCredits();
+    const affordable = (cost) =>
+      credits === null || cost === null || credits - cost >= floor;
+    const spend = (cost) => {
+      if (credits !== null && cost !== null) credits -= cost;
+    };
+
+    if (settings.maxLevel) {
+      const doc = await fetchDoc(`/buildings/${buildingId}/expand`);
+      const levels = purchaseLinks(doc, buildingId, LEVEL_HREF_RE)
+        .filter((link) => !link.disabled && affordable(link.cost))
+        .sort((a, b) => levelOf(b.href) - levelOf(a.href));
+      if (levels.length) {
+        const top = levels[0];
+        counts.level = 1;
+        labels.push(`level ${levelOf(top.href) + 1} (${top.label})`);
+        if (!dry) {
+          const result = await buy(top, csrfToken(doc));
+          if (!result.response.ok) {
+            problems.push(`level: HTTP ${result.response.status}`);
+          } else {
+            spend(top.cost);
+          }
+        }
+      } else if (purchaseLinks(doc, buildingId, LEVEL_HREF_RE).length) {
+        problems.push("level: not affordable above the credit floor");
+      }
+    }
+
+    const kinds = [];
+    if (settings.buyStorage) {
+      const done = (entry && entry.storageBought) || 0;
+      kinds.push(["storage", STORAGE_HREF_RE,
+        Math.max(0, (parseInt(settings.maxStorageBuys, 10) || 0) - done)]);
+    }
+    if (settings.buyExtensions) kinds.push(["extension", EXTENSION_HREF_RE, Infinity]);
+    if (kinds.length) {
+      let doc = await fetchDoc(`/buildings/${buildingId}`);
+      for (const [kind, hrefRe, cap] of kinds) {
+        const attempted = new Set();
+        for (let step = 0; step < MAX_DELIVERY_STEPS; step++) {
+          const links = purchaseLinks(doc, buildingId, hrefRe)
+            .filter((link) => !attempted.has(link.href));
+          const open = links.filter((link) => !link.disabled);
+          if (counts[kind] >= cap) break;
+          if (!open.length) {
+            waiting += links.length;      // greyed out: still building
+            break;
+          }
+          const next = open[0];
+          attempted.add(next.href);       // each slug is a one-time purchase
+          if (!affordable(next.cost)) {
+            problems.push(`${kind}: ${next.label} not affordable above the credit floor`);
+            waiting += 1;
+            break;
+          }
+          counts[kind] += 1;
+          labels.push(`${kind} ${next.label}`.slice(0, 60));
+          if (dry) continue;
+          const result = await buy(next, csrfToken(doc));
+          if (!result.response.ok) {
+            problems.push(`${kind}: HTTP ${result.response.status}`);
+            counts[kind] -= 1;
+            break;
+          }
+          spend(next.cost);
+          await sleep(800);
+          doc = await fetchDoc(`/buildings/${buildingId}`);
+        }
+      }
+    }
+    if (entry && !dry) entry.storageBought = (entry.storageBought || 0) + counts.storage;
+    return { counts, labels: labels.slice(0, 12), waiting, problems };
   }
 
-  // The building's own settings live on /buildings/<id>/edit: the dispatch
-  // center AND the staff amount, which is the SECOND text box on that form
-  // (confirmed against the live page). Both are set in one visit and saved
-  // with one submit — two separate saves would each write the other field's
-  // old value back.
+  // The building's own settings live on /buildings/<id>/edit: the staff
+  // target (building[personal_count_target], the second box on the form)
+  // and the dispatch center. Both are set in one request — two separate
+  // saves would each write the other field's old value back.
 
-  function editTextFields(doc, win) {
-    const form = doc.querySelector('form[action*="/buildings/"]')
-      || doc.querySelector("form");
-    if (!form) return null;
-    // Everything the player would call a text box, in the order they see
-    // them. Readonly/disabled ones are NOT filtered out: they still count
-    // when you count boxes down the page.
+  function staffFieldOnEdit(form) {
+    const direct = form.querySelector('[name="building[personal_count_target]"]');
+    if (direct) return direct;
     const texts = [...form.querySelectorAll(
       'input[type="text"], input[type="number"], input:not([type])'
-    )].filter((field) => isVisible(field, win));
-    return { form, texts };
+    )].filter((field) => field.name);
+    return texts.find((field) => STAFF_NAME_RE.test(field.name.toLowerCase()))
+      || texts[1] || null;
   }
 
-  function staffFieldOnEdit(doc, win) {
-    const fields = editTextFields(doc, win);
-    if (!fields) return null;
-    const byName = fields.texts.find((field) =>
-      STAFF_NAME_RE.test((field.name || field.id || "").toLowerCase()));
-    return byName || fields.texts[1] || null;   // the second box
+  function editForm(doc, buildingId) {
+    return doc.querySelector(`form[action$="/buildings/${buildingId}"]`)
+      || doc.querySelector('form[action*="/buildings/"]');
   }
 
   async function editBuilding(buildingId, center) {
@@ -1480,22 +1380,26 @@
     const wantDispatch = !!(settings.linkDispatch && center);
     if (!wantStaff && !wantDispatch) return report;
 
-    let page;
+    let doc;
     try {
-      page = await frameGoto(`/buildings/${buildingId}/edit`);
+      doc = await fetchDoc(`/buildings/${buildingId}/edit`);
     } catch (error) {
+      if (/logged out/.test(error.message)) throw error;
       return {
         dispatch: wantDispatch ? { ok: false, reason: error.message } : null,
         staff: wantStaff ? { ok: false, reason: error.message } : null,
       };
     }
-    if (isLoginPage(page.doc)) throw new Error("you are logged out of MissionChief");
+    const form = editForm(doc, buildingId);
+    if (!form) {
+      const failure = { ok: false, reason: "no form on the edit page" };
+      return { dispatch: wantDispatch ? failure : null, staff: wantStaff ? failure : null };
+    }
 
     let dirty = false;
-    let form = null;
 
     if (wantDispatch) {
-      const select = dispatchSelect(page.doc, page.win);
+      const select = dispatchSelect(form);
       if (!select) {
         report.dispatch = { ok: false, reason: "no dispatch field on the edit page" };
       } else {
@@ -1513,8 +1417,6 @@
           report.dispatch = { ok: true, dryRun: true, label: center.name };
         } else {
           select.value = String(option.value);
-          dispatchEvents(select, page.win);
-          form = select.closest("form") || form;
           dirty = true;
           report.dispatch = { ok: true, label: center.name };
         }
@@ -1522,7 +1424,7 @@
     }
 
     if (wantStaff) {
-      const field = staffFieldOnEdit(page.doc, page.win);
+      const field = staffFieldOnEdit(form);
       if (!field) {
         report.staff = { ok: false, reason: "no staff field on the edit page" };
       } else {
@@ -1534,12 +1436,9 @@
         if (isFinite(current) && current === value) {
           report.staff = { ok: true, already: true, value: current, field: where };
         } else if (settings.dryRun) {
-          report.staff = { ok: true, dryRun: true, value, was: field.value,
-                           field: where };
+          report.staff = { ok: true, dryRun: true, value, was: field.value, field: where };
         } else {
           field.value = String(value);
-          dispatchEvents(field, page.win);
-          form = field.closest("form") || form;
           dirty = true;
           report.staff = { ok: true, value, was: current, field: where };
         }
@@ -1547,20 +1446,19 @@
     }
 
     if (!dirty) return report;
-    if (!form) {
-      const failure = { ok: false, reason: "the edit fields are not in a form" };
-      if (report.dispatch && report.dispatch.ok) report.dispatch = failure;
-      if (report.staff && report.staff.ok) report.staff = failure;
-      return report;
+    const sent = await send(form.getAttribute("action"), formParams(form), csrfToken(doc));
+    const flash = flashText(sent.doc);
+    if (!sent.response.ok || flash) {
+      const failure = {
+        ok: false,
+        reason: `the game did not save it (HTTP ${sent.response.status}` +
+          (flash ? `: ${flash}` : "") + ")",
+      };
+      if (report.dispatch && report.dispatch.ok && !report.dispatch.already) {
+        report.dispatch = failure;
+      }
+      if (report.staff && report.staff.ok && !report.staff.already) report.staff = failure;
     }
-    const landed = waitForFrameLoad(page.frame).catch(() => null);
-    const submit = form.querySelector('input[type="submit"], button[type="submit"]');
-    if (submit) submit.click();
-    else if (form.requestSubmit) form.requestSubmit();
-    else form.submit();
-    await Promise.race([landed, sleep(6000)]);
-    const flash = flashText(page.frame.contentDocument || page.doc);
-    if (flash) report.flash = flash;
     return report;
   }
 
@@ -1577,7 +1475,6 @@
     };
     say("dispatch", report.dispatch);
     say("staff", report.staff);
-    if (report.flash) parts.push(`page says: ${report.flash}`);
     return parts.join(" · ");
   }
 
@@ -1586,40 +1483,44 @@
       && (!report.staff || report.staff.ok);
   }
 
-  async function deliverBuilding(buildingId) {
-    const counts = { level: 0, storage: 0, extension: 0 };
-    const labels = [];
-    let page = await openBuilding(buildingId);
-    const wanted = wantedCategories();
-    const attempted = new Set();
-    let storageBought = 0;
-    for (let step = 0; step < MAX_DELIVERY_STEPS; step++) {
-      if (!wanted.size) break;
-      const links = creditLinks(page.doc, buildingId)
-        .map((link) => Object.assign(link, { kind: categorize(link) }))
-        .filter((link) => wanted.has(link.kind))
-        .filter((link) => !attempted.has(link.href || link.label));
-      if (!links.length) break;
-      const next = links[0];
-      const key = next.href || next.label;
-      attempted.add(key);      // each slug is a one-time purchase
-      if (next.kind === "storage") {
-        if (storageBought >= (parseInt(settings.maxStorageBuys, 10) || 0)) continue;
-        storageBought += 1;
+  function describeDelivery(delivered) {
+    return `level ${delivered.counts.level}, storage ${delivered.counts.storage}` +
+      (settings.buyExtensions ? `, extensions ${delivered.counts.extension}` : "") +
+      (delivered.labels.length ? ` — ${delivered.labels.join(", ")}` : "") +
+      (delivered.waiting ? ` · ${delivered.waiting} still under construction/locked` : "") +
+      (delivered.problems.length ? ` · ⚠️ ${delivered.problems.join("; ")}` : "");
+  }
+
+  async function afterBuild(result) {
+    // Staff + dispatch, then level/storage, then onto the finish list.
+    const center = result.spot && result.spot.dispatch;
+    let settled = true;
+    try {
+      const edited = await editBuilding(result.buildingId, center);
+      const described = describeEdit(edited);
+      if (described) {
+        log(`🛰️ #${result.buildingId}: ${described}`, editOk(edited) ? "info" : "error");
       }
-      counts[next.kind] += 1;
-      labels.push(`${next.label || next.href}`.slice(0, 60));
-      if (settings.dryRun) continue;
-      page = await clickAndSettle(page, next.element, buildingId);
-      await sleep(1000);
+      settled = editOk(edited);
+    } catch (error) {
+      log(`⚠️ #${result.buildingId}: edit page failed — ${error.message}`, "error");
+      settled = false;
     }
-    return { counts, labels: labels.slice(0, 12) };
+    const entry = enqueue(result.buildingId, result.name, center, settled);
+    try {
+      const delivered = await deliverBuilding(result.buildingId, entry);
+      log(`🧱 #${result.buildingId}: ${settings.dryRun ? "would do" : "done"} — ` +
+          describeDelivery(delivered));
+    } catch (error) {
+      log(`⚠️ #${result.buildingId}: delivery failed — ${error.message}`, "error");
+    }
+    saveQueue();
   }
 
   // ------------------------------------------------------- the finish list
 
   function enqueue(buildingId, label, center, editDone) {
-    queue[String(buildingId)] = {
+    const entry = {
       label: label || "",
       idle: 0,
       addedAt: Date.now(),
@@ -1627,9 +1528,12 @@
       // A dispatch link or a staff amount that did not stick is retried by
       // the finisher, exactly like the bot retries a building's tax.
       editDone: !!editDone,
+      storageBought: 0,
       center: center ? { id: center.id, name: center.name } : null,
     };
+    queue[String(buildingId)] = entry;
     saveQueue();
+    return entry;
   }
 
   async function finishPass() {
@@ -1647,7 +1551,7 @@
             log(`🛰️ #${buildingId}: ${described}`,
                 editOk(edited) ? "info" : "error");
           }
-          if (editOk(edited)) {
+          if (editOk(edited) && !settings.dryRun) {
             entry.editDone = true;
             progressed = true;
           }
@@ -1662,25 +1566,28 @@
       }
       let result;
       try {
-        result = await deliverBuilding(buildingId);
+        result = await deliverBuilding(buildingId, entry);
       } catch (error) {
         log(`⚠️ finish #${buildingId}: ${error.message}`, "error");
+        if (/logged out/.test(error.message)) throw error;
         entry.nextAt = now + FINISH_INTERVAL_MS;
         saveQueue();
-        continue;
+        return;
       }
-      const bought = result.counts.level + result.counts.storage
-        + result.counts.extension;
-      if (bought > 0) {
-        log(`🏗️ #${buildingId}: ${bought} more ` +
-            `(${result.labels.join(", ")})`);
+      const bought = settings.dryRun ? 0 : result.counts.level
+        + result.counts.storage + result.counts.extension;
+      if (bought > 0 || result.problems.length) {
+        log(`🏗️ #${buildingId}: ${describeDelivery(result)}`,
+            result.problems.length ? "error" : "info");
       }
       entry.idle = (bought > 0 || progressed) ? 0 : (entry.idle || 0) + 1;
-      entry.nextAt = now + FINISH_INTERVAL_MS;
+      entry.nextAt = now + (result.waiting ? FINISH_WAIT_INTERVAL_MS : FINISH_INTERVAL_MS);
       const editSettled = entry.editDone || (entry.editTries || 0) >= EDIT_MAX_TRIES;
-      if (entry.idle >= FINISH_IDLE_LIMIT && editSettled) {
+      const tooOld = now - (entry.addedAt || now) > FINISH_MAX_AGE_MS;
+      if ((entry.idle >= FINISH_IDLE_LIMIT && editSettled && !result.waiting) || tooOld) {
         delete queue[key];
-        log(`🏁 #${buildingId} is fully delivered — off the finish list`, "ok");
+        log(`🏁 #${buildingId} is ${tooOld ? "too old to keep waiting for" : "fully delivered"}` +
+            " — off the finish list", "ok");
       }
       saveQueue();
       return;   // one building per pass keeps the traffic gentle
@@ -1689,8 +1596,8 @@
 
   // --------------------------------------------------------------- the loop
 
-  function creditsOk() {
-    state.credits = readCredits();
+  async function creditsOk() {
+    state.credits = await readCredits();
     if (state.credits === null) return true;   // unreadable: don't block
     return state.credits >= (Number(settings.creditsFloor) || 0);
   }
@@ -1718,7 +1625,7 @@
         stop();
         return;
       }
-      if (!creditsOk()) {
+      if (!(await creditsOk())) {
         log(`⏹️ credits ${state.credits.toLocaleString()} are at or below ` +
             `the floor ${Number(settings.creditsFloor).toLocaleString()} — stopped`,
             "error");
@@ -1729,35 +1636,13 @@
       session.count += 1;
       saveSession();
       state.lastError = "";
-      if (result.buildingId) {
-        const center = result.spot && result.spot.dispatch;
-        let settled = true;
-        try {
-          const edited = await editBuilding(result.buildingId, center);
-          const described = describeEdit(edited);
-          if (described) {
-            log(`🛰️ #${result.buildingId}: ${described}`,
-                editOk(edited) ? "info" : "error");
-          }
-          settled = editOk(edited);
-        } catch (error) {
-          log(`⚠️ #${result.buildingId}: edit page failed — ${error.message}`,
-              "error");
-          settled = false;
-        }
-        const delivered = await deliverBuilding(result.buildingId);
-        log(`🧱 #${result.buildingId}: ${settings.dryRun ? "would do" : "done"} — ` +
-            `level ${delivered.counts.level}, storage ${delivered.counts.storage}` +
-            (settings.buyExtensions ? `, extensions ${delivered.counts.extension}` : "") +
-            (delivered.labels.length ? ` — ${delivered.labels.join(", ")}` : ""));
-        enqueue(result.buildingId, result.name, center, settled);
-      }
+      if (result.buildingId) await afterBuild(result);
     } catch (error) {
       state.lastError = error.message;
       log(`❌ ${error.message}`, "error");
-      // A hard stop (a missing Quint, a logged-out session, a blocked
-      // frame) must not be retried in a loop — those repeat forever.
-      if (/^STOP —|logged out|frame/.test(error.message)) stop();
+      // A hard stop (a missing Quint, a logged-out session, a changed build
+      // form) must not be retried in a loop — those repeat forever.
+      if (/^STOP —|logged out/.test(error.message)) stop();
     } finally {
       const wait = Math.max(20, Number(settings.intervalSeconds) || 90);
       state.nextAt = Date.now() + wait * 1000 + Math.random() * 5000;
@@ -1807,62 +1692,50 @@
   // ------------------------------------------------------------ self-test
   //
   // Everything this script cannot know from the outside — which types the
-  // game offers, whether the map hooks exist, what the build buttons are
-  // called — is read from the live page here and printed. Copy the result
-  // if something needs fixing.
+  // game offers, what the build buttons are called, where the purchase
+  // links live — is read from the live pages here and printed. Read-only:
+  // nothing is posted. Copy the result if something needs fixing.
 
   let lastDiagnostics = "";
 
   async function selfTest() {
     const lines = [`FRA Auto-Build ${VERSION} self-test — ${new Date().toISOString()}`];
     try {
-      const { doc, win } = await frameGoto("/buildings/new");
-      lines.push(`logged in: ${isLoginPage(doc) ? "NO — log in first" : "yes"}`);
+      const doc = await fetchDoc("/buildings/new");
+      lines.push("logged in: yes");
+      const form = buildForm(doc);
+      lines.push(`build form: ${form
+        ? `#new_building → ${form.getAttribute("action")}` : "NOT FOUND"}`);
       const options = readTypeOptions(doc);
       lines.push(`building types offered: ${options.length}`);
-      for (const option of options) lines.push(`  ${option.value} = ${option.label}`);
+      for (const option of options) {
+        const button = personalButton(doc, option.value);
+        lines.push(`  ${option.value} = ${option.label} — ` +
+          (button.ok ? button.label : `NOT buildable: ${button.reason}`));
+      }
       if (options.length) {
         cachedTypes = options;
         writeJson(TYPES_KEY, cachedTypes);
         renderTypes();
       }
-      const picked = selectedTypes();
-      const probe = (picked[0] || {}).value
-        || (options.find((option) => /fire station/i.test(option.label)) || options[0] || {}).value;
-      if (probe) {
-        const chosen = selectType(doc, win, probe);
-        lines.push(`select type ${probe}: ${chosen.ok ? "ok" : chosen.error}`);
-        await sleep(600);
+      const fire = options.find((option) => /fire station/i.test(option.label));
+      if (fire && settings.startingVehicle) {
+        const vehicle = pickStartingVehicle(doc, fire.value, settings.startingVehicle);
+        lines.push(`starting vehicle "${settings.startingVehicle}" on ${fire.label}: ` +
+          (vehicle.applied ? `ok (${vehicle.field} = ${vehicle.value})`
+            : `${vehicle.reason}${vehicle.offered ? ` — offered: ${vehicle.offered}` : ""}`));
       }
+      const dispatch = buildDispatchSelect(doc);
+      lines.push(`dispatch list on the build form: ${dispatch
+        ? `${dispatch.options.length} options` : "NOT FOUND"}`);
       const anchor = settings.areaLat !== null
         ? [settings.areaLat, settings.areaLng]
         : [WORLD_POINTS[0][0], WORLD_POINTS[0][1]];
-      const placed = setPosition(doc, win, {
-        name: "FRA self-test", lat: anchor[0], lng: anchor[1],
-      });
-      lines.push(`map marker global found: ${placed.found && placed.found.marker}`);
-      lines.push(`updateAddress() found: ${placed.found && placed.found.updateAddress}`);
-      lines.push(`lat/lng fields: ${placed.ok ? "ok" : placed.error}`);
-      const address = await waitForAddress(doc);
+      const address = await gameAddress(anchor[0], anchor[1]);
       lines.push(`address from MissionChief: ${address || "(empty)"}`);
       if (!address) {
         const osm = await osmAddress(anchor[0], anchor[1]);
         lines.push(`address from OpenStreetMap: ${osm || "(none)"}`);
-      }
-      const selects = startingVehicleSelects(doc, win);
-      lines.push(`extra selects on the form: ${selects.length}`);
-      for (const select of selects.slice(0, 4)) {
-        lines.push(`  ${select.name || select.id || "(unnamed)"}: ` +
-          [...select.options].slice(0, 25)
-            .map((option) => (option.textContent || "").trim()).join(" | ")
-            .slice(0, 300));
-      }
-      const personal = pickBuildButton(doc, win, false);
-      const alliance = pickBuildButton(doc, win, true);
-      lines.push(`personal build button: ${personal.ok ? personal.label : personal.reason}`);
-      lines.push(`alliance build button: ${alliance.ok ? alliance.label : alliance.reason}`);
-      if (!personal.ok && personal.seen) {
-        lines.push(`  buttons seen: ${personal.seen.join(" / ")}`);
       }
     } catch (error) {
       lines.push(`build form: FAILED — ${error.message}`);
@@ -1873,51 +1746,57 @@
       lines.push(`your buildings (API): ${rows.length}`);
       const centers = await dispatchCenters();
       lines.push(`dispatch centers: ${centers.length}`);
-      for (const center of centers) lines.push(`  #${center.id} ${center.name}`);
+      for (const center of centers.slice(0, 40)) lines.push(`  #${center.id} ${center.name}`);
       const rules = parseDispatchRules(settings.dispatchRules);
       lines.push(`dispatch rules configured: ${rules.length}`);
       const ids = new Set(centers.map((center) => center.id));
-      const other = rows.find((row) => !ids.has(String(row.id)));
-      probeId = other ? other.id : (rows[0] ? rows[0].id : null);
+      const others = rows.filter((row) => !ids.has(String(row.id)));
+      // Prefer a fire station that still has something to buy: it has a
+      // level, storage rooms and a staff target, so every probe applies.
+      const fireStations = others.filter((row) => parseInt(row.building_type, 10) === 0);
+      const lowest = (fireStations.length ? fireStations : others).slice()
+        .sort((a, b) => (a.level || 0) - (b.level || 0))[0];
+      probeId = lowest ? lowest.id : (rows[0] ? rows[0].id : null);
     } catch (error) {
       lines.push(`/api/buildings: FAILED — ${error.message}`);
     }
     if (probeId) {
-      // What the delivery step would actually find on a real building of
-      // yours: the staff field, the storage button, the level chain.
+      // What the delivery step would find on a real building of yours.
       try {
-        const page = await openBuilding(probeId);
         lines.push(`probe building #${probeId}:`);
-        const links = creditLinks(page.doc, probeId)
-          .map((link) => Object.assign(link, { kind: categorize(link) }));
-        lines.push(`  credit controls: ${links.length}`);
-        for (const link of links.slice(0, 15)) {
-          lines.push(`    [${link.kind}] ${link.label || "(no label)"} ${link.href}`);
+        const page = await fetchDoc(`/buildings/${probeId}`);
+        for (const [kind, hrefRe] of [["storage", STORAGE_HREF_RE],
+                                      ["extension", EXTENSION_HREF_RE]]) {
+          const links = purchaseLinks(page, probeId, hrefRe);
+          const open = links.filter((link) => !link.disabled);
+          lines.push(`  ${kind} (credits): ${open.length} buyable, ` +
+            `${links.length - open.length} locked` +
+            (open[0] ? ` — next: ${open[0].label} ${open[0].href.replace(/\?.*/, "")}` : ""));
         }
-        const edit = await frameGoto(`/buildings/${probeId}/edit`);
-        const fields = editTextFields(edit.doc, edit.win);
-        lines.push(`  edit page text boxes: ${fields ? fields.texts.length : "no form"}`);
-        if (fields) {
-          fields.texts.forEach((field, index) => {
-            lines.push(`    ${index + 1}. ${field.name || field.id || "(unnamed)"}` +
-              ` = "${field.value}"` +
-              (field.getAttribute("max") ? ` (max ${field.getAttribute("max")})` : ""));
-          });
-          const staff = staffFieldOnEdit(edit.doc, edit.win);
-          lines.push(`  staff field picked: ${staff
-            ? `${staff.name || staff.id || "(unnamed)"} = ${staff.value}`
-            : "NOT FOUND"}`);
+        const expand = await fetchDoc(`/buildings/${probeId}/expand`);
+        const levels = purchaseLinks(expand, probeId, LEVEL_HREF_RE)
+          .sort((a, b) => levelOf(b.href) - levelOf(a.href));
+        lines.push(`  level (credits): ${levels.length} options` +
+          (levels[0] ? ` — max: level ${levelOf(levels[0].href) + 1} for ${levels[0].label}` : ""));
+        const edit = await fetchDoc(`/buildings/${probeId}/edit`);
+        const form = editForm(edit, probeId);
+        if (!form) {
+          lines.push("  edit page: NO FORM");
+        } else {
+          const staff = staffFieldOnEdit(form);
+          lines.push(`  staff field: ${staff
+            ? `${staff.name || staff.id || "(unnamed)"} = ${staff.value}` : "NOT FOUND"}`);
+          const select = dispatchSelect(form);
+          lines.push(`  dispatch select: ${select
+            ? `${select.name} (${select.options.length} options)` : "NOT FOUND"}`);
         }
-        const select = dispatchSelect(edit.doc, edit.win);
-        lines.push(`  dispatch select: ${select
-          ? [...select.options].map((option) => visibleText(option))
-              .join(" | ").slice(0, 200)
-          : "NOT FOUND on the edit page"}`);
       } catch (error) {
         lines.push(`probe building #${probeId}: FAILED — ${error.message}`);
       }
     }
-    lines.push(`credits read from the page: ${readCredits()}`);
+    const credits = await readCredits();
+    lines.push(`credits: ${credits === null ? "UNREADABLE (floor not enforced)"
+      : credits.toLocaleString()}`);
     lastDiagnostics = lines.join("\n");
     for (const line of lines) log(line);
     log("📋 self-test done — use 'Copy report' to paste it somewhere", "ok");
@@ -1993,7 +1872,7 @@
     input.addEventListener("change", () => {
       settings[key] = input.checked;
       saveSettings();
-      if (key === "showFrame") ensureFrame();
+      renderStatus();
     });
     return el("label", {}, [input, el("span", { text: text })]);
   }
@@ -2063,7 +1942,7 @@
     state.busy = true;
     renderTypes();
     try {
-      const { doc } = await frameGoto("/buildings/new");
+      const doc = await fetchDoc("/buildings/new");
       if (isLoginPage(doc)) {
         log("log in to MissionChief first, then press Reload", "error");
         return;
@@ -2234,7 +2113,6 @@
       checkbox("setStaffLimit", "Set staff limit"),
       checkbox("buyExtensions", "Extensions too"),
       checkbox("strictVehicle", "Quint required"),
-      checkbox("showFrame", "Show its work"),
     ]));
 
     const startButton = el("button", { class: "go", text: "Start" });
@@ -2253,16 +2131,7 @@
       state.busy = true;
       try {
         const result = await buildOne();
-        if (result.buildingId) {
-          const center = result.spot && result.spot.dispatch;
-          const edited = await editBuilding(result.buildingId, center);
-          const described = describeEdit(edited);
-          if (described) log(`🛰️ ${described}`, editOk(edited) ? "info" : "error");
-          const delivered = await deliverBuilding(result.buildingId);
-          log(`🧱 ${settings.dryRun ? "would do" : "done"} — level ` +
-              `${delivered.counts.level}, storage ${delivered.counts.storage}`);
-          enqueue(result.buildingId, result.name, center, editOk(edited));
-        }
+        if (result.buildingId) await afterBuild(result);
       } catch (error) {
         log(`❌ ${error.message}`, "error");
       } finally {

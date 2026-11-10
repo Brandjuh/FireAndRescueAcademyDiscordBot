@@ -34,27 +34,36 @@ def test_userscript_metadata_is_complete(source):
     assert "window.location.origin" in source
 
 
-def test_the_storage_endpoints_are_recognised(source):
-    # From the live game (fire station, tab #storage):
-    #   /buildings/<id>/storage_upgrade/credits/fire_equipment_initial
-    #   ...            /credits/fire_equipment_additional[_2..._7]
-    assert "storage_upgrade" in source
-    assert re.search(r"const STORAGE_RE = /storage_upgrade\|", source)
-    # They live under a tab, which may render only once it is clicked.
-    assert "function revealTabs(" in source
+def test_the_purchase_endpoints_are_recognised(source):
+    # From the live game (Nov 2026, fire station):
+    #   storage    POST /buildings/<id>/storage_upgrade/credits/fire_equipment_initial
+    #              ...                          /credits/fire_equipment_additional[_2..._7]
+    #   level      GET  /buildings/<id>/expand_do/credits?level=<n>  (on /expand)
+    #   extension  POST /buildings/<id>/extension/credits/<n>
+    assert r"const STORAGE_HREF_RE = /\/storage_upgrade\/credits\//i;" in source
+    assert r"const LEVEL_HREF_RE = /\/expand_do\/credits\b/i;" in source
+    assert r"const EXTENSION_HREF_RE = /\/extension\/credits\/\d+/i;" in source
+    assert "/expand`" in source
+    # A greyed-out (still building) purchase is waited for, not pressed.
+    assert "function isDisabled(" in source
 
 
 def test_it_never_spends_coins(source):
-    # Two independent brakes, both from the bot's builder: the form field is
-    # pinned to 0, and any button whose label mentions coins is refused.
-    assert 'setField(doc, win, "build_with_coins", "0")' in source
-    assert 'String(prep.snapshot.coins) !== "0"' in source
-    assert '!text.includes("coins")' in source
-    # The delivery step filters href AND label together.
-    assert 'if (/coin/i.test(haystack)) continue;' in source
-    # Nothing may ever set the field to anything else.
-    others = re.findall(r'"build_with_coins",\s*"(?!0")', source)
-    assert others == []
+    # The game sends its build form with $(form).serialize(): no button
+    # value goes along, so credits vs coins is decided ONLY by the hidden
+    # build_with_coins field — left empty, exactly as the game does for a
+    # credits build. Nothing may ever set it to anything else.
+    assert 'params.set("build_with_coins", "");' in source
+    assert re.findall(r'"build_with_coins",\s*"(?!")', source) == []
+    assert 'params.get("build_with_coins") !== ""' in source
+    # The personal button must be the credits one, never a coins button.
+    block = source.split("function personalButton(")[1].split("\n  }")[0]
+    assert "coins_activate" in block and "/coin/i.test(label)" in block
+    # The delivery step filters href AND label, and skips confirm links.
+    assert "/coin/i.test(`${href} ${label}`)" in source
+    assert 'anchor.hasAttribute("data-confirm")' in source
+    # The credit floor is read from the game's own API.
+    assert '"/api/credits"' in source
 
 
 def test_dry_run_is_the_default(source):
@@ -79,7 +88,9 @@ def test_the_delivery_defaults_are_what_was_asked_for(source):
 def test_every_build_is_a_personal_build(source):
     # There is no alliance mode: the alliance treasury is the bot's job.
     assert "buildAsAlliance" not in source
-    assert "alliance: false," in source
+    assert 'params.set("build_as_alliance", "");' in source
+    block = source.split("function personalButton(")[1].split("\n  }")[0]
+    assert "alliance_activate" in block
 
 
 def test_a_region_without_a_dispatch_center_is_never_built_in(source):
@@ -134,7 +145,8 @@ def test_the_staff_amount_is_taken_from_the_edit_page(source):
     assert "async function editBuilding(" in source
     assert "function staffFieldOnEdit(" in source
     assert "/edit`" in source
-    assert "fields.texts[1]" in source
+    assert '[name="building[personal_count_target]"]' in source
+    assert "texts[1]" in source
     assert "async function linkDispatch(" not in source
     # A setting that will not stick is retried, then given up on out loud.
     assert "EDIT_MAX_TRIES" in source
@@ -151,16 +163,17 @@ def test_buildings_are_named_after_what_osm_calls_them(source):
     assert "place.city || place.county || place.state" in block
 
 
-def test_the_worker_frame_is_clipped_not_hidden(source):
-    # It may not be display:none (a frame that lays nothing out has no
-    # boxes, and the build buttons are picked by size), and it may not be
-    # visible either — a white 1280x900 page over the game.
-    assert "const HOST_ID =" in source
-    assert "function force(element, rules)" in source
-    assert '"important"' in source
-    block = source.split("function ensureFrame(")[1].split("\n  }")[0]
-    assert "overflow" in block and 'opacity: "0"' in block
-    assert "display: \"none\"" not in block
+def test_no_worker_frame(source):
+    # /buildings/new became a bare HTML fragment that only works inside the
+    # game's own map page; in a frame nothing on it runs and no build ever
+    # went out. Every step is now a plain same-origin request.
+    assert "createElement(\"iframe\")" not in source
+    assert "function formParams(" in source
+    assert "async function gameAddress(" in source
+    assert "/reverse_address?latitude=" in source
+    # A spot's OSM name is only used when the spot IS such a facility —
+    # never a road name like "Rijksweg A50".
+    assert "placeIsFacility(typeLabel, place)" in source
 
 
 def test_the_duplicate_and_pacing_rails_are_present(source):
