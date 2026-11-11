@@ -189,6 +189,20 @@ def test_requester_dm_texts_match_reference_bot():
         "latitude": 63.42, "longitude": 10.39, "building_id": 77,
     })
     assert "**APPROVED**" in built and "🏥" in built and "buildings/77" in built
+    assert "let an alliance admin know" in built
+
+    queued = _requester_dm_text("building", "waiting", "below floor", {
+        "building_type": "prison", "address": "County Jail, Main St",
+        "queue_ahead": 3,
+    })
+    assert "**ACCEPTED**" in queued and "as soon as possible" in queued
+    assert "3 building requests ahead of yours" in queued
+    assert "County Jail" in queued and "let an alliance admin know" in queued
+    assert "next in line" in _requester_dm_text(
+        "building", "waiting", "", {"building_type": "hospital", "queue_ahead": 0}
+    )
+    # A silent retry 'waiting' (no queue_ahead in the payload) never DMs.
+    assert _requester_dm_text("building", "waiting", "MissionChief error", {}) is None
 
     # No DM for outcomes that don't notify.
     assert _requester_dm_text("training", "done", "", {"results": []}) is None

@@ -1270,6 +1270,25 @@ class AutomationRepo:
         ) as cur:
             return list(await cur.fetchall())
 
+    async def queue_ahead(self, kind: str, request_id: int) -> int:
+        """How many still-open ``kind`` requests sit AHEAD of ``request_id``
+        in the queue. The executor walks claimable rows in id order, so an
+        older pending/waiting/processing row is served first. A row whose
+        build was already submitted (``pending_confirm``: only waiting for
+        API proof) no longer competes for funds and isn't counted."""
+        async with self._db.conn.execute(
+            """
+            SELECT COUNT(*) FROM automation_requests
+            WHERE kind = ? AND id < ?
+              AND status IN ('pending', 'waiting', 'processing')
+              AND json_extract(COALESCE(payload, '{}'),
+                               '$.pending_confirm') IS NULL
+            """,
+            (kind, request_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
     async def stuck_actionable(
         self, kind: str, *, older_minutes: int
     ) -> list[aiosqlite.Row]:
