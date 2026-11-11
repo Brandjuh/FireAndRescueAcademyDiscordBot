@@ -299,6 +299,33 @@ def _reply_error(requester: str | None, reason: str) -> str:
     )
 
 
+#: Shown wherever a member sees the building name the bot picked: the name
+#: comes from reverse geocoding the pin, which can be off.
+NAME_HINT = (
+    "If the building name is not correct, please let an alliance admin "
+    "know so it can be fixed."
+)
+
+
+def queue_ahead_text(ahead: int) -> str:
+    """'N building requests ahead of yours' in member wording."""
+    if ahead <= 0:
+        return "Your request is next in line."
+    if ahead == 1:
+        return "There is 1 building request ahead of yours in the queue."
+    return f"There are {ahead} building requests ahead of yours in the queue."
+
+
+def queued_status_line(ahead: int) -> str:
+    """The member message for a request that was accepted but has to wait
+    in the build queue (alliance funds below the auto-build floor)."""
+    return (
+        "Your building request has been ACCEPTED and placed in the build "
+        "queue. The building will be built as soon as possible.\n"
+        + queue_ahead_text(ahead)
+    )
+
+
 def _building_guide(min_funds: int, min_rate: float = 0.0) -> str:
     """The how-to-request post for the building board, structured like the
     old bot's request guides. Starts with :data:`GUIDE_MARKER` so it's never
@@ -667,22 +694,32 @@ class BuildingsService(BoardRequestService):
         if funds < self._auto.min_alliance_funds:
             # A legitimate condition-wait: don't bump attempts (funds may
             # take a long time to recover — it must not hit the cap).
+            # The member hears ONCE (first attempt) that the request is
+            # queued and how many requests are ahead of it; the count
+            # travels in the payload so the Discord DM can quote it.
+            ahead = None
+            if announce:
+                ahead = await self.requests.queue_ahead("building", request_id)
+                payload["queue_ahead"] = ahead
             await self.requests.set_status(
                 request_id, "waiting",
                 f"alliance funds {funds:,} below floor "
-                f"{self._auto.min_alliance_funds:,}; waiting",
+                f"{self._auto.min_alliance_funds:,}; queued"
+                + (f" ({ahead} ahead)" if ahead is not None else ""),
                 payload=json.dumps(payload), announce=announce,
             )
             if announce:
+                name = location.address.split(",")[0] if location.address else None
+                coords = f"{location.latitude:.5f}, {location.longitude:.5f}"
                 await self.reply_for(request, _reply_received(
-                    requester, request_id, building_type,
-                    location.address.split(",")[0] if location.address else None,
-                    f"{location.latitude:.5f}, {location.longitude:.5f}",
-                    "Queued for automatic build. No building was created yet. "
-                    f"Current alliance funds are {funds:,} credits; minimum "
-                    "required before auto-building is "
-                    f"{self._auto.min_alliance_funds:,} credits.",
+                    requester, request_id, building_type, name, coords,
+                    queued_status_line(ahead) + "\n\n" + NAME_HINT,
                 ))
+                if not self.is_discord_request(request):
+                    await self._notify_ingame_queued(
+                        requester, building_type, name, coords,
+                        location.address, ahead,
+                    )
             return
 
         name = location.address.split(",")[0] if location.address else f"{building_type}"
@@ -815,6 +852,7 @@ class BuildingsService(BoardRequestService):
         status_line = (
             "Building request approved and automatically created in "
             "MissionChief." + (f"\n{link}" if link else "")
+            + "\n\n" + NAME_HINT
         )
         await self.reply_for(request, _reply_received(
             requester, request["id"], building_type, name, coords, status_line,
@@ -956,10 +994,50 @@ class BuildingsService(BoardRequestService):
             log.info("building finisher: %s", line)
         return lines
 
+    @staticmethod
+    def _pm_building_lines(
+        building_type: str, name: str | None, coords: str | None,
+        address: str | None,
+    ) -> list[str]:
+        emoji = _TYPE_EMOJI.get(building_type, "🏢")
+        lines = [f"{emoji} {building_type}: {name or address or 'your location'}"]
+        if coords:
+            lines.append(f"📍 Coordinates: {coords}")
+        if address:
+            lines.append(f"📫 Address: {address}")
+        return lines
+
+    async def _notify_ingame_queued(
+        self, requester: str | None, building_type: str, name: str | None,
+        coords: str | None, address: str | None, ahead: int | None,
+    ) -> None:
+        lines = [
+            "Your building request has been ACCEPTED and placed in the build "
+            "queue. The building will be built as soon as possible.",
+            queue_ahead_text(ahead or 0),
+            "",
+            *self._pm_building_lines(building_type, name, coords, address),
+            "",
+            "You will get another message once it has been built.",
+            NAME_HINT,
+        ]
+        await self._send_ingame_pm(requester, lines)
+
     async def _notify_ingame_built(
         self, requester: str | None, building_type: str, name: str | None,
         coords: str | None, address: str | None, link: str | None,
     ) -> None:
+        lines = [
+            "Your building request has been APPROVED.",
+            "",
+            *self._pm_building_lines(building_type, name, coords, address),
+        ]
+        if link:
+            lines.append(f"Building: {link}")
+        lines.extend(["", NAME_HINT])
+        await self._send_ingame_pm(requester, lines)
+
+    async def _send_ingame_pm(self, requester: str | None, lines: list[str]) -> None:
         from ..mc.messages import send_ingame_message
         from ..mc.pm_optout import PM_OPTOUT_FOOTER
 
@@ -968,19 +1046,7 @@ class BuildingsService(BoardRequestService):
         if not await self.prefs.ingame_pms_enabled_for_name(requester):
             log.info("building: %s opted out of in-game PMs — no PM", requester)
             return
-        emoji = _TYPE_EMOJI.get(building_type, "🏢")
-        lines = [
-            "Your building request has been APPROVED.",
-            "",
-            f"{emoji} {building_type}: {name or address or 'your location'}",
-        ]
-        if coords:
-            lines.append(f"📍 Coordinates: {coords}")
-        if address:
-            lines.append(f"📫 Address: {address}")
-        if link:
-            lines.append(f"Building: {link}")
-        lines.extend(["", PM_OPTOUT_FOOTER])
+        lines = [*lines, "", PM_OPTOUT_FOOTER]
         try:
             await send_ingame_message(
                 self.client, requester, "Building request", "\n".join(lines)

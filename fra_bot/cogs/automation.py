@@ -32,6 +32,7 @@ import discord
 from discord.ext import commands, tasks
 
 from ..db.repos import AutomationRepo
+from ..services.buildings import NAME_HINT, queue_ahead_text
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +118,26 @@ def _requester_dm_text(kind: str, status: str, detail: str, data: dict) -> str |
                     "Building: https://www.missionchief.com/buildings/"
                     f"{data['building_id']}"
                 )
+            lines.extend(["", NAME_HINT])
             return "\n".join(lines)
+        if status == "waiting" and data.get("queue_ahead") is not None:
+            # Only the funds queue stores queue_ahead (and announces once);
+            # every other 'waiting' is a silent retry.
+            emoji = {"hospital": "🏥", "prison": "🔒"}.get(
+                data.get("building_type"), "🏢"
+            )
+            name = (data.get("address") or "your location").split(",")[0]
+            return "\n".join([
+                "⏳ Your building request has been **ACCEPTED** and placed in "
+                "the build queue. The building will be built as soon as "
+                "possible.",
+                queue_ahead_text(int(data["queue_ahead"])),
+                "",
+                f"{emoji} **{data.get('building_type', 'building')}**: {name}",
+                "",
+                "You'll get another message once it has been built.",
+                NAME_HINT,
+            ])
         if status == "failed":
             return (
                 "Your building request could not be completed automatically "

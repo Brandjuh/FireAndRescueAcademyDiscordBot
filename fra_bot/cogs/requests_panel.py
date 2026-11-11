@@ -45,6 +45,7 @@ from ..geo.maps_links import find_maps_links
 from ..mc.trainings_catalog import DISCIPLINES
 from ..services.board_requests import EXECUTE_KICK_BUDGET_SECONDS
 from ..services.buildings import (
+    NAME_HINT,
     REQUEST_LIMIT_PER_MEMBER,
     REQUEST_LIMIT_WINDOW_HOURS,
     requests_in_window,
@@ -727,7 +728,8 @@ class RequestsCog(commands.Cog):
             f"✅ Request **#{rid}** accepted — {emoji} **{building_type}** "
             f"“{name}” at {location.latitude:.5f}, {location.longitude:.5f}. "
             f"Alliance funds are checked next; it builds at the next pass "
-            f"(~5 min) or waits until funds allow.{note}",
+            f"(~5 min) or waits until funds allow. You'll get a DM with "
+            f"the outcome.\n{NAME_HINT}{note}",
         )
 
     # -- slash commands (same flows as the panel buttons) -----------------

@@ -834,3 +834,96 @@ async def test_overpass_stops_at_its_wall_clock_budget(monkeypatch):
     # The budget cut it short instead of walking every endpoint twice.
     assert len(attempts) < len(client._urls) * ov.RETRY_PASSES
     assert "budget exhausted" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# The build queue: members hear they're queued and how many are ahead
+# ---------------------------------------------------------------------------
+
+def _live_service(db, funds):
+    """A non-dry-run service with the browser stubbed out, so execution
+    reaches the funds gate."""
+    from fra_bot.mc.browser_builder import BrowserBuilder
+
+    svc = _service(db)
+    svc.cfg.automation.dry_run = False
+    svc.pms = []
+
+    async def _pm(requester, lines):
+        svc.pms.append((requester, "\n".join(lines)))
+
+    svc._send_ingame_pm = _pm
+    _fund_the_service(svc, funds)
+    return svc, BrowserBuilder
+
+
+def _cached_payload():
+    return json.dumps({
+        "link": "https://maps.app.goo.gl/x", "latitude": 42.96,
+        "longitude": -85.67, "address": "St Mary Hospital, Jefferson Ave",
+        "building_type": "hospital",
+    })
+
+
+async def test_queue_ahead_counts_only_older_open_rows(db):
+    repo = AutomationRepo(db)
+    ids = []
+    for post in range(1, 6):
+        ids.append(await repo.create(kind="building", thread_id=777,
+                                     post_id=post, requester_name="A", requester_mc_id=None))
+    await repo.set_status(ids[0], "done", "built hospital #1")
+    await repo.set_status(ids[1], "waiting", "below floor")
+    await repo.set_status(ids[2], "waiting", "build submitted",
+                          payload=json.dumps({"pending_confirm": {"x": 1}}))
+    # Open, older: ids[1] and ids[3]; ids[0] done, ids[2] already built.
+    assert await repo.queue_ahead("building", ids[4]) == 2
+    assert await repo.queue_ahead("building", ids[0]) == 0
+    # Other kinds never count.
+    await repo.create(kind="training", thread_id=1, post_id=9, requester_name="A", requester_mc_id=None)
+    assert await repo.queue_ahead("building", ids[4]) == 2
+
+
+async def test_low_funds_queues_with_position_and_name_hint(db, monkeypatch):
+    svc, browser = _live_service(db, funds=1_000)
+    monkeypatch.setattr(browser, "available", staticmethod(lambda: True))
+    repo = AutomationRepo(db)
+    first = await repo.create(kind="building", thread_id=777, post_id=1,
+                              requester_name="Ann", requester_mc_id=None, payload=_cached_payload())
+    rid = await repo.create(kind="building", thread_id=777, post_id=2,
+                            requester_name="Bob", requester_mc_id=None, payload=_cached_payload())
+    await repo.set_status(first, "waiting", "below floor")
+
+    await svc.execute_request(await repo.get(rid), announce=True)
+
+    row = await repo.get(rid)
+    assert row["status"] == "waiting"
+    assert json.loads(row["payload"])["queue_ahead"] == 1
+    reply = svc.replies[-1]
+    assert "placed in the build queue" in reply
+    assert "as soon as possible" in reply
+    assert "There is 1 building request ahead of yours" in reply
+    assert "let an alliance admin know" in reply
+    assert "1,000" not in reply  # no treasury figures to members
+    assert svc.pms and svc.pms[0][0] == "Bob"
+    assert "1 building request ahead" in svc.pms[0][1]
+
+    # A later retry stays silent: no new reply, no new PM.
+    svc.replies.clear()
+    svc.pms.clear()
+    await svc.execute_request(await repo.get(rid), announce=False)
+    assert svc.replies == [] and svc.pms == []
+
+
+async def test_discord_request_queue_gets_no_board_reply_or_pm(db, monkeypatch):
+    svc, browser = _live_service(db, funds=1_000)
+    monkeypatch.setattr(browser, "available", staticmethod(lambda: True))
+    repo = AutomationRepo(db)
+    payload = json.loads(_cached_payload())
+    payload["discord_user_id"] = 5
+    rid = await repo.create(kind="building", thread_id=0, post_id=3,
+                            requester_name="Cy", requester_mc_id=None, payload=json.dumps(payload))
+    svc.reply_for = BuildingsService.reply_for.__get__(svc)
+    await svc.execute_request(await repo.get(rid), announce=True)
+    # The Discord DM is the publisher's job (it reads queue_ahead).
+    assert svc.pms == []
+    assert json.loads((await repo.get(rid))["payload"])["queue_ahead"] == 0
