@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FRA Auto-Build (private)
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.7.0
+// @version      1.7.1
 // @description  Private admin tool: bulk-build YOUR OWN MissionChief buildings. Pick a type, pick a place (fixed area and/or random worldwide), flip the toggle. Every new building is linked to the nearest dispatch center, fully expanded (all extensions/storage bought with credits) and fire stations start with a Quint.
 // @match        https://www.missionchief.com/*
 // @match        https://missionchief.com/*
@@ -88,7 +88,7 @@
 
   if (window.top !== window.self) return;   // never inside our own frames
 
-  const VERSION = "1.7.0";
+  const VERSION = "1.7.1";
   // Both www.missionchief.com and missionchief.com serve the game, and a
   // frame or fetch across those two is CROSS-ORIGIN: everything here would
   // silently stop working. So the script always stays on the host the
@@ -388,14 +388,39 @@
     return !!doc.querySelector('input[type="password"]');
   }
 
+  // Panes on a building page that always carry red/blue boxes of their
+  // own, whatever the request did — never read as "the game says no".
+  // The Building Complex tab says "does not fulfill all requirements
+  // needed to be upgraded to a Building Complex Base" on EVERY building
+  // below max level, and a save lands on that page.
+  const STATIC_ALERT_PANES =
+    "#building_complex, .building-complex-tab-container, .hidden";
+
   function flashText(doc) {
-    const el = doc.querySelector(
+    const candidates = doc.querySelectorAll(
       ".alert-danger, .alert.alert-error, #flash_error, .flash_error, " +
       "#error_explanation, .danger.alert, .has-error .help-block"
     );
-    if (!el) return "";
-    return (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 300);
+    for (const el of candidates) {
+      if (el.closest(STATIC_ALERT_PANES)) continue;
+      const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+      if (text) return text.slice(0, 300);
+    }
+    return "";
   }
+
+  function formErrors(doc) {
+    // Errors that belong to a submitted form: Rails' error summary and the
+    // field-level messages simple_form puts under a field.
+    const el = [...doc.querySelectorAll("#error_explanation, .has-error .help-block")]
+      .find((candidate) => !candidate.closest(STATIC_ALERT_PANES));
+    return el ? (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 300) : "";
+  }
+
+  // Building complexes are NEVER bought by this script: the upgrade is a
+  // link to /building_complex_bases?building_id=…&pay_with=…, which no
+  // purchase pattern here matches — and this is the second brake.
+  const COMPLEX_RE = /complex/i;
 
   async function fetchPage(path, options) {
     const url = path.startsWith("http") ? path : BASE + path;
@@ -1029,6 +1054,9 @@
     if (!type) throw new Error("STOP — tick at least one building type first");
     const typeLabel = type.label || "building";
     const typeValue = String(type.value);
+    if (COMPLEX_RE.test(typeLabel)) {
+      throw new Error(`STOP — "${typeLabel}" is a building complex; this script never builds one`);
+    }
     const spot = await pickLocation(typeLabel);
     log(`📍 ${typeLabel}: ${spot.lat.toFixed(5)}, ${spot.lng.toFixed(5)} ` +
         `near ${spot.label}` +
@@ -1242,6 +1270,7 @@
       const label = visibleText(anchor);
       if (!href.startsWith(prefix) || !hrefRe.test(href)) continue;
       if (/coin/i.test(`${href} ${label}`) || anchor.hasAttribute("data-confirm")) continue;
+      if (COMPLEX_RE.test(`${href} ${label}`) || anchor.closest(STATIC_ALERT_PANES)) continue;
       links.push({
         href,
         label,
@@ -1259,6 +1288,10 @@
   }
 
   async function buy(link, token) {
+    if (COMPLEX_RE.test(`${link.href} ${link.label}`)
+        || !/\/(expand_do|storage_upgrade|extension)\/credits\b/i.test(link.href)) {
+      throw new Error(`refusing to buy "${link.label}" (${link.href})`);
+    }
     const page = link.method === "get"
       ? await fetchPage(link.href, { headers: { "X-Requested-With": "XMLHttpRequest" } })
       : await send(link.href, {}, token);
@@ -1446,8 +1479,18 @@
     }
 
     if (!dirty) return report;
-    const sent = await send(form.getAttribute("action"), formParams(form), csrfToken(doc));
-    const flash = flashText(sent.doc);
+    const action = form.getAttribute("action") || "";
+    if (action.replace(BASE, "").replace(/[?#].*$/, "") !== `/buildings/${buildingId}`) {
+      throw new Error(`STOP — the edit form posts to "${action}", not to this building`);
+    }
+    const params = formParams(form);
+    for (const key of [...params.keys()]) {
+      if (COMPLEX_RE.test(key)) params.delete(key);   // never, see COMPLEX_RE
+    }
+    const sent = await send(action, params, csrfToken(doc));
+    // The save lands on the building page, whose tabs carry info boxes of
+    // their own — only real form errors count as "not saved".
+    const flash = formErrors(sent.doc);
     if (!sent.response.ok || flash) {
       const failure = {
         ok: false,
