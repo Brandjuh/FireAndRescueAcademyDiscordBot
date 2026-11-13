@@ -182,3 +182,27 @@ def test_the_duplicate_and_pacing_rails_are_present(source):
     assert "FINISH_IDLE_LIMIT" in source                 # the bot's finisher idea
     assert "MAX_DELIVERY_STEPS" in source                # bounded purchases
     assert "maxStorageBuys" in source                    # bounded storage presses
+
+
+def test_it_never_builds_or_buys_a_building_complex(source):
+    # The complex upgrade is a separate link (/building_complex_bases?…).
+    # No purchase pattern may match it, buy() refuses anything that is not
+    # a level/storage/extension credits link, and the edit save drops any
+    # complex field. A complex type is never built either.
+    assert "const COMPLEX_RE = /complex/i;" in source
+    assert "building_complex_bases" not in source.split("const COMPLEX_RE")[1]
+    block = source.split("async function buy(")[1].split("\n  }")[0]
+    assert "COMPLEX_RE.test(" in block
+    assert r"/\/(expand_do|storage_upgrade|extension)\/credits\b/i" in block
+    assert "if (COMPLEX_RE.test(key)) params.delete(key);" in source
+    assert "COMPLEX_RE.test(typeLabel)" in source
+
+
+def test_info_boxes_on_the_building_page_are_not_errors(source):
+    # A save lands on the building page, whose Building Complex tab always
+    # says "does not fulfill all requirements…" below max level. That box
+    # must never be read as "the game did not save it".
+    assert "#building_complex" in source.split("const STATIC_ALERT_PANES")[1][:200]
+    edit = source.split("async function editBuilding(")[1].split("\n  function ")[0]
+    assert "formErrors(sent.doc)" in edit
+    assert "flashText(sent.doc)" not in edit
