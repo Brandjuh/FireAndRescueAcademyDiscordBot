@@ -31,7 +31,7 @@ def _member(mc_id, name, role="Member"):
 
 
 def _cfg(enabled=True, dry_run=False,
-         message="@{name} Welcome! Please check your DM for more information."):
+         message="/w {name} Welcome! Please check your DM for more information."):
     return SimpleNamespace(automation=SimpleNamespace(
         dry_run=dry_run,
         welcome=SimpleNamespace(enabled=enabled, message=message),
@@ -73,7 +73,7 @@ async def test_new_join_is_welcomed_once(db):
 
     assert await service.run() == 1
     assert chat.posted == [
-        "@Rookie Welcome! Please check your DM for more information."
+        "/w Rookie Welcome! Please check your DM for more information."
     ]
     # A second tick greets nobody — the event is marked welcomed.
     assert await service.run() == 0
@@ -152,3 +152,25 @@ async def test_message_template_without_name_field_still_posts(db):
     service = WelcomeService(_cfg(message="Welcome aboard!"), db, chat)
     assert await service.run() == 1
     assert chat.posted == ["Welcome aboard!"]
+
+
+async def test_default_welcome_is_a_whisper(db):
+    """Many joins flooded the public chat: the default greeting whispers
+    (``/w name``) to the new member instead of posting publicly."""
+    from fra_bot.config import DEFAULT_WELCOME_MESSAGE
+
+    await _join(db, 102, "Newbie")
+    chat = FakeChat()
+    service = WelcomeService(_cfg(message=DEFAULT_WELCOME_MESSAGE), db, chat)
+
+    assert await service.run() == 1
+    assert chat.posted[0].startswith("/w Newbie ")
+
+
+async def test_malformed_template_still_whispers(db):
+    await _join(db, 103, "Oddball")
+    chat = FakeChat()
+    service = WelcomeService(_cfg(message="Hi {nope}"), db, chat)
+
+    assert await service.run() == 1
+    assert chat.posted == ["/w Oddball Hi {nope}"]

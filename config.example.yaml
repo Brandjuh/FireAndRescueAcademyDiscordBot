@@ -160,11 +160,13 @@ automation:
     # Greet every new alliance member once in the game's alliance chat.
     # The join is detected from the roster, so it fires however the member
     # was accepted (auto-accept, admin in-game, or the Discord button).
-    # {name} is replaced by the member's game name. On by default; honours
+    # {name} is replaced by the member's game name. The default starts with
+    # "/w {name}" so it is whispered to the new member only (lots of joins
+    # flooded the public chat); drop the "/w {name}" to post publicly. On by default; honours
     # dry_run. Enabling it never greets the existing roster — only members
     # who join afterwards.
     enabled: true
-    message: "@{name} Welcome! Please check your DM for more information."
+    message: "/w {name} Welcome! Please check your DM for more information."
   leave_feedback:
     # Ask members who LEFT the alliance on their own (alliance log "Left the
     # alliance" — never a kick, also not the tax auto-kick) why they left:
