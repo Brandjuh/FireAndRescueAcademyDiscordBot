@@ -370,10 +370,12 @@ class ApplicationsAutomationConfig:
 
 @dataclass(frozen=True)
 class WelcomeConfig:
-    """New-member welcome: posts a one-time greeting in the game's alliance
-    chat when a member joins (detected from the roster, so it catches every
+    """New-member welcome: sends a one-time greeting through the game's
+    alliance chat when a member joins (detected from the roster, so it catches every
     join — auto-accept, admin in-game, or the Discord accept button).
-    ``{name}`` in the message is replaced by the member's game name. On by
+    ``{name}`` in the message is replaced by the member's game name; the
+    default starts with ``/w {name}`` so the greeting is a whisper to the
+    new member instead of a public post (many joins flooded the chat). On by
     default; honours the global ``dry_run`` switch."""
     enabled: bool
     message: str
@@ -429,7 +431,7 @@ class AnnouncementsConfig:
 
 
 DEFAULT_WELCOME_MESSAGE = (
-    "@{name} Welcome! Please check your DM for more information."
+    "/w {name} Welcome! Please check your DM for more information."
 )
 
 

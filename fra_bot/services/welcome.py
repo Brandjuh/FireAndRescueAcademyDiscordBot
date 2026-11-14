@@ -1,5 +1,6 @@
-"""New-member welcome: post a one-time greeting in the game's alliance
-chat when someone joins the alliance.
+"""New-member welcome: a one-time greeting through the game's alliance
+chat when someone joins the alliance — by default a whisper
+(``/w {name} …``) so a rush of joins doesn't take over the public chat.
 
 The join is detected from the roster diff (a ``member_events`` row of
 type ``joined``), so it fires for EVERY route in — auto-accept, an admin
@@ -49,8 +50,8 @@ class WelcomeService:
             return template.format(name=name)
         except (KeyError, IndexError, ValueError):
             # A malformed template must never wedge the welcome — fall back
-            # to a plain mention + the raw template.
-            return f"@{name} {template}".strip()
+            # to a whisper with the raw template.
+            return f"/w {name} {template}".strip()
 
     async def run(self) -> int:
         """Greet freshly joined members; returns how many were welcomed."""
