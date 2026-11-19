@@ -1110,6 +1110,16 @@ class BoardRepo:
             row = await cur.fetchone()
         return row["m"]
 
+    async def first_seen_at(self, thread_id: int, post_id: int) -> str | None:
+        """When the poll first recorded this post (ISO), or None."""
+        async with self._db.conn.execute(
+            "SELECT first_seen_at FROM board_posts "
+            "WHERE thread_id = ? AND post_id = ?",
+            (int(thread_id), int(post_id)),
+        ) as cur:
+            row = await cur.fetchone()
+        return row["first_seen_at"] if row else None
+
 
 
 class AutomationRepo:
@@ -1288,6 +1298,46 @@ class AutomationRepo:
         ) as cur:
             row = await cur.fetchone()
         return int(row[0]) if row else 0
+
+    async def fifo_blockers(self, kind: str, request_id: int) -> int:
+        """How many OLDER ``kind`` requests must be served before
+        ``request_id`` may spend alliance funds — the first-in-first-out
+        rule. Only rows that passed their member gates (a resolved
+        ``building_type`` in the payload) and are still waiting to be
+        BUILT count: a row whose build was submitted (``pending_confirm``)
+        or already landed (``built_at``) no longer competes for funds, and
+        a not-yet-gated row is processed before this one in the same
+        id-ordered pass anyway. An older row parked by an error backoff
+        DOES block: a newer request must never overtake it."""
+        async with self._db.conn.execute(
+            """
+            SELECT COUNT(*) FROM automation_requests
+            WHERE kind = ? AND id < ?
+              AND status IN ('pending', 'waiting', 'processing')
+              AND json_extract(COALESCE(payload, '{}'),
+                               '$.building_type') IS NOT NULL
+              AND json_extract(COALESCE(payload, '{}'),
+                               '$.pending_confirm') IS NULL
+              AND json_extract(COALESCE(payload, '{}'),
+                               '$.built_at') IS NULL
+            """,
+            (kind, request_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+    async def open_queue(self, kind: str) -> list[aiosqlite.Row]:
+        """Every still-open ``kind`` request in serving (id) order — what
+        the public queue post lists."""
+        async with self._db.conn.execute(
+            """
+            SELECT * FROM automation_requests
+            WHERE kind = ? AND status IN ('pending', 'waiting', 'processing')
+            ORDER BY id ASC
+            """,
+            (kind,),
+        ) as cur:
+            return list(await cur.fetchall())
 
     async def stuck_actionable(
         self, kind: str, *, older_minutes: int

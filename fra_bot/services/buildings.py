@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import logging
 import math
@@ -44,6 +45,7 @@ from ..mc.buildings_api import (
     nearest_duplicate,
     parse_api_buildings,
 )
+from ..mc.board import ensure_guide_post, guide_now, guide_updated_line
 from ..mc.client import MissionChiefClient
 from ..mc.errors import MissionChiefError
 from ..mc.parsers.board import BoardPost
@@ -267,6 +269,71 @@ GUIDE_MARKER = "[FRA] 📋 How to request a BUILDING"
 
 _TYPE_EMOJI = {"hospital": "🏥", "prison": "🔒"}
 
+QUEUE_MARKER = "[FRA] 🏗️ BUILDING QUEUE"
+#: The queue post is re-written as soon as the queue changes; otherwise only
+#: this often, to freshen its "last updated" line.
+QUEUE_REFRESH_SECONDS = 6 * 60 * 60
+
+
+def _queue_status(row) -> str:
+    """Member-facing state of one open request in the queue overview."""
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    if payload.get("pending_confirm"):
+        return "built, waiting for the game to confirm"
+    if row["status"] == "processing":
+        return "being built now"
+    if not payload.get("building_type"):
+        return "being checked"
+    detail = (row["status_detail"] or "").lower()
+    if "below floor" in detail:
+        return "waiting for alliance funds"
+    if "queued behind" in detail:
+        return "waiting for its turn"
+    return "waiting (retrying shortly)"
+
+
+def building_queue_lines(rows) -> list[str]:
+    """One numbered line per open request, in the order they are served."""
+    lines = []
+    for position, row in enumerate(rows, start=1):
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        building_type = payload.get("building_type")
+        emoji = _TYPE_EMOJI.get(building_type or "", "🏗️")
+        label = (building_type or "building").capitalize()
+        address = payload.get("address")
+        place = address.split(",")[0].strip() if address else None
+        where = f" — {place}" if place else ""
+        who = row["requester_name"] or "member"
+        lines.append(
+            f"{position}. {emoji} {label}{where} (requested by {who}) — "
+            f"{_queue_status(row)}"
+        )
+    return lines
+
+
+def building_queue_body(rows) -> str:
+    """The stable part of the queue post (no timestamp)."""
+    head = [
+        f"{QUEUE_MARKER} — first in, first out",
+        "",
+        "Building requests are built strictly in the order they came in. "
+        "A newer request never goes before an older one.",
+        "",
+    ]
+    lines = building_queue_lines(rows)
+    if not lines:
+        return "\n".join(head + [
+            "The queue is empty — a new request is built as soon as alliance "
+            "funds allow.",
+        ])
+    return "\n".join(head + [f"In the queue ({len(lines)}):", ""] + lines)
+
 
 def _reply_received(
     requester: str | None, request_id, building_type: str | None,
@@ -355,6 +422,9 @@ def _building_guide(min_funds: int, min_rate: float = 0.0) -> str:
             if min_rate > 0 else []
         ),
         "- One link per post.",
+        "- Requests are built first in, first out: see the BUILDING QUEUE "
+        "post in this topic for the current order.",
+        "- Posts in this topic are removed automatically after 12 hours.",
         "",
         "[b]Examples[/b]",
         "https://maps.app.goo.gl/xxxxx",
@@ -365,6 +435,7 @@ def _building_guide(min_funds: int, min_rate: float = 0.0) -> str:
 class BuildingsService(BoardRequestService):
     kind = "building"
     guide_marker = GUIDE_MARKER
+    tidy_member_posts = True
 
     def __init__(
         self,
@@ -397,6 +468,47 @@ class BuildingsService(BoardRequestService):
     @property
     def poll_enabled(self) -> bool:
         return bool(self._auto.enabled)
+
+    async def _after_poll(self) -> None:
+        await super()._after_poll()
+        await self._ensure_queue_post()
+
+    async def _schedule_cleanup(self, request_id: int) -> None:
+        """No per-request scheduling here: EVERY member post on this thread
+        is already queued for the 12h tidy-up when it is first seen (and by
+        the daily walk), so re-scheduling a handled request would only
+        re-delete a post that is already gone."""
+        return None
+
+    def _queue_keys(self) -> tuple[str, str, str]:
+        base = f"{self.kind}:{self.thread_id}"
+        return (
+            f"board_queue_id:{base}",
+            f"board_queue_hash:{base}",
+            f"board_queue_refreshed:{base}",
+        )
+
+    async def _ensure_queue_post(self, *, force: bool = False) -> None:
+        """Keep ONE post on the request thread listing every open building
+        request in the order it will be served. Edited in place (never
+        duplicated) whenever the queue changes. Like the guide, it is an
+        informational post gated only by ``reply_to_board``."""
+        if not self.cfg.automation.reply_to_board:
+            return
+        id_key, hash_key, refreshed_key = self._queue_keys()
+        body = building_queue_body(await self.requests.open_queue(self.kind))
+        signature = hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
+        if force:
+            await self.state.delete(hash_key)
+        now = guide_now()
+        await ensure_guide_post(
+            self.board, self.state, self.thread_id,
+            id_key=id_key, hash_key=hash_key, refreshed_key=refreshed_key,
+            marker=QUEUE_MARKER,
+            desired=f"{body}\n\n{guide_updated_line(now)}",
+            signature=signature, now_epoch=now,
+            min_refresh_seconds=QUEUE_REFRESH_SECONDS,
+        )
 
     def guide_body(self) -> str:
         return _building_guide(
@@ -683,6 +795,20 @@ class BuildingsService(BoardRequestService):
             ))
             return
 
+        # First in, first out: while an OLDER request is still waiting to
+        # be built, this one may not spend the alliance's money — not even
+        # when funds happen to be available right now (e.g. the older one
+        # sits in an error backoff). It joins the queue behind it instead.
+        blockers = await self.requests.fifo_blockers("building", request_id)
+        if blockers:
+            await self._park_in_queue(
+                request, requester, location, payload,
+                f"queued behind {blockers} older request(s) (first in, "
+                "first out)",
+                announce=announce,
+            )
+            return
+
         funds, funds_error = await self._live_funds()
         if funds is None:
             await self.requests.set_status(
@@ -692,34 +818,12 @@ class BuildingsService(BoardRequestService):
             )
             return
         if funds < self._auto.min_alliance_funds:
-            # A legitimate condition-wait: don't bump attempts (funds may
-            # take a long time to recover — it must not hit the cap).
-            # The member hears ONCE (first attempt) that the request is
-            # queued and how many requests are ahead of it; the count
-            # travels in the payload so the Discord DM can quote it.
-            ahead = None
-            if announce:
-                ahead = await self.requests.queue_ahead("building", request_id)
-                payload["queue_ahead"] = ahead
-            await self.requests.set_status(
-                request_id, "waiting",
+            await self._park_in_queue(
+                request, requester, location, payload,
                 f"alliance funds {funds:,} below floor "
-                f"{self._auto.min_alliance_funds:,}; queued"
-                + (f" ({ahead} ahead)" if ahead is not None else ""),
-                payload=json.dumps(payload), announce=announce,
+                f"{self._auto.min_alliance_funds:,}; queued",
+                announce=announce,
             )
-            if announce:
-                name = location.address.split(",")[0] if location.address else None
-                coords = f"{location.latitude:.5f}, {location.longitude:.5f}"
-                await self.reply_for(request, _reply_received(
-                    requester, request_id, building_type, name, coords,
-                    queued_status_line(ahead) + "\n\n" + NAME_HINT,
-                ))
-                if not self.is_discord_request(request):
-                    await self._notify_ingame_queued(
-                        requester, building_type, name, coords,
-                        location.address, ahead,
-                    )
             return
 
         name = location.address.split(",")[0] if location.address else f"{building_type}"
@@ -787,6 +891,41 @@ class BuildingsService(BoardRequestService):
             await self._finish_build_failed(
                 request, requester, payload, building_type, result.detail
             )
+
+    async def _park_in_queue(
+        self, request, requester, location, payload: dict, detail: str,
+        *, announce: bool,
+    ) -> None:
+        """Leave a request 'waiting' in the build queue.
+
+        A legitimate condition-wait: attempts are NOT bumped (funds may take
+        a long time to recover — it must not hit the cap). The member hears
+        ONCE (first attempt) that the request is queued and how many
+        requests are ahead of it; the count travels in the payload so the
+        Discord DM can quote it."""
+        request_id = request["id"]
+        building_type = payload.get("building_type")
+        ahead = None
+        if announce:
+            ahead = await self.requests.queue_ahead("building", request_id)
+            payload["queue_ahead"] = ahead
+        await self.requests.set_status(
+            request_id, "waiting",
+            detail + (f" ({ahead} ahead)" if ahead is not None else ""),
+            payload=json.dumps(payload), announce=announce,
+        )
+        if announce:
+            name = location.address.split(",")[0] if location.address else None
+            coords = f"{location.latitude:.5f}, {location.longitude:.5f}"
+            await self.reply_for(request, _reply_received(
+                requester, request_id, building_type, name, coords,
+                queued_status_line(ahead) + "\n\n" + NAME_HINT,
+            ))
+            if not self.is_discord_request(request):
+                await self._notify_ingame_queued(
+                    requester, building_type, name, coords,
+                    location.address, ahead,
+                )
 
     async def _resolve_pending_confirm(
         self, request, requester: str | None, payload: dict, pending: dict
@@ -1370,6 +1509,15 @@ class BuildingsService(BoardRequestService):
         return f"daily_build_done:{building_type}"
 
     async def _auto_build_one(self, building_type: str, existing: list) -> str:
+        # Member requests come first: the bot's own daily build never
+        # spends funds while a member's building is still waiting in the
+        # queue (first in, first out — the daily build is always "last in").
+        waiting = await self.requests.fifo_blockers("building", 2**62)
+        if waiting:
+            return (
+                f"⏳ {building_type}: {waiting} member building request(s) "
+                "still queued — skipped until tomorrow"
+            )
         funds, funds_error = await self._live_funds()
         if funds is None:
             return (

@@ -33,11 +33,20 @@ _RETRY_STEP_SECONDS = 10 * 60
 _RETRY_CAP_SECONDS = 60 * 60
 
 
-def deletion_due_at() -> str:
-    """ISO timestamp GRACE_SECONDS from now — when a handled post may go."""
-    return (
-        dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=GRACE_SECONDS)
-    ).isoformat()
+def deletion_due_at(since: str | None = None) -> str:
+    """ISO timestamp GRACE_SECONDS after ``since`` (an ISO time; default
+    now) — when a handled post may go."""
+    start = dt.datetime.now(dt.timezone.utc)
+    if since:
+        try:
+            parsed = dt.datetime.fromisoformat(since)
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            start = parsed
+    return (start + dt.timedelta(seconds=GRACE_SECONDS)).isoformat()
 
 
 async def schedule_reply_cleanup(

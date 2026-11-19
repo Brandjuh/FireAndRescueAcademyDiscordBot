@@ -96,6 +96,16 @@ class BoardRequestService:
     def thread_id(self) -> int:
         raise NotImplementedError
 
+    #: Remove EVERY member post from the thread after the 12h grace period —
+    #: chatter and still-queued requests too, not just handled requests. The
+    #: bot's own posts (guide, queue overview) are never touched by this.
+    tidy_member_posts: bool = False
+    #: How often the full-thread walk re-checks for member posts the
+    #: per-poll scheduling missed (posts from before the feature, dropped
+    #: deletions).
+    TIDY_WALK_SECONDS = 24 * 60 * 60
+    TIDY_WALK_MAX_PAGES = 30
+
     #: First line marker of this service's how-to-request guide post. Leave
     #: ``None`` to disable guide maintenance for the service.
     guide_marker: str | None = None
@@ -275,6 +285,12 @@ class BoardRequestService:
 
             executed = await self._execute_ready()
             await self._ensure_guide()
+            try:
+                await self._after_poll()
+            except MissionChiefError as exc:
+                log.warning("%s: post-poll upkeep failed: %s", self.kind, exc)
+            except Exception:  # noqa: BLE001 — upkeep must not fail the poll
+                log.exception("%s: post-poll upkeep crashed", self.kind)
 
             await self.runs.finish(
                 run_id,
@@ -285,6 +301,72 @@ class BoardRequestService:
         except MissionChiefError as exc:
             await self.runs.finish(run_id, status="failed", message=str(exc))
             raise
+
+    async def _after_poll(self) -> None:
+        """Hook: extra board upkeep after the queue ran and the guide was
+        maintained (e.g. the building queue overview, the member-post
+        tidy-up walk). Errors are logged, never fail the poll."""
+        if self.tidy_member_posts:
+            await self._tidy_walk()
+
+    def _is_member_post(self, post: BoardPost, current_user_id: int | None) -> bool:
+        """A post by someone other than the bot. FAIL-SAFE: without knowing
+        our own user id we can't tell, so nothing counts as a member post."""
+        if current_user_id is None or post.author_mc_id is None:
+            return False
+        # Everything not written by THIS account goes — including posts
+        # by other accounts that happen to start with the [FRA] marker.
+        return post.author_mc_id != current_user_id
+
+    async def _schedule_member_post(self, post: BoardPost) -> None:
+        """Queue a member post for removal GRACE after we first saw it."""
+        if self.dry_run or not self.tidy_member_posts:
+            return
+        seen = await self.board_repo.first_seen_at(self.thread_id, post.post_id)
+        await self.deletions.schedule(
+            self.thread_id, post.post_id,
+            due_at=deletion_due_at(seen), reason=f"{self.kind} member post",
+        )
+
+    def _tidy_walk_key(self) -> str:
+        return f"board_tidy_walk:{self.kind}:{self.thread_id}"
+
+    async def _tidy_walk(self) -> int:
+        """Walk the whole thread (at most daily) and schedule every member
+        post for the 12h tidy-up. Catches posts from before the feature and
+        any whose scheduled deletion was given up on. Live-only. Returns the
+        number of posts scheduled."""
+        if self.dry_run or not self.tidy_member_posts:
+            return 0
+        now = guide_now()
+        raw = await self.state.get(self._tidy_walk_key())
+        try:
+            last = float(raw) if raw else 0.0
+        except (TypeError, ValueError):
+            last = 0.0
+        if now - last < self.TIDY_WALK_SECONDS:
+            return 0
+        newest = await self.board.fetch_latest_page(self.thread_id)
+        uid = newest.current_user_id
+        if uid is None:
+            return 0  # can't tell our own posts apart — touch nothing
+        pages = [newest]
+        first = max(1, newest.last_page - self.TIDY_WALK_MAX_PAGES + 1)
+        for number in range(first, newest.last_page):
+            pages.append(await self.board.fetch_page(self.thread_id, number))
+        scheduled = 0
+        for page in pages:
+            for post in page.posts:
+                if self._is_member_post(post, uid):
+                    await self._schedule_member_post(post)
+                    scheduled += 1
+        await self.state.set(self._tidy_walk_key(), repr(now))
+        if scheduled:
+            log.info(
+                "%s: tidy walk scheduled %d member post(s) on thread %s",
+                self.kind, scheduled, self.thread_id,
+            )
+        return scheduled
 
     async def _scan_board_posts(self) -> tuple[int, int]:
         """Fetch + record new board posts. Returns (detected, fresh_count)."""
@@ -331,6 +413,12 @@ class BoardRequestService:
                     self.kind,
                     request,
                 )
+                if self.tidy_member_posts and self._is_member_post(
+                    post, page.current_user_id
+                ):
+                    # Every member post leaves after the grace period —
+                    # chatter and queued requests alike.
+                    await self._schedule_member_post(post)
                 if request_id is not None:
                     detected += 1
                 elif post_was_new and not baseline and not is_own and not is_bot_reply:
