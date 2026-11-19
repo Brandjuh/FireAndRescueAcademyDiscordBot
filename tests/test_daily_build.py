@@ -180,10 +180,11 @@ async def db(tmp_path):
 def _svc(db, *, dry_run=True, funds=5_000_000, api_json="[]", alliance_json="[]",
          overpass_data=None, enabled=True, min_funds=2_000_000, seed=0,
          reverse_address=None):
-    from fra_bot.db.repos import RunsRepo, StateRepo
+    from fra_bot.db.repos import AutomationRepo, RunsRepo, StateRepo
     from fra_bot.services.buildings import BuildingsService
 
     svc = BuildingsService.__new__(BuildingsService)
+    svc.requests = AutomationRepo(db)
     svc.cfg = SimpleNamespace(
         automation=SimpleNamespace(dry_run=dry_run, reply_to_board=False),
         reports=SimpleNamespace(timezone="UTC"),

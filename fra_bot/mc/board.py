@@ -78,6 +78,13 @@ class BoardClient:
             page = parse_board_thread_page(html)
         return page
 
+    async def fetch_page(self, thread_id: int, page_number: int) -> BoardThreadPage:
+        """Fetch one specific page of a thread."""
+        html = await self._client.fetch_page(
+            f"/alliance_threads/{thread_id}?page={int(page_number)}"
+        )
+        return parse_board_thread_page(html)
+
     async def fetch_new_posts(
         self, thread_id: int, last_seen_post_id: int | None
     ) -> tuple[BoardThreadPage, list]:
