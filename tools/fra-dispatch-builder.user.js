@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FRA Dispatch Builder (private)
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.0.0
+// @version      1.1.0
 // @description  Private admin tool: one dispatch center in every US state ("Z. USA - <STATE> (<XX>)") and in every country of the world ("Z. <COUNTRY>"), skipping every place you already cover. New centers are disabled and get their own coverage area.
 // @match        https://www.missionchief.com/*
 // @match        https://missionchief.com/*
@@ -49,6 +49,15 @@
  * empty — a dispatch center costs 0 credits; the script refuses one that
  * costs more than "Max price"). Then the edit page: the two boxes above.
  *
+ * RULES FOR FRA AUTO-BUILD
+ * ------------------------
+ * "Rules → Auto-Build" writes one dispatch rule per covered country / US
+ * state into FRA Auto-Build ("[cc:cz] = #5792738 Z. Tsjechië",
+ * "[iso:us-mo] = #274343 Z. USA - KANSAS (KS) / MISSOURI (MO)"), so a new
+ * building anywhere is linked to the center for its country or state.
+ * Your own rules are kept above the generated block and still win.
+ * Needs Auto-Build 1.7.2+ (it adds the [cc:…]/[iso:…] codes).
+ *
  * SAFETY RAILS
  * ------------
  * - DRY RUN is on by default: it scans and reports exactly what it would
@@ -64,7 +73,7 @@
 
   if (window.top !== window.self) return;   // never inside the game's frames
 
-  const VERSION = "1.0.0";
+  const VERSION = "1.1.0";
   const BASE = /missionchief\.com$/i.test(window.location.hostname)
     ? window.location.origin
     : "https://www.missionchief.com";
@@ -653,9 +662,9 @@
     const centers = await dispatchCenters();
     const mutual = centers.filter((center) => MUTUAL_AID_RE.test(center.name));
     const own = centers.filter((center) => !MUTUAL_AID_RE.test(center.name));
-    const coveredBy = {};                  // target key -> [center names]
+    const coveredBy = {};                  // place key -> [{center, how}]
     const cover = (key, center, how) => {
-      (coveredBy[key] = coveredBy[key] || []).push(`${center.name} (${how})`);
+      (coveredBy[key] = coveredBy[key] || []).push({ center, how });
     };
     let unknown = 0;
     let asked = 0;
@@ -1146,9 +1155,106 @@
     for (const target of scanned.targets) {
       const by = scanned.coveredBy[target.key];
       lines.push(`${by ? "OK  " : "MISS"} ${target.key.padEnd(5)} ${target.name}` +
-        (by ? ` — ${by.join("; ")}` : ` — would be "${target.buildName}"`));
+        (by ? ` — ${by.map((entry) => `${entry.center.name} (${entry.how})`).join("; ")}`
+          : ` — would be "${target.buildName}"`));
     }
     return lines.join("\n");
+  }
+
+  // ------------------------------------------- rules for FRA Auto-Build
+  //
+  // Auto-Build links every new building to a dispatch center through its
+  // "Dispatch rules" ("pattern = center", first match wins). This writes
+  // one rule per country / US state you cover, keyed on the codes
+  // Auto-Build 1.7.2+ puts in front of every place it looks up —
+  // "[cc:cz]", "[iso:us-tx]" — so the browser's language ("Tsjechië",
+  // "Frankrijk") no longer matters, and pointing at the center by id
+  // ("#5792738 Z. Tsjechië") so two centers with similar names cannot mix.
+  // Your own rules stay where they are, above the generated block, and
+  // still win; the block itself is replaced on every press.
+
+  const AUTOBUILD_SETTINGS_KEY = "fra_autobuild_settings";
+  const RULES_BEGIN = "# --- FRA Dispatch Builder rules: generated, replaced on every press ---";
+  const RULES_END = "# --- end of FRA Dispatch Builder rules ---";
+
+  function bestCover(key, entries) {
+    // Same name as this tool would give it > a center whose name lists the
+    // state code "(MO)" > one whose name names the state > a "Z." center
+    // standing there > anything standing there.
+    const code = key.startsWith("US-") ? key.slice(3) : "";
+    const rank = (entry) => {
+      const name = normalize(entry.center.name);
+      if (entry.how === "same name") return 0;
+      if (code && new RegExp(`\\([^)]*\\b${code}\\b[^)]*\\)`).test(name)) return 1;
+      if (entry.how === "name") return 2;
+      if (/^Z\./.test(name)) return 3;
+      return 4;
+    };
+    return entries.slice().sort((a, b) => rank(a) - rank(b))[0].center;
+  }
+
+  function placeName(key) {
+    if (key.startsWith("US-")) {
+      const entry = STATES.find((item) => item[0] === key.slice(3));
+      return entry ? `${entry[1]}, USA` : key;
+    }
+    const entry = COUNTRIES.find((item) => item[0] === key);
+    return entry ? entry[1] : key;
+  }
+
+  function generatedRules() {
+    const scanned = state.scan;
+    const lines = [];
+    const keys = Object.keys(scanned.coveredBy).sort((a, b) => {
+      const usA = a.startsWith("US-");
+      const usB = b.startsWith("US-");
+      return usA === usB ? placeName(a).localeCompare(placeName(b)) : (usA ? -1 : 1);
+    });
+    for (const key of keys) {
+      const center = bestCover(key, scanned.coveredBy[key]);
+      const pattern = key.startsWith("US-") ? `[iso:${key.toLowerCase()}]` : `[cc:${key.toLowerCase()}]`;
+      lines.push(`${pattern} = #${center.id} ${center.name}`);
+    }
+    return lines;
+  }
+
+  function mergeRules(existing, generated) {
+    // Keep everything outside the generated block (your own rules first).
+    const text = String(existing || "");
+    const start = text.indexOf(RULES_BEGIN);
+    const end = text.indexOf(RULES_END);
+    let own = text;
+    if (start >= 0 && end > start) {
+      own = text.slice(0, start) + text.slice(end + RULES_END.length);
+    }
+    own = own.replace(/\n{3,}/g, "\n\n").trim();
+    const block = [RULES_BEGIN,
+      `# ${new Date().toISOString().slice(0, 10)} · ${generated.length} rules · ` +
+        "pattern = #center-id center name",
+      ...generated, RULES_END].join("\n");
+    return own ? `${own}\n\n${block}` : block;
+  }
+
+  async function writeAutobuildRules() {
+    if (!state.scan) await scan(false);
+    const generated = generatedRules();
+    if (!generated.length) {
+      log("no covered country or state yet — nothing to write", "error");
+      return;
+    }
+    const stored = readJson(AUTOBUILD_SETTINGS_KEY, {});
+    const merged = mergeRules(stored.dispatchRules, generated);
+    // Same page: Auto-Build hears this and updates its panel and memory.
+    // Other tabs: they hear the storage change. Not loaded at all: it
+    // reads the setting on its next start.
+    stored.dispatchRules = merged;
+    writeJson(AUTOBUILD_SETTINGS_KEY, stored);
+    window.dispatchEvent(new CustomEvent("fra-autobuild-rules", { detail: { text: merged } }));
+    const own = merged.split(RULES_BEGIN)[0].split("\n")
+      .filter((line) => line.trim() && !line.trim().startsWith("#")).length;
+    log(`📖 ${generated.length} dispatch rules written to FRA Auto-Build` +
+        (own ? ` (your ${own} own rule(s) kept above them, they still win)` : "") +
+        " — needs Auto-Build 1.7.2 or newer", "ok");
   }
 
   function buildPanel() {
@@ -1193,6 +1299,9 @@
         window.prompt("Copy this:", text.slice(0, 6000));
       }
     });
+    const rulesButton = busyButton("Rules → Auto-Build", writeAutobuildRules);
+    rulesButton.title = "Write one dispatch rule per covered country / US state into " +
+      "FRA Auto-Build, so every new building there is linked to the right center";
     const resetButton = el("button", { text: "Forget skips" });
     resetButton.addEventListener("click", () => {
       skipped = {};
@@ -1200,7 +1309,7 @@
       log("skip list cleared", "ok");
     });
     body.appendChild(el("div", { class: "buttons" },
-      [startButton, scanButton, oneButton, optionsButton, copyButton, resetButton]));
+      [startButton, scanButton, oneButton, optionsButton, rulesButton, copyButton, resetButton]));
     statusBox = el("div", { class: "status" });
     body.appendChild(statusBox);
     scanBox = el("div", { class: "scan" });

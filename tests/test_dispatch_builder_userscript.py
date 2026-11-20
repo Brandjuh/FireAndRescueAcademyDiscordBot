@@ -74,3 +74,20 @@ def test_place_lists(source):
     assert "US" not in {c[0] for c in countries}          # the US goes per state
     for code, name, lat, lng, _ in countries:
         assert -90 <= float(lat) <= 90 and -180 <= float(lng) <= 180, (code, name)
+
+
+def test_rules_for_auto_build_are_keyed_on_codes_and_ids(source):
+    # One rule per covered place, language-proof and unambiguous:
+    #   [cc:cz] = #5792738 Z. Tsjechië      [iso:us-mo] = #274343 Z. USA - ...
+    assert "`[iso:${key.toLowerCase()}]`" in source
+    assert "`[cc:${key.toLowerCase()}]`" in source
+    assert "`${pattern} = #${center.id} ${center.name}`" in source
+    # The user's own rules stay above the generated block (and still win),
+    # and the block is replaced, never stacked.
+    assert "RULES_BEGIN" in source and "RULES_END" in source
+    merge = source.split("function mergeRules(")[1].split("\n  }")[0]
+    assert "text.slice(0, start) + text.slice(end + RULES_END.length)" in merge
+    assert r"`${own}\n\n${block}`" in merge
+    # Delivered to Auto-Build on the same page and through its settings key.
+    assert '"fra-autobuild-rules"' in source
+    assert 'const AUTOBUILD_SETTINGS_KEY = "fra_autobuild_settings";' in source

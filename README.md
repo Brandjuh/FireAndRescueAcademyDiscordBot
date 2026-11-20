@@ -334,6 +334,13 @@ other country one named `Z. BRAZIL` (both templates are settings).
   page shows both ticked.
 * **Dry run is the default**, 25 per run, one every 20 s. Territories
   (Bermuda, Greenland, …) are off unless ticked.
+* **Rules → Auto-Build** writes one dispatch rule per covered country and
+  US state into FRA Auto-Build: `[cc:cz] = #5792738 Z. Tsjechië`,
+  `[iso:us-mo] = #274343 Z. USA - KANSAS (KS) / MISSOURI (MO)`. The codes
+  do not depend on the browser's language, and `#id` points at exactly one
+  center. Your own rules are kept above the generated block and still win;
+  the block is replaced on every press. Auto-Build 1.7.2+ reads these (and
+  skips a rule whose center no longer exists instead of giving up).
 * The place list is embedded: 50 state capitals and the capitals of the
   [mledoze/countries](https://github.com/mledoze/countries) list, geocoded
   with Nominatim (Nov 2026). `tests/test_dispatch_builder_userscript.py`

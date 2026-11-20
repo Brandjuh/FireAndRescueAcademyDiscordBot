@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FRA Auto-Build (private)
 // @namespace    https://github.com/Brandjuh/FireAndRescueAcademyDiscordBot
-// @version      1.7.1
+// @version      1.7.2
 // @description  Private admin tool: bulk-build YOUR OWN MissionChief buildings. Pick a type, pick a place (fixed area and/or random worldwide), flip the toggle. Every new building is linked to the nearest dispatch center, fully expanded (all extensions/storage bought with credits) and fire stations start with a Quint.
 // @match        https://www.missionchief.com/*
 // @match        https://missionchief.com/*
@@ -88,7 +88,7 @@
 
   if (window.top !== window.self) return;   // never inside our own frames
 
-  const VERSION = "1.7.1";
+  const VERSION = "1.7.2";
   // Both www.missionchief.com and missionchief.com serve the game, and a
   // frame or fetch across those two is CROSS-ORIGIN: everything here would
   // silently stop working. So the script always stays on the host the
@@ -554,6 +554,10 @@
         state: a.state || a.region || "",
         county: a.county || a.state_district || "",
         city: a.city || a.town || a.village || a.municipality || a.suburb || "",
+        // Language-proof keys for the dispatch rules: Nominatim answers in
+        // the browser's language ("Nederland", "Frankrijk"), codes never change.
+        cc: String(a.country_code || "").toLowerCase(),               // "nl"
+        iso: String(a["ISO3166-2-lvl4"] || "").toLowerCase(),          // "us-tx"
       };
     } catch (error) {
       return null;
@@ -832,10 +836,23 @@
       const split = trimmed.indexOf("=");
       if (split < 1) continue;
       const pattern = normalize(trimmed.slice(0, split));
-      const name = normalize(trimmed.slice(split + 1));
-      if (pattern && name) rules.push({ pattern, name, raw: trimmed });
+      const target = trimmed.slice(split + 1).trim();
+      // "#5792738 Z. Tsjechië" points at one center by id (the name after
+      // it is only there for you to read); anything else is a name.
+      const byId = target.match(/^#(\d+)\b/);
+      const name = normalize(byId ? target.slice(byId[0].length).replace(/^[\s(]+|[)\s]+$/g, "") : target);
+      if (pattern && (name || byId)) {
+        rules.push({ pattern, name, id: byId ? byId[1] : null, raw: trimmed });
+      }
     }
     return rules;
+  }
+
+  function ruleCenter(rule, centers) {
+    if (rule.id) return centers.find((candidate) => candidate.id === rule.id) || null;
+    return centers.find((candidate) => normalize(candidate.name) === rule.name)
+      || centers.find((candidate) => normalize(candidate.name).includes(rule.name))
+      || null;
   }
 
   async function dispatchCenters() {
@@ -867,21 +884,24 @@
       ["city", place.city], ["county", place.county],
       ["region", place.state], ["country", place.country],
     ].filter((entry) => entry[1]);
+    // "[cc:nl]" and "[iso:us-tx]" go in front, so a rule can name the
+    // country or US state by code (the Dispatch Builder writes them that way).
     const haystack = normalize(
-      [place.city, place.county, place.state, place.country, place.address]
+      [place.cc ? `[cc:${place.cc}]` : "", place.iso ? `[iso:${place.iso}]` : "",
+       place.city, place.county, place.state, place.country, place.address]
         .filter(Boolean).join(" | ")
     );
+    // A matching rule whose center does not exist (a typo, a deleted center)
+    // no longer blocks the build: the next matching rule gets its turn.
+    let broken = null;
     for (const rule of rules) {
       if (!haystack.includes(rule.pattern)) continue;
-      const center = centers.find((candidate) =>
-        normalize(candidate.name).includes(rule.name));
+      const center = ruleCenter(rule, centers);
       if (center) return { ok: true, center, why: `rule "${rule.raw}"` };
-      return {
-        ok: false,
-        reason: `rule "${rule.raw}" matches, but you have no dispatch center ` +
-                `whose name contains "${rule.name}"`,
-      };
+      broken = broken || `rule "${rule.raw}" matches, but you have no dispatch center ` +
+        (rule.id ? `#${rule.id} any more` : `whose name contains "${rule.name}"`);
     }
+    if (broken) return { ok: false, reason: broken, country: place.country || "(unknown country)" };
     for (const [what, value] of fields) {           // city first, country last
       const needle = normalize(value);
       if (!needle) continue;
@@ -1934,6 +1954,35 @@
 
   let panel = null;
   let menuItem = null;
+  let rulesBox = null;
+
+  function adoptDispatchRules(text, from) {
+    // The FRA Dispatch Builder writes the rules for you ("[cc:nl] = #id …").
+    // It tells this script directly on the same page, and through the
+    // settings key for other tabs — either way the textarea and the
+    // in-memory settings follow, so a later save cannot write old rules back.
+    const value = String(text || "");
+    if (value === (settings.dispatchRules || "")) return;
+    settings.dispatchRules = value;
+    saveSettings();
+    if (rulesBox) rulesBox.value = value;
+    log(`📖 ${parseDispatchRules(value).length} dispatch rule(s) loaded from ${from}`, "ok");
+  }
+
+  window.addEventListener("fra-autobuild-rules", (event) => {
+    adoptDispatchRules(event.detail && event.detail.text, "the Dispatch Builder");
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key !== SETTINGS_KEY || !event.newValue) return;
+    try {
+      const stored = JSON.parse(event.newValue);
+      if (stored && typeof stored.dispatchRules === "string") {
+        adoptDispatchRules(stored.dispatchRules, "another tab");
+      }
+    } catch (error) {
+      /* not ours to fix */
+    }
+  });
   let needsBox = null;
   let startButtonPainter = null;
   let typeBox = null;
@@ -2139,6 +2188,7 @@
       placeholder: "Dispatch rules, one per line:\nNetherlands = Rotterdam Dispatch\nTexas = Houston Dispatch",
     });
     rulesInput.value = settings.dispatchRules || "";
+    rulesBox = rulesInput;
     rulesInput.addEventListener("change", () => {
       settings.dispatchRules = rulesInput.value;
       saveSettings();
