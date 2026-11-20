@@ -206,3 +206,18 @@ def test_info_boxes_on_the_building_page_are_not_errors(source):
     edit = source.split("async function editBuilding(")[1].split("\n  function ")[0]
     assert "formErrors(sent.doc)" in edit
     assert "flashText(sent.doc)" not in edit
+
+
+def test_dispatch_rules_can_use_codes_and_center_ids(source):
+    # Nominatim answers in the browser's language ("Tsjechië"); the codes
+    # in front of the haystack do not change, and "#id" picks one center.
+    assert "[cc:${place.cc}]" in source and "[iso:${place.iso}]" in source
+    assert 'a["ISO3166-2-lvl4"]' in source
+    assert r"target.match(/^#(\d+)\b/)" in source
+    assert "function ruleCenter(" in source
+    # A rule whose center is gone no longer blocks the next matching rule.
+    match = source.split("function matchDispatch(")[1].split("\n  function ")[0]
+    assert "broken = broken ||" in match
+    # Rules written by the Dispatch Builder reach the panel and memory.
+    assert 'window.addEventListener("fra-autobuild-rules"' in source
+    assert "function adoptDispatchRules(" in source

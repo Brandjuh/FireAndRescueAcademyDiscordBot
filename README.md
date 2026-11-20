@@ -311,6 +311,41 @@ missionchief.com in your own browser.
   from CI. `tests/test_autobuild_userscript.py` guards only what is
   checkable statically (coins, defaults, the world pool, no secrets).
 
+## Dispatch builder (the second private userscript)
+
+**`tools/fra-dispatch-builder.user.js`** (FRA → 🛰️ Dispatch Builder) gives
+every US state one dispatch center named `Z. USA - TEXAS (TX)` and every
+other country one named `Z. BRAZIL` (both templates are settings).
+
+* **Scan first**: a state or country counts as covered when one of your
+  dispatch centers *stands* there (asked once per center from
+  OpenStreetMap's Nominatim, then cached) or its *name* claims the state
+  (`KANSAS (KS) / MISSOURI (MO)` covers both). Mutual-aid centers
+  (`[MUTAL AID] …`) are ignored. **Copy report** lists every target with
+  the center that covers it.
+* **Build**: at the capital (state capital for US states), on the first
+  spot near it where the game's `/reverse_address` knows an address; the
+  build form is posted the way the game posts it, credits only (a dispatch
+  center is free — anything above **Max price** stops the run). The exact
+  name is checked right before every build, so nothing is built twice.
+* **Every new center** gets **Disable this dispatch center** and **Create
+  your own coverage area** ticked on its edit page (`building[active]`,
+  `building[generate_own_missions]`), and the save only counts once the
+  page shows both ticked.
+* **Dry run is the default**, 25 per run, one every 20 s. Territories
+  (Bermuda, Greenland, …) are off unless ticked.
+* **Rules → Auto-Build** writes one dispatch rule per covered country and
+  US state into FRA Auto-Build: `[cc:cz] = #5792738 Z. Tsjechië`,
+  `[iso:us-mo] = #274343 Z. USA - KANSAS (KS) / MISSOURI (MO)`. The codes
+  do not depend on the browser's language, and `#id` points at exactly one
+  center. Your own rules are kept above the generated block and still win;
+  the block is replaced on every press. Auto-Build 1.7.2+ reads these (and
+  skips a rule whose center no longer exists instead of giving up).
+* The place list is embedded: 50 state capitals and the capitals of the
+  [mledoze/countries](https://github.com/mledoze/countries) list, geocoded
+  with Nominatim (Nov 2026). `tests/test_dispatch_builder_userscript.py`
+  guards the defaults, the coin/complex brakes and the list.
+
 ## Member commands under `!fra`
 
 Everything under `!fra` is admin-only, **except** the commands in
