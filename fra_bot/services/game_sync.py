@@ -15,7 +15,11 @@ from dataclasses import dataclass
 
 #: Payload marker + version the userscript sends.
 PAYLOAD_MARKER = "fra_profile_sync"
-MAX_COORDS = 3000
+#: Building coordinates kept per member. Big accounts run into the
+#: thousands (DutchFireFighter passed 3000 in Nov 2026); past this the
+#: list is cut off rather than the whole sync rejected — counts and
+#: per-type totals stay exact, only the hotspot map loses some points.
+MAX_COORDS = 20000
 MAX_TYPES = 200
 
 #: Building type ids we can name (same ids the bot uses elsewhere).
@@ -96,10 +100,12 @@ def parse_sync_payload(text: str) -> SyncPayload:
     )
 
     coords_raw = (data.get("buildings") or {}).get("coords") or []
-    if not isinstance(coords_raw, list) or len(coords_raw) > MAX_COORDS:
-        raise SyncPayloadError("buildings.coords invalid or too large")
+    if not isinstance(coords_raw, list):
+        raise SyncPayloadError("buildings.coords invalid")
     coords: list[tuple[float, float]] = []
     for pair in coords_raw:
+        if len(coords) >= MAX_COORDS:
+            break
         try:
             lat, lng = float(pair[0]), float(pair[1])
         except (TypeError, ValueError, IndexError):
