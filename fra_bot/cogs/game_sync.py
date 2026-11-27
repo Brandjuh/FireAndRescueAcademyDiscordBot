@@ -35,7 +35,7 @@ from ..services.game_sync import (
 log = logging.getLogger(__name__)
 
 #: Don't read absurdly large attachments (a real payload is a few KB).
-MAX_ATTACHMENT_BYTES = 512 * 1024
+MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
 
 #: State cache for the LSSM vehicle id → name map (!fleet, !infographic).
 VEHICLE_NAMES_KEY = "game_sync:vehicle_names"

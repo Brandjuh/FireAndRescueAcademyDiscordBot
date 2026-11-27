@@ -75,6 +75,22 @@ async def test_parse_drops_bad_coords_keeps_good():
     assert payload.coords == [(40.7, -74.0), (51.9, 4.4)]
 
 
+async def test_parse_accepts_big_accounts():
+    # A 3000+ building account used to be rejected outright (⚠️).
+    coords = [[40.0 + i / 10000, -74.0] for i in range(5000)]
+    payload = parse_sync_payload(_payload(coords=coords))
+    assert len(payload.coords) == 5000
+
+
+async def test_parse_caps_coords_instead_of_rejecting(monkeypatch):
+    import fra_bot.services.game_sync as gs
+    monkeypatch.setattr(gs, "MAX_COORDS", 10)
+    coords = [[40.0, -74.0]] * 25
+    payload = parse_sync_payload(_payload(coords=coords))
+    assert len(payload.coords) == 10
+    assert payload.building_count == 3  # counts untouched by the cap
+
+
 async def test_summarize_names_known_types():
     text = summarize_buildings({"0": 30, "2": 4, "77": 2})
     assert "30× fire station" in text and "4× hospital" in text
